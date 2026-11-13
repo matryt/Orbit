@@ -10,6 +10,7 @@ pub mod session;
 pub mod sftp;
 
 use session::SessionManager;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
