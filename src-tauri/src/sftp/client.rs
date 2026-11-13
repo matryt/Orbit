@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use russh::keys::PublicKeyOrCertificate;
 use russh::client::{self, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::load_secret_key;
+use russh::keys::PublicKeyOrCertificate;
 use russh_sftp::client::SftpSession;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,15 +36,47 @@ pub struct SftpProvider {
 
 impl SftpProvider {
     pub async fn connect(config: SftpConnectConfig) -> Result<Self, AppError> {
+        let (provider, _logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        Ok(provider)
+    }
+
+    pub async fn connect_with_logs(
+        config: SftpConnectConfig,
+    ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
+        let mut logs = Vec::new();
+        let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
+
+        logs.push(format!("[{}] Démarrage de la séquence de connexion SFTP...", now()));
+        logs.push(format!("[{}] Cible : {}:{}", now(), config.host, config.port));
+        logs.push(format!("[{}] Utilisateur SSH : '{}'", now(), config.username));
+
         let ssh_config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(30)),
             ..Default::default()
         });
 
         let addr = format!("{}:{}", config.host, config.port);
-        let mut handle = client::connect(ssh_config, addr, SshHandler)
-            .await
-            .map_err(|e| AppError::Ssh(format!("Failed to connect to host: {e}")))?;
+        logs.push(format!("[{}] 1/4 Connexion TCP socket vers {}...", now(), addr));
+
+        let mut handle = match client::connect(ssh_config, &addr, SshHandler).await {
+            Ok(h) => {
+                logs.push(format!("[{}] Connexion TCP socket établie avec succès.", now()));
+                h
+            }
+            Err(e) => {
+                let err_msg = format!("Échec de connexion réseau vers {addr}: {e}");
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                logs.push(format!(
+                    "[{}] ℹ️ Conseil: Vérifiez l'adresse IP, le port {} et assurez-vous que le serveur SSH est en écoute.",
+                    now(),
+                    config.port
+                ));
+                return Err((AppError::Ssh(err_msg), logs));
+            }
+        };
+
+        logs.push(format!("[{}] 2/4 Négociation KEX et algorithmes SSH validés.", now()));
+        logs.push(format!("[{}] 3/4 Début de l'authentification...", now()));
 
         // Authentication: Password or SSH Key
         if let Some(key_path) = config.key_path {
@@ -52,48 +84,82 @@ impl SftpProvider {
                 if let Some(home) = dirs::home_dir() {
                     home.join(key_path.trim_start_matches("~/"))
                 } else {
-                    PathBuf::from(key_path)
+                    PathBuf::from(&key_path)
                 }
             } else {
-                PathBuf::from(key_path)
+                PathBuf::from(&key_path)
             };
 
-            let secret_key = load_secret_key(&expanded_path, config.passphrase.as_deref())
-                .map_err(|e| AppError::Auth(format!("Could not load SSH key {}: {e}", expanded_path.display())))?;
+            logs.push(format!("[{}] Méthode : Clé privée SSH ({})", now(), expanded_path.display()));
+
+            let secret_key = match load_secret_key(&expanded_path, config.passphrase.as_deref()) {
+                Ok(k) => {
+                    logs.push(format!("[{}] Clé privée chargée et déchiffrée avec succès.", now()));
+                    k
+                }
+                Err(e) => {
+                    let err_msg = format!("Impossible de charger la clé {}: {e}", expanded_path.display());
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    logs.push(format!(
+                        "[{}] ℹ️ Conseil: Vérifiez le chemin ou saisissez la passphrase si la clé est chiffrée.",
+                        now()
+                    ));
+                    return Err((AppError::Auth(err_msg), logs));
+                }
+            };
+
             let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(secret_key), None);
 
-            let auth_res = handle
-                .authenticate_publickey(&config.username, key_with_alg)
-                .await
-                .map_err(|e| AppError::Auth(format!("SSH key auth failed: {e}")))?;
-
-            if !auth_res.success() {
-                return Err(AppError::Auth("SSH key authentication rejected by server".into()));
+            match handle.authenticate_publickey(&config.username, key_with_alg).await {
+                Ok(res) if res.success() => {
+                    logs.push(format!("[{}] Authentification par clé SSH acceptée par le serveur !", now()));
+                }
+                Ok(_) => {
+                    let err_msg = "Le serveur SSH a rejeté la clé publique (SSH_MSG_USERAUTH_FAILURE)".to_string();
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    logs.push(format!(
+                        "[{}] ℹ️ Conseil: Vérifiez que votre clé publique (.pub) est ajoutée dans ~/.ssh/authorized_keys sur le serveur pour l'utilisateur '{}'.",
+                        now(),
+                        config.username
+                    ));
+                    return Err((AppError::Auth(err_msg), logs));
+                }
+                Err(e) => {
+                    let err_msg = format!("Erreur lors de l'authentification par clé: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Auth(err_msg), logs));
+                }
             }
         } else if let Some(password) = config.password {
-            let auth_res = handle
-                .authenticate_password(&config.username, password)
-                .await
-                .map_err(|e| AppError::Auth(format!("Password auth failed: {e}")))?;
-
-            if !auth_res.success() {
-                return Err(AppError::Auth("Invalid username or password".into()));
+            logs.push(format!("[{}] Méthode : Mot de passe", now()));
+            match handle.authenticate_password(&config.username, password).await {
+                Ok(res) if res.success() => {
+                    logs.push(format!("[{}] Authentification par mot de passe acceptée !", now()));
+                }
+                Ok(_) => {
+                    let err_msg = "Nom d'utilisateur ou mot de passe incorrect".to_string();
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Auth(err_msg), logs));
+                }
+                Err(e) => {
+                    let err_msg = format!("Erreur lors de l'authentification: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Auth(err_msg), logs));
+                }
             }
         } else {
-            // Try default SSH keys (~/.ssh/id_ed25519, ~/.ssh/id_rsa)
+            logs.push(format!("[{}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...", now()));
             let mut authenticated = false;
             if let Some(home) = dirs::home_dir() {
-                let default_keys = [
-                    home.join(".ssh/id_ed25519"),
-                    home.join(".ssh/id_rsa"),
-                ];
-
+                let default_keys = [home.join(".ssh/id_ed25519"), home.join(".ssh/id_rsa")];
                 for key_p in default_keys {
                     if key_p.exists() {
+                        logs.push(format!("[{}] Tentative avec {}", now(), key_p.display()));
                         if let Ok(key) = load_secret_key(&key_p, config.passphrase.as_deref()) {
                             let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
                             if let Ok(res) = handle.authenticate_publickey(&config.username, key_with_alg).await {
                                 if res.success() {
+                                    logs.push(format!("[{}] Authentification réussie avec {}", now(), key_p.display()));
                                     authenticated = true;
                                     break;
                                 }
@@ -104,29 +170,56 @@ impl SftpProvider {
             }
 
             if !authenticated {
-                return Err(AppError::Auth("No password or valid SSH key provided".into()));
+                let err_msg = "Aucun mot de passe ni clé SSH valide fournie".to_string();
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                return Err((AppError::Auth(err_msg), logs));
             }
         }
 
-        // Open SFTP channel subsystem
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to open SSH channel: {e}")))?;
+        logs.push(format!("[{}] 4/4 Ouverture du canal SSH et du sous-système SFTP...", now()));
+        let channel = match handle.channel_open_session().await {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("Impossible d'ouvrir le canal SSH: {e}");
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                return Err((AppError::Sftp(err_msg), logs));
+            }
+        };
 
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to request SFTP subsystem: {e}")))?;
+        match channel.request_subsystem(true, "sftp").await {
+            Ok(_) => {
+                logs.push(format!("[{}] Sous-système SFTP accepté par le serveur.", now()));
+            }
+            Err(e) => {
+                let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                logs.push(format!(
+                    "[{}] ℹ️ Conseil: Assurez-vous que la ligne 'Subsystem sftp' est activée dans /etc/ssh/sshd_config sur le serveur distant.",
+                    now()
+                ));
+                return Err((AppError::Sftp(err_msg), logs));
+            }
+        }
 
-        let sftp_session = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to initialize SFTP session: {e}")))?;
+        let sftp_session = match SftpSession::new(channel.into_stream()).await {
+            Ok(s) => {
+                logs.push(format!("[{}] ✅ Session SFTP initialisée avec succès ! Prêt pour la navigation et les transferts.", now()));
+                s
+            }
+            Err(e) => {
+                let err_msg = format!("Échec d'initialisation du protocole SFTP: {e}");
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                return Err((AppError::Sftp(err_msg), logs));
+            }
+        };
 
-        Ok(Self {
-            session: sftp_session,
-            _handle: handle,
-        })
+        Ok((
+            Self {
+                session: sftp_session,
+                _handle: handle,
+            },
+            logs,
+        ))
     }
 }
 

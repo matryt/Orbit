@@ -39,3 +39,9 @@ export interface TransferItem {
   speedBps: number;
   status: 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
 }
+
+export interface ConnectionTestResult {
+  success: boolean;
+  message: string;
+  logs: string[];
+}

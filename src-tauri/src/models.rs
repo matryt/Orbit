@@ -31,3 +31,9 @@ pub struct SftpConnectConfig {
     pub passphrase: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionTestResult {
+    pub success: bool,
+    pub message: String,
+    pub logs: Vec<String>,
+}

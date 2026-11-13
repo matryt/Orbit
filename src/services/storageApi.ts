@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { FileEntry } from '../types';
+import { ConnectionTestResult, FileEntry } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
 export interface SftpConnectParams {
@@ -46,16 +46,43 @@ export function formatConnectionError(err: any): string {
 }
 
 export const storageApi = {
-  async testSftp(params: SftpConnectParams): Promise<string> {
+  async testSftp(params: SftpConnectParams): Promise<ConnectionTestResult> {
     if (!isTauri()) {
       await new Promise((r) => setTimeout(r, 600));
-      if (!params.host) throw new Error('Veuillez renseigner un hôte.');
-      return 'Test réussi (mode simulé) : Serveur accessible et authentification validée.';
+      if (!params.host) {
+        return {
+          success: false,
+          message: 'Veuillez renseigner une adresse d\'hôte valide.',
+          logs: [
+            `[${new Date().toLocaleTimeString()}] Validation des paramètres...`,
+            `[${new Date().toLocaleTimeString()}] ❌ Erreur : Hôte manquant`,
+          ],
+        };
+      }
+      return {
+        success: true,
+        message: 'Test réussi (mode simulé) : Serveur accessible et authentification validée.',
+        logs: [
+          `[${new Date().toLocaleTimeString()}] Démarrage de la séquence de test...`,
+          `[${new Date().toLocaleTimeString()}] Connexion socket TCP vers ${params.host}:${params.port}...`,
+          `[${new Date().toLocaleTimeString()}] Socket connecté. Négociation SSH KEX réussie.`,
+          `[${new Date().toLocaleTimeString()}] Authentification utilisateur '${params.username}' validée.`,
+          `[${new Date().toLocaleTimeString()}] ✅ Sous-système SFTP ouvert avec succès.`,
+        ],
+      };
     }
     try {
-      return await invoke<string>('test_sftp_connection', { config: params });
+      const res = await invoke<ConnectionTestResult>('test_sftp_connection', { config: params });
+      return {
+        ...res,
+        message: res.success ? res.message : formatConnectionError(res.message),
+      };
     } catch (err: any) {
-      throw new Error(formatConnectionError(err));
+      return {
+        success: false,
+        message: formatConnectionError(err),
+        logs: [`[Erreur Système] ${err?.message || err}`],
+      };
     }
   },
 

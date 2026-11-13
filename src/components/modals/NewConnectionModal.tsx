@@ -17,6 +17,10 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  Terminal,
+  Copy,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 export const NewConnectionModal: React.FC = () => {
@@ -42,11 +46,14 @@ export const NewConnectionModal: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Test state
+  // Test state & logs
   const [isTesting, setIsTesting] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const [copiedLogs, setCopiedLogs] = useState(false);
   const [testResult, setTestResult] = useState<{
     type: 'success' | 'error';
     message: string;
+    logs?: string[];
   } | null>(null);
 
   if (!isNewConnectionModalOpen) return null;
@@ -69,28 +76,42 @@ export const NewConnectionModal: React.FC = () => {
 
   const handleTestConnection = async () => {
     setTestResult(null);
+    setShowLogs(false);
 
     if (type === 's3') {
       setTestResult({
         type: 'success',
-        message: 'Configuration S3 syntaxiquement correcte (test direct avec AWS SDK en cours d\'intégration à l\'étape 2).',
+        message: 'Configuration S3 prête (le test direct via AWS SDK sera activé à l\'étape 2).',
+        logs: [
+          `[${new Date().toLocaleTimeString()}] Validation des identifiants S3`,
+          `[${new Date().toLocaleTimeString()}] Bucket : ${bucket || '(racine)'}`,
+          `[${new Date().toLocaleTimeString()}] Endpoint : ${endpoint || 'AWS Standard (S3)'}`,
+        ],
       });
       return;
     }
 
     if (!host.trim()) {
-      setTestResult({ type: 'error', message: 'Veuillez saisir une adresse d\'hôte valide.' });
+      setTestResult({
+        type: 'error',
+        message: 'Veuillez saisir une adresse d\'hôte valide.',
+        logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Hôte est obligatoire.`],
+      });
       return;
     }
     if (!username.trim()) {
-      setTestResult({ type: 'error', message: 'Veuillez renseigner un nom d\'utilisateur SSH.' });
+      setTestResult({
+        type: 'error',
+        message: 'Veuillez renseigner un nom d\'utilisateur SSH.',
+        logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Nom d'utilisateur est obligatoire.`],
+      });
       return;
     }
 
     setIsTesting(true);
 
     try {
-      const msg = await storageApi.testSftp({
+      const res = await storageApi.testSftp({
         profile_id: `test-${Date.now()}`,
         host: host.trim(),
         port: Number(port) || 22,
@@ -101,17 +122,32 @@ export const NewConnectionModal: React.FC = () => {
       });
 
       setTestResult({
-        type: 'success',
-        message: msg || 'Serveur SFTP accessible et authentification validée avec succès !',
+        type: res.success ? 'success' : 'error',
+        message: res.message,
+        logs: res.logs,
       });
+
+      // Auto-expand logs if error occurred to help the user diagnose immediately
+      if (!res.success) {
+        setShowLogs(true);
+      }
     } catch (err: any) {
       setTestResult({
         type: 'error',
         message: err.message || 'Impossible d\'établir la connexion au serveur distant.',
+        logs: [`[Erreur inattendue] ${err?.message || err}`],
       });
+      setShowLogs(true);
     } finally {
       setIsTesting(false);
     }
+  };
+
+  const handleCopyLogs = () => {
+    if (!testResult?.logs) return;
+    navigator.clipboard.writeText(testResult.logs.join('\n'));
+    setCopiedLogs(true);
+    setTimeout(() => setCopiedLogs(false), 2000);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -157,10 +193,10 @@ export const NewConnectionModal: React.FC = () => {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
       >
         {/* Header */}
-        <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none">
+        <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none flex-shrink-0">
           <h2 className="text-sm font-semibold text-white">Nouvelle Connexion</h2>
           <button
             onClick={() => setNewConnectionModalOpen(false)}
@@ -170,8 +206,8 @@ export const NewConnectionModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+        {/* Form Body with scroll if needed */}
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
           {/* Protocol Switcher */}
           <div className="grid grid-cols-2 gap-2 p-1 bg-surface-muted rounded-lg border border-border-subtle">
             <button
@@ -504,31 +540,97 @@ export const NewConnectionModal: React.FC = () => {
             </>
           )}
 
-          {/* Test connection result banner */}
+          {/* Test connection result & expandable log console */}
           {testResult && (
-            <div
-              className={`p-3 rounded-lg border text-xs flex items-start gap-2.5 animate-in fade-in ${
-                testResult.type === 'success'
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                  : 'bg-red-500/10 border-red-500/30 text-red-300'
-              }`}
-            >
-              {testResult.type === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-              ) : (
-                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-              )}
-              <div className="flex-1">
-                <div className="font-semibold mb-0.5">
-                  {testResult.type === 'success' ? 'Connexion réussie' : 'Échec de connexion'}
+            <div className="space-y-2 animate-in fade-in">
+              {/* Summary Banner */}
+              <div
+                className={`p-3 rounded-lg border text-xs flex items-start justify-between gap-2.5 ${
+                  testResult.type === 'success'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                    : 'bg-red-500/10 border-red-500/30 text-red-300'
+                }`}
+              >
+                <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                  {testResult.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold mb-0.5">
+                      {testResult.type === 'success' ? 'Connexion réussie' : 'Échec de connexion'}
+                    </div>
+                    <p className="text-[11px] leading-relaxed opacity-90 break-words">
+                      {testResult.message}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-[11px] leading-relaxed opacity-90">{testResult.message}</p>
+
+                {/* Toggle Logs Button */}
+                {testResult.logs && testResult.logs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowLogs(!showLogs)}
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-black/30 hover:bg-black/50 text-zinc-300 transition-colors flex-shrink-0 font-medium"
+                  >
+                    <Terminal className="w-3 h-3 text-sky-400" />
+                    <span>{showLogs ? 'Masquer logs' : 'Voir logs'}</span>
+                    {showLogs ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                )}
               </div>
+
+              {/* Expandable Technical Log Box */}
+              {showLogs && testResult.logs && (
+                <div className="p-3 bg-[#090a0f] border border-border-subtle rounded-lg space-y-2">
+                  <div className="flex items-center justify-between pb-1.5 border-b border-border-subtle text-[11px] text-zinc-400 font-mono">
+                    <span className="flex items-center gap-1.5 text-zinc-300 font-semibold">
+                      <Terminal className="w-3.5 h-3.5 text-sky-400" />
+                      Journal de négociation SSH / SFTP
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCopyLogs}
+                      className="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-white px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                      title="Copier les logs complets dans le presse-papiers"
+                    >
+                      {copiedLogs ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedLogs ? 'Copié !' : 'Copier logs'}</span>
+                    </button>
+                  </div>
+
+                  <div className="max-h-44 overflow-y-auto space-y-1 font-mono text-[11px] text-zinc-300 select-text leading-relaxed">
+                    {testResult.logs.map((line, idx) => {
+                      const isErr = line.includes('❌') || line.includes('Échec') || line.includes('Erreur');
+                      const isOk = line.includes('✅') || line.includes('acceptée') || line.includes('succès');
+                      const isTip = line.includes('ℹ️');
+
+                      return (
+                        <div
+                          key={idx}
+                          className={`truncate ${
+                            isErr
+                              ? 'text-red-400 font-medium'
+                              : isOk
+                              ? 'text-emerald-400 font-medium'
+                              : isTip
+                              ? 'text-amber-300/90'
+                              : 'text-zinc-400'
+                          }`}
+                        >
+                          {line}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* Action buttons */}
-          <div className="pt-3 flex items-center justify-between border-t border-border-subtle">
+          <div className="pt-3 flex items-center justify-between border-t border-border-subtle flex-shrink-0">
             <button
               type="button"
               disabled={isTesting}
