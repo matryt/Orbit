@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - os-name: macOS (Apple Silicon & Intel Universal)
+          - os-name: macOS (Universal Apple Silicon & Intel)
             os: macos-latest
             rust-target: universal-apple-darwin
             args: --target universal-apple-darwin
@@ -38,16 +38,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js 22 LTS
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           targets: ${{ matrix.platform.rust-target }}
 
@@ -60,28 +60,26 @@ jobs:
 
       # Rust Cache: Dramatically speeds up builds (from ~18min to ~3min)
       - name: Rust Cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@400e7407cfd7a091e5fbb6afec01ec146c432b7c # v2.7.7
         with:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: npm ci --ignore-scripts
+        run: npm ci
 
       # Build frontend and compile Tauri native bundles
       - name: Build and Package with Tauri
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@ea1f12403fd95c98ee2fff70a34d5a818ceeb112 # v0.5.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Apple Code Signing & Notarization (optional, active when secrets are defined)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Tauri Auto-Updater private signing key (optional)
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # NOTE: Pour activer la signature Apple officielle et la notarisation
+          # lorsque vous aurez un compte Apple Developer ($99/an), décommentez les lignes suivantes :
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Orbit v__VERSION__'

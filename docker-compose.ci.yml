@@ -12,3 +12,4 @@ services:
 volumes:
   cargo-cache:
   cargo-target:
+
