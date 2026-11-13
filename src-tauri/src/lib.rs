@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 pub mod commands;
 pub mod config_service;
 pub mod error;

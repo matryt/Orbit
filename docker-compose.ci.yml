@@ -1,0 +1,14 @@
+services:
+  ci:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Mount cache for cargo to speed up successive local runs
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-target:/app/src-tauri/target
+    command: sh -c "npm run build && cd src-tauri && cargo clippy -- -D warnings && cargo test"
+
+volumes:
+  cargo-cache:
+  cargo-target:

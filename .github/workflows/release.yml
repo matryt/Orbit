@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.platform.os-name }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os-name: macOS (Apple Silicon & Intel Universal)
+            os: macos-latest
+            rust-target: universal-apple-darwin
+            args: --target universal-apple-darwin
+          - os-name: Windows (x64)
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            args: ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust-target }}
+
+      # Add both macOS architectures if building universal binary
+      - name: Add macOS targets for universal build
+        if: matrix.platform.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      # Rust Cache: Dramatically speeds up builds (from ~18min to ~3min)
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      # Build frontend and compile Tauri native bundles
+      - name: Build and Package with Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple Code Signing & Notarization (optional, active when secrets are defined)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri Auto-Updater private signing key (optional)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Orbit v__VERSION__'
+          releaseBody: 'Voir les notes de version et les installeurs ci-dessous pour macOS (.dmg) et Windows (.exe / .msi).'
+          releaseDraft: ${{ inputs.draft || false }}
+          prerelease: false
+          args: ${{ matrix.platform.args }}
