@@ -45,7 +45,8 @@ export const NewConnectionModal: React.FC = () => {
           }),
     };
 
-    addProfile(newProfile);
+    const secret = type === 's3' ? secretKey.trim() : password.trim();
+    addProfile(newProfile, secret || undefined);
     setNewConnectionModalOpen(false);
   };
 

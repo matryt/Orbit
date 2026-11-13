@@ -1,3 +1,12 @@
+pub mod commands;
+pub mod error;
+pub mod keyring_service;
+pub mod models;
+pub mod provider;
+pub mod session;
+pub mod sftp;
+
+use session::SessionManager;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -5,6 +14,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
+        .manage(SessionManager::new())
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
 
@@ -22,6 +32,20 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::connect_sftp,
+            commands::disconnect,
+            commands::storage_list_dir,
+            commands::storage_create_dir,
+            commands::storage_delete,
+            commands::storage_rename,
+            commands::storage_read_preview,
+            commands::storage_upload_file,
+            commands::storage_download_file,
+            commands::save_secret,
+            commands::get_secret,
+            commands::delete_secret,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

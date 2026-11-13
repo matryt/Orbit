@@ -1,6 +1,6 @@
 import React from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
-import { Plus, Download, Server, Cloud, ShieldCheck } from 'lucide-react';
+import { Plus, Download, Server, Cloud, ShieldCheck, Loader2 } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
   const {
@@ -9,6 +9,7 @@ export const Sidebar: React.FC = () => {
     setActiveProfile,
     setNewConnectionModalOpen,
     setExportModalOpen,
+    isConnecting,
   } = useOrbitStore();
 
   return (
@@ -41,6 +42,8 @@ export const Sidebar: React.FC = () => {
       <div className="flex-1 overflow-y-auto px-2 space-y-0.5">
         {profiles.map((profile) => {
           const isActive = profile.id === activeProfileId;
+          const isThisConnecting = isActive && isConnecting;
+
           return (
             <button
               key={profile.id}
@@ -73,7 +76,7 @@ export const Sidebar: React.FC = () => {
                 </div>
               </div>
 
-              {/* Protocol badge */}
+              {/* Protocol badge & Status indicator */}
               <div className="flex items-center gap-1.5 flex-shrink-0 ml-1.5">
                 <span
                   className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold uppercase tracking-wider ${
@@ -84,9 +87,14 @@ export const Sidebar: React.FC = () => {
                 >
                   {profile.type}
                 </span>
-                {isActive && (
+
+                {isThisConnecting ? (
+                  <Loader2 className="w-2.5 h-2.5 animate-spin text-sky-400" />
+                ) : profile.status === 'connected' ? (
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
-                )}
+                ) : profile.status === 'error' ? (
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
+                ) : null}
               </div>
             </button>
           );

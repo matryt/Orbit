@@ -6,6 +6,9 @@ import {
   Columns2,
   ArrowUpDown,
   Folder,
+  RefreshCw,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -18,6 +21,11 @@ export const Header: React.FC = () => {
     toggleDualPane,
     transfers,
     toggleTransferDrawer,
+    refreshRemote,
+    isLoadingFiles,
+    isConnecting,
+    connectionError,
+    clearConnectionError,
   } = useOrbitStore();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -54,7 +62,7 @@ export const Header: React.FC = () => {
       data-tauri-drag-region
       className="h-11 flex-shrink-0 flex items-center justify-between border-b border-border-subtle bg-surface/60 backdrop-blur-xl px-4 select-none"
     >
-      {/* Left: Breadcrumbs navigation with macOS traffic lights offset if needed */}
+      {/* Left: Breadcrumbs navigation */}
       <div className="flex items-center gap-1.5 text-xs text-zinc-400 overflow-x-auto no-scrollbar">
         <button
           onClick={() => handleBreadcrumbClick(-1)}
@@ -80,10 +88,37 @@ export const Header: React.FC = () => {
             </button>
           </React.Fragment>
         ))}
+
+        {/* Loading spinner */}
+        {(isLoadingFiles || isConnecting) && (
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-1.5 flex-shrink-0" />
+        )}
+
+        {/* Connection error banner */}
+        {connectionError && (
+          <div
+            onClick={clearConnectionError}
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] cursor-pointer ml-2 hover:bg-red-500/20 transition-colors"
+            title="Cliquez pour masquer l'erreur"
+          >
+            <AlertCircle className="w-3 h-3 flex-shrink-0" />
+            <span className="truncate max-w-[200px]">{connectionError}</span>
+          </div>
+        )}
       </div>
 
       {/* Right: Actions, Filter and Dual Pane toggle */}
       <div className="flex items-center gap-2">
+        {/* Refresh button */}
+        <button
+          onClick={() => refreshRemote()}
+          disabled={isLoadingFiles}
+          className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+          title="Rafraîchir le dossier distant"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isLoadingFiles ? 'animate-spin' : ''}`} />
+        </button>
+
         {/* Instant filter input */}
         <div className="relative flex items-center">
           <Search className="w-3.5 h-3.5 absolute left-2 text-zinc-500 pointer-events-none" />
