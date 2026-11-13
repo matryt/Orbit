@@ -78,11 +78,10 @@ export const Header: React.FC = () => {
             <ChevronRight className="w-3 h-3 text-zinc-600 flex-shrink-0" />
             <button
               onClick={() => handleBreadcrumbClick(index)}
-              className={`px-1.5 py-0.5 rounded transition-colors truncate max-w-[120px] font-mono ${
-                index === pathSegments.length - 1
+              className={`px-1.5 py-0.5 rounded transition-colors truncate max-w-[120px] font-mono ${index === pathSegments.length - 1
                   ? 'text-white font-medium bg-white/[0.08]'
                   : 'hover:bg-white/10 hover:text-white text-zinc-300'
-              }`}
+                }`}
             >
               {segment}
             </button>
@@ -138,11 +137,10 @@ export const Header: React.FC = () => {
         {/* Dual Pane toggle button */}
         <button
           onClick={toggleDualPane}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs border transition-all ${
-            isDualPane
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs border transition-all ${isDualPane
               ? 'bg-accent-brand/20 border-indigo-500/40 text-indigo-300 shadow-sm'
               : 'bg-surface-muted hover:bg-surface-hover border-border-subtle text-zinc-400 hover:text-zinc-200'
-          }`}
+            }`}
           title="Bascule mode double panneau (Local | Distant) [⌘B]"
         >
           <Columns2 className="w-3.5 h-3.5" />

@@ -107,38 +107,39 @@ export const QuickLookModal: React.FC = () => {
 
         {/* Content Preview */}
         <div className="flex-1 overflow-auto p-4 bg-[#0a0b0f] font-mono text-xs text-zinc-300">
-          {isLoading ? (
-            <div className="h-48 flex items-center justify-center gap-2 text-zinc-400">
+            {
+              isLoading?(
+            <div className = "h-48 flex items-center justify-center gap-2 text-zinc-400" >
               <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
               <span>Chargement du flux d'aperçu...</span>
             </div>
-          ) : quickLookFile.is_dir ? (
-            <div className="flex flex-col items-center justify-center p-8 bg-black/30 rounded-lg border border-border-subtle">
-              <Folder className="w-12 h-12 text-amber-400 fill-amber-400/20 mb-3" />
-              <p className="text-zinc-200 text-sm font-sans font-medium">{quickLookFile.name}</p>
-              <span className="text-[11px] text-zinc-500 font-mono mt-1">{quickLookFile.path}</span>
-            </div>
-          ) : isImage ? (
-            <div className="flex flex-col items-center justify-center p-8 bg-black/30 rounded-lg border border-border-subtle">
-              <div className="w-32 h-32 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 font-sans mb-3">
-                <FileIcon name={quickLookFile.name} isDir={false} className="w-12 h-12" />
-              </div>
-              <p className="text-zinc-400 text-xs font-sans">{quickLookFile.name}</p>
-              <span className="text-[11px] text-zinc-600 mt-1">Aperçu image (max 2 Mo)</span>
-            </div>
-          ) : (
-            <pre className="whitespace-pre-wrap leading-relaxed select-text font-mono text-[12px] text-zinc-300">
-              <code>{content}</code>
-            </pre>
+        ) : quickLookFile.is_dir ? (
+        <div className="flex flex-col items-center justify-center p-8 bg-black/30 rounded-lg border border-border-subtle">
+          <Folder className="w-12 h-12 text-amber-400 fill-amber-400/20 mb-3" />
+          <p className="text-zinc-200 text-sm font-sans font-medium">{quickLookFile.name}</p>
+          <span className="text-[11px] text-zinc-500 font-mono mt-1">{quickLookFile.path}</span>
+        </div>
+        ) : isImage ? (
+        <div className="flex flex-col items-center justify-center p-8 bg-black/30 rounded-lg border border-border-subtle">
+          <div className="w-32 h-32 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 font-sans mb-3">
+            <FileIcon name={quickLookFile.name} isDir={false} className="w-12 h-12" />
+          </div>
+          <p className="text-zinc-400 text-xs font-sans">{quickLookFile.name}</p>
+          <span className="text-[11px] text-zinc-600 mt-1">Aperçu image (max 2 Mo)</span>
+        </div>
+        ) : (
+        <pre className="whitespace-pre-wrap leading-relaxed select-text font-mono text-[12px] text-zinc-300">
+          <code>{content}</code>
+        </pre>
           )}
-        </div>
+      </div>
 
-        {/* Footer info */}
-        <div className="h-8 px-4 border-t border-border-subtle bg-surface-muted/40 flex items-center justify-between text-[11px] text-zinc-500 font-mono select-none">
-          <span className="truncate">{quickLookFile.path}</span>
-          <span>Appuyez sur Espace pour fermer</span>
-        </div>
+      {/* Footer info */}
+      <div className="h-8 px-4 border-t border-border-subtle bg-surface-muted/40 flex items-center justify-between text-[11px] text-zinc-500 font-mono select-none">
+        <span className="truncate">{quickLookFile.path}</span>
+        <span>Appuyez sur Espace pour fermer</span>
       </div>
     </div>
+    </div >
   );
 };

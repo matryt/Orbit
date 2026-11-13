@@ -133,3 +133,4 @@ pub async fn get_secret(profile_id: String) -> Result<Option<String>, AppError> 
 pub async fn delete_secret(profile_id: String) -> Result<(), AppError> {
     KeyringService::delete_secret(&profile_id)
 }
+

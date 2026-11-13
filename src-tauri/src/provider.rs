@@ -24,3 +24,4 @@ pub trait StorageProvider: Send + Sync {
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError>;
 }
+

@@ -30,3 +30,4 @@ pub struct SftpConnectConfig {
     pub key_path: Option<String>,
     pub passphrase: Option<String>,
 }
+

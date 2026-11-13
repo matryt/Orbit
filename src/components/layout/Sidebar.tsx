@@ -48,24 +48,21 @@ export const Sidebar: React.FC = () => {
             <button
               key={profile.id}
               onClick={() => setActiveProfile(profile.id)}
-              className={`w-full group text-left px-2.5 py-2 rounded-md flex items-center justify-between text-xs transition-all ${
-                isActive
+              className={`w-full group text-left px-2.5 py-2 rounded-md flex items-center justify-between text-xs transition-all ${isActive
                   ? 'bg-surface-active text-white font-medium shadow-sm border border-border-light'
                   : 'text-zinc-400 hover:bg-surface-hover hover:text-zinc-200'
-              }`}
+                }`}
             >
               <div className="flex items-center gap-2.5 min-w-0">
                 {profile.type === 's3' ? (
                   <Cloud
-                    className={`w-4 h-4 flex-shrink-0 ${
-                      isActive ? 'text-amber-400' : 'text-zinc-500 group-hover:text-amber-400/80'
-                    }`}
+                    className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-amber-400' : 'text-zinc-500 group-hover:text-amber-400/80'
+                      }`}
                   />
                 ) : (
                   <Server
-                    className={`w-4 h-4 flex-shrink-0 ${
-                      isActive ? 'text-sky-400' : 'text-zinc-500 group-hover:text-sky-400/80'
-                    }`}
+                    className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-sky-400' : 'text-zinc-500 group-hover:text-sky-400/80'
+                      }`}
                   />
                 )}
                 <div className="min-w-0 flex-1">
@@ -79,21 +76,21 @@ export const Sidebar: React.FC = () => {
               {/* Protocol badge & Status indicator */}
               <div className="flex items-center gap-1.5 flex-shrink-0 ml-1.5">
                 <span
-                  className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold uppercase tracking-wider ${
-                    profile.type === 's3'
+                  className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold uppercase tracking-wider ${profile.type === 's3'
                       ? 'bg-amber-500/10 text-amber-400/90 border border-amber-500/20'
                       : 'bg-sky-500/10 text-sky-400/90 border border-sky-500/20'
-                  }`}
+                    }`}
                 >
                   {profile.type}
                 </span>
 
-                {isThisConnecting ? (
-                  <Loader2 className="w-2.5 h-2.5 animate-spin text-sky-400" />
-                ) : profile.status === 'connected' ? (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+                  {
+                    isThisConnecting?(
+                  <Loader2 className = "w-2.5 h-2.5 animate-spin text-sky-400" />
+                ): profile.status === 'connected' ? (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
                 ) : profile.status === 'error' ? (
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
+                <span className="w-1.5 h-1.5 rounded-full bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
                 ) : null}
               </div>
             </button>

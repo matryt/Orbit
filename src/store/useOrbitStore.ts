@@ -72,367 +72,367 @@ interface OrbitState {
 export const useOrbitStore = create<OrbitState>((set, get) => ({
   profiles: MOCK_PROFILES,
   activeProfileId: 'prof-1',
-  isConnecting: false,
-  connectionError: null,
-  clearConnectionError: () => set({ connectionError: null }),
-
-  setActiveProfile: async (id) => {
-    const profile = get().profiles.find((p) => p.id === id);
-    set({
-      activeProfileId: id,
-      currentPath: '/',
-      selectedRemotePath: null,
-      selectedRemotePaths: [],
+    isConnecting: false,
       connectionError: null,
-    });
+        clearConnectionError: () => set({ connectionError: null }),
 
-    if (profile && profile.type === 'sftp') {
-      await get().connectProfile(id);
-    } else {
-      // Fallback or mock files
-      const files = MOCK_REMOTE_FILES['/'] || [];
-      set({ remoteFiles: files });
-    }
-  },
+          setActiveProfile: async (id) => {
+            const profile = get().profiles.find((p) => p.id === id);
+            set({
+              activeProfileId: id,
+              currentPath: '/',
+              selectedRemotePath: null,
+              selectedRemotePaths: [],
+              connectionError: null,
+            });
 
-  addProfile: async (profile, secret) => {
-    if (secret) {
-      await storageApi.saveSecret(profile.id, secret);
-    }
-    set((state) => ({
-      profiles: [...state.profiles, profile],
-      activeProfileId: profile.id,
-      currentPath: '/',
-    }));
+            if (profile && profile.type === 'sftp') {
+              await get().connectProfile(id);
+            } else {
+              // Fallback or mock files
+              const files = MOCK_REMOTE_FILES['/'] || [];
+              set({ remoteFiles: files });
+            }
+          },
 
-    if (profile.type === 'sftp') {
-      await get().connectProfile(profile.id, secret);
-    }
-  },
+              addProfile: async (profile, secret) => {
+                if (secret) {
+                  await storageApi.saveSecret(profile.id, secret);
+                }
+                set((state) => ({
+                  profiles: [...state.profiles, profile],
+                  activeProfileId: profile.id,
+                  currentPath: '/',
+                }));
 
-  connectProfile: async (profileId, secret) => {
-    const profile = get().profiles.find((p) => p.id === profileId);
-    if (!profile || profile.type !== 'sftp') return;
+                if (profile.type === 'sftp') {
+                  await get().connectProfile(profile.id, secret);
+                }
+              },
 
-    set({ isConnecting: true, connectionError: null });
+                connectProfile: async (profileId, secret) => {
+                  const profile = get().profiles.find((p) => p.id === profileId);
+                  if (!profile || profile.type !== 'sftp') return;
 
-    try {
-      let pwd = secret;
-      if (!pwd) {
-        pwd = (await storageApi.getSecret(profileId)) || undefined;
-      }
+                  set({ isConnecting: true, connectionError: null });
 
-      await storageApi.connectSftp({
-        profile_id: profile.id,
-        host: profile.host || '',
-        port: profile.port || 22,
-        username: profile.username || 'root',
-        password: pwd,
-        key_path: undefined,
-      });
+                  try {
+                    let pwd = secret;
+                    if (!pwd) {
+                      pwd = (await storageApi.getSecret(profileId)) || undefined;
+                    }
 
-      // Update status to connected
-      set((state) => ({
-        profiles: state.profiles.map((p) =>
-          p.id === profileId ? { ...p, status: 'connected' } : p
-        ),
-        isConnecting: false,
-      }));
+                    await storageApi.connectSftp({
+                      profile_id: profile.id,
+                      host: profile.host || '',
+                      port: profile.port || 22,
+                      username: profile.username || 'root',
+                      password: pwd,
+                      key_path: undefined,
+                    });
 
-      // Fetch root directory
-      await get().setCurrentPath('/');
-    } catch (err: any) {
-      const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
-      set((state) => ({
-        profiles: state.profiles.map((p) =>
-          p.id === profileId ? { ...p, status: 'error' } : p
-        ),
-        isConnecting: false,
-        connectionError: errMsg,
-      }));
-    }
-  },
+                    // Update status to connected
+                    set((state) => ({
+                      profiles: state.profiles.map((p) =>
+                        p.id === profileId ? { ...p, status: 'connected' } : p
+                      ),
+                      isConnecting: false,
+                    }));
 
-  activePane: 'remote',
-  setActivePane: (pane) => set({ activePane: pane }),
-
-  currentPath: '/',
-  remoteFiles: MOCK_REMOTE_FILES['/'] || [],
-  isLoadingFiles: false,
-
-  setCurrentPath: async (path) => {
-    const { activeProfileId, profiles } = get();
-    const profile = profiles.find((p) => p.id === activeProfileId);
-
-    set({
-      currentPath: path,
-      selectedRemotePath: null,
-      selectedRemotePaths: [],
-      isLoadingFiles: true,
-    });
-
-    try {
-      if (profile && profile.type === 'sftp' && profile.status === 'connected') {
-        const liveFiles = await storageApi.listDir(activeProfileId, path);
-        set({
-          remoteFiles: liveFiles,
-          isLoadingFiles: false,
-          selectedRemotePath: liveFiles.length > 0 ? liveFiles[0].path : null,
-          selectedRemotePaths: liveFiles.length > 0 ? [liveFiles[0].path] : [],
-        });
-      } else {
-        const mockList = MOCK_REMOTE_FILES[path] || [];
-        set({
-          remoteFiles: mockList,
-          isLoadingFiles: false,
-          selectedRemotePath: mockList.length > 0 ? mockList[0].path : null,
-          selectedRemotePaths: mockList.length > 0 ? [mockList[0].path] : [],
-        });
-      }
-    } catch (err: any) {
-      console.error('Error listing dir:', err);
-      set({ isLoadingFiles: false });
-    }
-  },
-
-  refreshRemote: async () => {
-    const { currentPath } = get();
-    await get().setCurrentPath(currentPath);
-  },
-
-  getRemoteFiles: () => {
-    const { remoteFiles, searchQuery } = get();
-    if (!searchQuery.trim()) return remoteFiles;
-    const lower = searchQuery.toLowerCase();
-    return remoteFiles.filter((f) => f.name.toLowerCase().includes(lower));
-  },
-
-  selectedRemotePath: '/app-config.json',
-  selectedRemotePaths: ['/app-config.json'],
-  selectRemoteFile: (path, multi = false) => {
-    const { selectedRemotePaths } = get();
-    if (multi) {
-      const exists = selectedRemotePaths.includes(path);
-      const newPaths = exists
-        ? selectedRemotePaths.filter((p) => p !== path)
-        : [...selectedRemotePaths, path];
-      set({
-        selectedRemotePaths: newPaths,
-        selectedRemotePath: newPaths[newPaths.length - 1] || null,
-        activePane: 'remote',
-      });
-    } else {
-      set({
-        selectedRemotePaths: [path],
-        selectedRemotePath: path,
-        activePane: 'remote',
-      });
-    }
-  },
-  clearRemoteSelection: () => {
-    set({ selectedRemotePaths: [], selectedRemotePath: null });
-  },
-
-  localPath: '/Users/mac',
-  setLocalPath: (path) => set({ localPath: path }),
-  localFiles: MOCK_LOCAL_FILES,
-  selectedLocalPath: null,
-  selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
-
-  isDualPane: false,
-  toggleDualPane: () => set((state) => ({ isDualPane: !state.isDualPane })),
-
-  searchQuery: '',
-  setSearchQuery: (query) => set({ searchQuery: query }),
-
-  quickLookFile: null,
-  setQuickLookFile: (file) => set({ quickLookFile: file }),
-  toggleQuickLook: () => {
-    const {
-      quickLookFile,
-      selectedRemotePath,
-      getRemoteFiles,
-      activePane,
-      selectedLocalPath,
-      localFiles,
-    } = get();
-
-    if (quickLookFile) {
-      set({ quickLookFile: null });
-      return;
-    }
-
-    if (activePane === 'local') {
-      const targetPath = selectedLocalPath || (localFiles.length > 0 ? localFiles[0].path : null);
-      if (targetPath) {
-        const file = localFiles.find((f) => f.path === targetPath);
-        if (file) {
-          set({ quickLookFile: file, selectedLocalPath: file.path });
-          return;
-        }
-      }
-    }
-
-    const remoteFiles = getRemoteFiles();
-    const targetPath = selectedRemotePath || (remoteFiles.length > 0 ? remoteFiles[0].path : null);
-    if (targetPath) {
-      const file = remoteFiles.find((f) => f.path === targetPath);
-      if (file) {
-        set({ quickLookFile: file, selectedRemotePath: file.path });
-      }
-    }
-  },
-
-  transfers: MOCK_TRANSFERS,
-  isTransferDrawerOpen: false,
-  toggleTransferDrawer: () =>
-    set((state) => ({ isTransferDrawerOpen: !state.isTransferDrawerOpen })),
-  setTransferDrawerOpen: (open) => set({ isTransferDrawerOpen: open }),
-
-  pauseTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'paused', speedBps: 0 } : tx
-      ),
-    }));
-  },
-
-  resumeTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'transferring', speedBps: 24500000 } : tx
-      ),
-    }));
-  },
-
-  cancelTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'cancelled', speedBps: 0 } : tx
-      ),
-    }));
-  },
-
-  clearCompletedTransfers: () => {
-    set((state) => ({
-      transfers: state.transfers.filter(
-        (tx) => tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'queued'
-      ),
-    }));
-  },
-
-  uploadFile: async (localPath, remotePath, fileName) => {
-    const { activeProfileId, profiles } = get();
-    const profile = profiles.find((p) => p.id === activeProfileId);
-    const txId = `tx-${Date.now()}`;
-
-    const newTransfer: TransferItem = {
-      id: txId,
-      serverName: profile?.name || 'SFTP Server',
-      serverType: profile?.type || 'sftp',
-      fileName,
-      localPath,
-      remotePath,
-      direction: 'upload',
-      bytesTransferred: 0,
-      totalBytes: 0,
-      speedBps: 0,
-      status: 'transferring',
-    };
-
-    set((state) => ({
-      transfers: [newTransfer, ...state.transfers],
-      isTransferDrawerOpen: true,
-    }));
-
-    try {
-      await storageApi.uploadFile(
-        activeProfileId,
-        localPath,
-        remotePath,
-        (p: BackendTransferProgress) => {
-          set((state) => ({
-            transfers: state.transfers.map((tx) =>
-              tx.id === txId
-                ? {
-                    ...tx,
-                    bytesTransferred: p.bytes_transferred,
-                    totalBytes: p.total_bytes,
-                    speedBps: p.speed_bps,
-                    status: p.status === 'completed' ? 'completed' : 'transferring',
+                    // Fetch root directory
+                    await get().setCurrentPath('/');
+                  } catch (err: any) {
+                    const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+                    set((state) => ({
+                      profiles: state.profiles.map((p) =>
+                        p.id === profileId ? { ...p, status: 'error' } : p
+                      ),
+                      isConnecting: false,
+                      connectionError: errMsg,
+                    }));
                   }
-                : tx
-            ),
-          }));
-        }
-      );
-      await get().refreshRemote();
-    } catch (err: any) {
-      set((state) => ({
-        transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
-        ),
-      }));
-    }
-  },
+                },
 
-  downloadFile: async (remotePath, localPath, fileName) => {
-    const { activeProfileId, profiles } = get();
-    const profile = profiles.find((p) => p.id === activeProfileId);
-    const txId = `tx-${Date.now()}`;
+                  activePane: 'remote',
+                    setActivePane: (pane) => set({ activePane: pane }),
 
-    const newTransfer: TransferItem = {
-      id: txId,
-      serverName: profile?.name || 'SFTP Server',
-      serverType: profile?.type || 'sftp',
-      fileName,
-      localPath,
-      remotePath,
-      direction: 'download',
-      bytesTransferred: 0,
-      totalBytes: 0,
-      speedBps: 0,
-      status: 'transferring',
-    };
+                      currentPath: '/',
+                          remoteFiles: MOCK_REMOTE_FILES['/'] || [],
+                            isLoadingFiles: false,
 
-    set((state) => ({
-      transfers: [newTransfer, ...state.transfers],
-      isTransferDrawerOpen: true,
-    }));
+                              setCurrentPath: async (path) => {
+                                const { activeProfileId, profiles } = get();
+                                const profile = profiles.find((p) => p.id === activeProfileId);
 
-    try {
-      await storageApi.downloadFile(
-        activeProfileId,
-        remotePath,
-        localPath,
-        (p: BackendTransferProgress) => {
-          set((state) => ({
-            transfers: state.transfers.map((tx) =>
-              tx.id === txId
-                ? {
-                    ...tx,
-                    bytesTransferred: p.bytes_transferred,
-                    totalBytes: p.total_bytes,
-                    speedBps: p.speed_bps,
-                    status: p.status === 'completed' ? 'completed' : 'transferring',
-                  }
-                : tx
-            ),
-          }));
-        }
-      );
-    } catch (err: any) {
-      set((state) => ({
-        transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
-        ),
-      }));
-    }
-  },
+                                set({
+                                  currentPath: path,
+                                  selectedRemotePath: null,
+                                  selectedRemotePaths: [],
+                                  isLoadingFiles: true,
+                                });
 
-  isNewConnectionModalOpen: false,
-  setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),
+                                try {
+                                  if (profile && profile.type === 'sftp' && profile.status === 'connected') {
+                                    const liveFiles = await storageApi.listDir(activeProfileId, path);
+                                    set({
+                                      remoteFiles: liveFiles,
+                                      isLoadingFiles: false,
+                                      selectedRemotePath: liveFiles.length > 0 ? liveFiles[0].path : null,
+                                      selectedRemotePaths: liveFiles.length > 0 ? [liveFiles[0].path] : [],
+                                    });
+                                  } else {
+                                    const mockList = MOCK_REMOTE_FILES[path] || [];
+                                    set({
+                                      remoteFiles: mockList,
+                                      isLoadingFiles: false,
+                                      selectedRemotePath: mockList.length > 0 ? mockList[0].path : null,
+                                      selectedRemotePaths: mockList.length > 0 ? [mockList[0].path] : [],
+                                    });
+                                  }
+                                } catch (err: any) {
+                                  console.error('Error listing dir:', err);
+                                  set({ isLoadingFiles: false });
+                                }
+                              },
 
-  isExportModalOpen: false,
-  setExportModalOpen: (open) => set({ isExportModalOpen: open }),
+                                refreshRemote: async () => {
+                                  const { currentPath } = get();
+                                  await get().setCurrentPath(currentPath);
+                                },
+
+                                  getRemoteFiles: () => {
+                                    const { remoteFiles, searchQuery } = get();
+                                    if (!searchQuery.trim()) return remoteFiles;
+                                    const lower = searchQuery.toLowerCase();
+                                    return remoteFiles.filter((f) => f.name.toLowerCase().includes(lower));
+                                  },
+
+                                    selectedRemotePath: '/app-config.json',
+                                      selectedRemotePaths: ['/app-config.json'],
+                                        selectRemoteFile: (path, multi = false) => {
+                                          const { selectedRemotePaths } = get();
+                                          if (multi) {
+                                            const exists = selectedRemotePaths.includes(path);
+                                            const newPaths = exists
+                                              ? selectedRemotePaths.filter((p) => p !== path)
+                                              : [...selectedRemotePaths, path];
+                                            set({
+                                              selectedRemotePaths: newPaths,
+                                              selectedRemotePath: newPaths[newPaths.length - 1] || null,
+                                              activePane: 'remote',
+                                            });
+                                          } else {
+                                            set({
+                                              selectedRemotePaths: [path],
+                                              selectedRemotePath: path,
+                                              activePane: 'remote',
+                                            });
+                                          }
+                                        },
+                                          clearRemoteSelection: () => {
+                                            set({ selectedRemotePaths: [], selectedRemotePath: null });
+                                          },
+
+                                            localPath: '/Users/mac',
+                                              setLocalPath: (path) => set({ localPath: path }),
+                                                localFiles: MOCK_LOCAL_FILES,
+                                                  selectedLocalPath: null,
+                                                    selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
+
+                                                      isDualPane: false,
+                                                        toggleDualPane: () => set((state) => ({ isDualPane: !state.isDualPane })),
+
+                                                          searchQuery: '',
+                                                            setSearchQuery: (query) => set({ searchQuery: query }),
+
+                                                              quickLookFile: null,
+                                                                setQuickLookFile: (file) => set({ quickLookFile: file }),
+                                                                  toggleQuickLook: () => {
+                                                                    const {
+                                                                      quickLookFile,
+                                                                      selectedRemotePath,
+                                                                      getRemoteFiles,
+                                                                      activePane,
+                                                                      selectedLocalPath,
+                                                                      localFiles,
+                                                                    } = get();
+
+                                                                    if (quickLookFile) {
+                                                                      set({ quickLookFile: null });
+                                                                      return;
+                                                                    }
+
+                                                                    if (activePane === 'local') {
+                                                                      const targetPath = selectedLocalPath || (localFiles.length > 0 ? localFiles[0].path : null);
+                                                                      if (targetPath) {
+                                                                        const file = localFiles.find((f) => f.path === targetPath);
+                                                                        if (file) {
+                                                                          set({ quickLookFile: file, selectedLocalPath: file.path });
+                                                                          return;
+                                                                        }
+                                                                      }
+                                                                    }
+
+                                                                    const remoteFiles = getRemoteFiles();
+                                                                    const targetPath = selectedRemotePath || (remoteFiles.length > 0 ? remoteFiles[0].path : null);
+                                                                    if (targetPath) {
+                                                                      const file = remoteFiles.find((f) => f.path === targetPath);
+                                                                      if (file) {
+                                                                        set({ quickLookFile: file, selectedRemotePath: file.path });
+                                                                      }
+                                                                    }
+                                                                  },
+
+                                                                    transfers: MOCK_TRANSFERS,
+                                                                      isTransferDrawerOpen: false,
+                                                                        toggleTransferDrawer: () =>
+                                                                          set((state) => ({ isTransferDrawerOpen: !state.isTransferDrawerOpen })),
+                                                                          setTransferDrawerOpen: (open) => set({ isTransferDrawerOpen: open }),
+
+                                                                            pauseTransfer: (id) => {
+                                                                              set((state) => ({
+                                                                                transfers: state.transfers.map((tx) =>
+                                                                                  tx.id === id ? { ...tx, status: 'paused', speedBps: 0 } : tx
+                                                                                ),
+                                                                              }));
+                                                                            },
+
+                                                                              resumeTransfer: (id) => {
+                                                                                set((state) => ({
+                                                                                  transfers: state.transfers.map((tx) =>
+                                                                                    tx.id === id ? { ...tx, status: 'transferring', speedBps: 24500000 } : tx
+                                                                                  ),
+                                                                                }));
+                                                                              },
+
+                                                                                cancelTransfer: (id) => {
+                                                                                  set((state) => ({
+                                                                                    transfers: state.transfers.map((tx) =>
+                                                                                      tx.id === id ? { ...tx, status: 'cancelled', speedBps: 0 } : tx
+                                                                                    ),
+                                                                                  }));
+                                                                                },
+
+                                                                                  clearCompletedTransfers: () => {
+                                                                                    set((state) => ({
+                                                                                      transfers: state.transfers.filter(
+                                                                                        (tx) => tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'queued'
+                                                                                      ),
+                                                                                    }));
+                                                                                  },
+
+                                                                                    uploadFile: async (localPath, remotePath, fileName) => {
+                                                                                      const { activeProfileId, profiles } = get();
+                                                                                      const profile = profiles.find((p) => p.id === activeProfileId);
+                                                                                      const txId = `tx-${Date.now()}`;
+
+                                                                                      const newTransfer: TransferItem = {
+                                                                                        id: txId,
+                                                                                        serverName: profile?.name || 'SFTP Server',
+                                                                                        serverType: profile?.type || 'sftp',
+                                                                                        fileName,
+                                                                                        localPath,
+                                                                                        remotePath,
+                                                                                        direction: 'upload',
+                                                                                        bytesTransferred: 0,
+                                                                                        totalBytes: 0,
+                                                                                        speedBps: 0,
+                                                                                        status: 'transferring',
+                                                                                      };
+
+                                                                                      set((state) => ({
+                                                                                        transfers: [newTransfer, ...state.transfers],
+                                                                                        isTransferDrawerOpen: true,
+                                                                                      }));
+
+                                                                                      try {
+                                                                                        await storageApi.uploadFile(
+                                                                                          activeProfileId,
+                                                                                          localPath,
+                                                                                          remotePath,
+                                                                                          (p: BackendTransferProgress) => {
+                                                                                            set((state) => ({
+                                                                                              transfers: state.transfers.map((tx) =>
+                                                                                                tx.id === txId
+                                                                                                  ? {
+                                                                                                    ...tx,
+                                                                                                    bytesTransferred: p.bytes_transferred,
+                                                                                                    totalBytes: p.total_bytes,
+                                                                                                    speedBps: p.speed_bps,
+                                                                                                    status: p.status === 'completed' ? 'completed' : 'transferring',
+                                                                                                  }
+                                                                                                  : tx
+                                                                                              ),
+                                                                                            }));
+                                                                                          }
+                                                                                        );
+                                                                                        await get().refreshRemote();
+                                                                                      } catch (err: any) {
+                                                                                        set((state) => ({
+                                                                                          transfers: state.transfers.map((tx) =>
+                                                                                            tx.id === txId ? { ...tx, status: 'failed' } : tx
+                                                                                          ),
+                                                                                        }));
+                                                                                      }
+                                                                                    },
+
+                                                                                      downloadFile: async (remotePath, localPath, fileName) => {
+                                                                                        const { activeProfileId, profiles } = get();
+                                                                                        const profile = profiles.find((p) => p.id === activeProfileId);
+                                                                                        const txId = `tx-${Date.now()}`;
+
+                                                                                        const newTransfer: TransferItem = {
+                                                                                          id: txId,
+                                                                                          serverName: profile?.name || 'SFTP Server',
+                                                                                          serverType: profile?.type || 'sftp',
+                                                                                          fileName,
+                                                                                          localPath,
+                                                                                          remotePath,
+                                                                                          direction: 'download',
+                                                                                          bytesTransferred: 0,
+                                                                                          totalBytes: 0,
+                                                                                          speedBps: 0,
+                                                                                          status: 'transferring',
+                                                                                        };
+
+                                                                                        set((state) => ({
+                                                                                          transfers: [newTransfer, ...state.transfers],
+                                                                                          isTransferDrawerOpen: true,
+                                                                                        }));
+
+                                                                                        try {
+                                                                                          await storageApi.downloadFile(
+                                                                                            activeProfileId,
+                                                                                            remotePath,
+                                                                                            localPath,
+                                                                                            (p: BackendTransferProgress) => {
+                                                                                              set((state) => ({
+                                                                                                transfers: state.transfers.map((tx) =>
+                                                                                                  tx.id === txId
+                                                                                                    ? {
+                                                                                                      ...tx,
+                                                                                                      bytesTransferred: p.bytes_transferred,
+                                                                                                      totalBytes: p.total_bytes,
+                                                                                                      speedBps: p.speed_bps,
+                                                                                                      status: p.status === 'completed' ? 'completed' : 'transferring',
+                                                                                                    }
+                                                                                                    : tx
+                                                                                                ),
+                                                                                              }));
+                                                                                            }
+                                                                                          );
+                                                                                        } catch (err: any) {
+                                                                                          set((state) => ({
+                                                                                            transfers: state.transfers.map((tx) =>
+                                                                                              tx.id === txId ? { ...tx, status: 'failed' } : tx
+                                                                                            ),
+                                                                                          }));
+                                                                                        }
+                                                                                      },
+
+                                                                                        isNewConnectionModalOpen: false,
+                                                                                          setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),
+
+                                                                                            isExportModalOpen: false,
+                                                                                              setExportModalOpen: (open) => set({ isExportModalOpen: open }),
 }));

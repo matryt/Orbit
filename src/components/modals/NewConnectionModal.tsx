@@ -34,15 +34,15 @@ export const NewConnectionModal: React.FC = () => {
       isFavorite: true,
       ...(type === 's3'
         ? {
-            endpoint: endpoint.trim() || undefined,
-            bucket: bucket.trim() || undefined,
-            region: region.trim() || undefined,
-          }
+          endpoint: endpoint.trim() || undefined,
+          bucket: bucket.trim() || undefined,
+          region: region.trim() || undefined,
+        }
         : {
-            host: host.trim(),
-            port: Number(port) || 22,
-            username: username.trim(),
-          }),
+          host: host.trim(),
+          port: Number(port) || 22,
+          username: username.trim(),
+        }),
     };
 
     const secret = type === 's3' ? secretKey.trim() : password.trim();
@@ -77,11 +77,10 @@ export const NewConnectionModal: React.FC = () => {
             <button
               type="button"
               onClick={() => setType('s3')}
-              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
-                type === 's3'
+              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${type === 's3'
                   ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm'
                   : 'text-zinc-400 hover:text-white'
-              }`}
+                }`}
             >
               <Cloud className="w-4 h-4 text-amber-400" />
               <span>Amazon S3 / R2 / MinIO</span>
@@ -89,11 +88,10 @@ export const NewConnectionModal: React.FC = () => {
             <button
               type="button"
               onClick={() => setType('sftp')}
-              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
-                type === 'sftp'
+              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${type === 'sftp'
                   ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm'
                   : 'text-zinc-400 hover:text-white'
-              }`}
+                }`}
             >
               <Server className="w-4 h-4 text-sky-400" />
               <span>SFTP (SSH)</span>
