@@ -10,8 +10,14 @@ interface OrbitState {
   loadPersistedProfiles: () => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
   addProfile: (profile: ConnectionProfile, secret?: string) => Promise<void>;
+  updateProfile: (profile: ConnectionProfile, secret?: string) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   connectProfile: (profileId: string, secret?: string) => Promise<void>;
+  disconnectProfile: (id: string) => Promise<void>;
+
+  // Editing profile modal state
+  editingProfile: ConnectionProfile | null;
+  setEditingProfile: (profile: ConnectionProfile | null) => void;
 
   // Connection state & error
   isConnecting: boolean;
@@ -140,6 +146,46 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     if (profile.type === 'sftp') {
       await get().connectProfile(profile.id, secret);
     }
+  },
+
+  editingProfile: null,
+  setEditingProfile: (profile) => set({ editingProfile: profile, isNewConnectionModalOpen: profile !== null }),
+
+  updateProfile: async (profile, secret) => {
+    if (secret) {
+      await storageApi.saveSecret(profile.id, secret);
+    }
+
+    try {
+      await storageApi.saveProfile(profile);
+    } catch (err) {
+      console.error('Failed to update profile in connections.json:', err);
+    }
+
+    set((state) => ({
+      profiles: state.profiles.map((p) => (p.id === profile.id ? profile : p)),
+    }));
+
+    if (get().activeProfileId === profile.id && profile.type === 'sftp') {
+      await get().connectProfile(profile.id, secret);
+    }
+  },
+
+  disconnectProfile: async (id: string) => {
+    try {
+      await storageApi.disconnect(id);
+    } catch (err) {
+      console.error('Failed to disconnect session:', err);
+    }
+
+    set((state) => ({
+      profiles: state.profiles.map((p) =>
+        p.id === id ? { ...p, status: 'idle' } : p
+      ),
+      ...(state.activeProfileId === id
+        ? { remoteFiles: [], selectedRemotePath: null, selectedRemotePaths: [] }
+        : {}),
+    }));
   },
 
   deleteProfile: async (id: string) => {

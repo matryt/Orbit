@@ -24,7 +24,14 @@ import {
 } from 'lucide-react';
 
 export const NewConnectionModal: React.FC = () => {
-  const { isNewConnectionModalOpen, setNewConnectionModalOpen, addProfile } = useOrbitStore();
+  const {
+    isNewConnectionModalOpen,
+    setNewConnectionModalOpen,
+    addProfile,
+    editingProfile,
+    setEditingProfile,
+    updateProfile,
+  } = useOrbitStore();
 
   const [type, setType] = useState<StorageType>('sftp');
   const [name, setName] = useState('');
@@ -56,7 +63,51 @@ export const NewConnectionModal: React.FC = () => {
     logs?: string[];
   } | null>(null);
 
+  // Populate fields when editing an existing profile
+  React.useEffect(() => {
+    if (editingProfile) {
+      setType(editingProfile.type);
+      setName(editingProfile.name);
+      setEndpoint(editingProfile.endpoint || '');
+      setBucket(editingProfile.bucket || '');
+      setRegion(editingProfile.region || 'eu-west-3');
+      setHost(editingProfile.host || '');
+      setPort(editingProfile.port || 22);
+      setUsername(editingProfile.username || '');
+      setAuthType(editingProfile.authType || 'key');
+      setKeyPath(editingProfile.keyPath || '~/.ssh/id_ed25519');
+      storageApi.getSecret(editingProfile.id).then((sec) => {
+        if (sec) {
+          if (editingProfile.type === 's3') setSecretKey(sec);
+          else if (editingProfile.authType === 'password') setPassword(sec);
+          else setPassphrase(sec);
+        }
+      });
+    } else {
+      setType('sftp');
+      setName('');
+      setEndpoint('');
+      setBucket('');
+      setRegion('eu-west-3');
+      setAccessKey('');
+      setSecretKey('');
+      setHost('');
+      setPort(22);
+      setUsername('');
+      setAuthType('key');
+      setKeyPath('~/.ssh/id_ed25519');
+      setPassphrase('');
+      setPassword('');
+      setTestResult(null);
+    }
+  }, [editingProfile, isNewConnectionModalOpen]);
+
   if (!isNewConnectionModalOpen) return null;
+
+  const handleClose = () => {
+    setEditingProfile(null);
+    setNewConnectionModalOpen(false);
+  };
 
   const handleBrowseKey = async () => {
     try {
@@ -150,30 +201,9 @@ export const NewConnectionModal: React.FC = () => {
     setTimeout(() => setCopiedLogs(false), 2000);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-
-    const newProfile: ConnectionProfile = {
-      id: `prof-${Date.now()}`,
-      name: name.trim(),
-      type,
-      status: 'idle',
-      isFavorite: true,
-      ...(type === 's3'
-        ? {
-            endpoint: endpoint.trim() || undefined,
-            bucket: bucket.trim() || undefined,
-            region: region.trim() || undefined,
-          }
-        : {
-            host: host.trim(),
-            port: Number(port) || 22,
-            username: username.trim(),
-            authType,
-            keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
-          }),
-    };
 
     const secret =
       type === 's3'
@@ -182,13 +212,64 @@ export const NewConnectionModal: React.FC = () => {
         ? passphrase.trim()
         : password.trim();
 
-    addProfile(newProfile, secret || undefined);
-    setNewConnectionModalOpen(false);
+    if (editingProfile) {
+      const updatedProfile: ConnectionProfile = {
+        ...editingProfile,
+        name: name.trim(),
+        type,
+        ...(type === 's3'
+          ? {
+              endpoint: endpoint.trim() || undefined,
+              bucket: bucket.trim() || undefined,
+              region: region.trim() || undefined,
+              host: undefined,
+              port: undefined,
+              username: undefined,
+              authType: undefined,
+              keyPath: undefined,
+            }
+          : {
+              host: host.trim(),
+              port: Number(port) || 22,
+              username: username.trim(),
+              authType,
+              keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+              endpoint: undefined,
+              bucket: undefined,
+              region: undefined,
+            }),
+      };
+      await updateProfile(updatedProfile, secret || undefined);
+    } else {
+      const newProfile: ConnectionProfile = {
+        id: `prof-${Date.now()}`,
+        name: name.trim(),
+        type,
+        status: 'idle',
+        isFavorite: true,
+        ...(type === 's3'
+          ? {
+              endpoint: endpoint.trim() || undefined,
+              bucket: bucket.trim() || undefined,
+              region: region.trim() || undefined,
+            }
+          : {
+              host: host.trim(),
+              port: Number(port) || 22,
+              username: username.trim(),
+              authType,
+              keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+            }),
+      };
+      await addProfile(newProfile, secret || undefined);
+    }
+
+    handleClose();
   };
 
   return (
     <div
-      onClick={() => setNewConnectionModalOpen(false)}
+      onClick={handleClose}
       className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150"
     >
       <div
@@ -197,9 +278,11 @@ export const NewConnectionModal: React.FC = () => {
       >
         {/* Header */}
         <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none flex-shrink-0">
-          <h2 className="text-sm font-semibold text-white">Nouvelle Connexion</h2>
+          <h2 className="text-sm font-semibold text-white">
+            {editingProfile ? 'Modifier la connexion' : 'Nouvelle Connexion'}
+          </h2>
           <button
-            onClick={() => setNewConnectionModalOpen(false)}
+            onClick={handleClose}
             className="p-1.5 rounded-md hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
           >
             <X className="w-4 h-4" />
@@ -653,7 +736,7 @@ export const NewConnectionModal: React.FC = () => {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setNewConnectionModalOpen(false)}
+                onClick={handleClose}
                 className="px-3 py-1.5 rounded-md text-xs font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
               >
                 Annuler
@@ -663,7 +746,7 @@ export const NewConnectionModal: React.FC = () => {
                 className="px-4 py-1.5 rounded-md text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition-all flex items-center gap-1.5"
               >
                 <Check className="w-3.5 h-3.5" />
-                <span>Enregistrer & Connecter</span>
+                <span>{editingProfile ? 'Mettre à jour' : 'Enregistrer & Connecter'}</span>
               </button>
             </div>
           </div>

@@ -90,9 +90,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
       {/* Table Header */}
       <div className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30">
-        <div className="col-span-6 flex items-center gap-2">Nom</div>
+        <div className="col-span-5 flex items-center gap-2">Nom</div>
         <div className="col-span-2 text-right">Taille</div>
-        <div className="col-span-3 text-right">Modifié</div>
+        <div className="col-span-2 text-right">Propriétaire</div>
+        <div className="col-span-2 text-right">Modifié</div>
         <div className="col-span-1 text-right font-mono">Attr</div>
       </div>
 
@@ -104,12 +105,13 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             onDoubleClick={handleGoUp}
             className="grid grid-cols-12 px-3 py-1.5 rounded text-xs text-zinc-400 hover:bg-surface-hover hover:text-white cursor-pointer items-center transition-colors"
           >
-            <div className="col-span-6 flex items-center gap-2.5">
+            <div className="col-span-5 flex items-center gap-2.5">
               <FolderUp className="w-4 h-4 text-zinc-500" />
               <span className="font-mono text-zinc-400">..</span>
             </div>
             <div className="col-span-2 text-right text-zinc-600 font-mono text-[11px]">Dossier parent</div>
-            <div className="col-span-3 text-right text-zinc-600 text-[11px]">--</div>
+            <div className="col-span-2 text-right text-zinc-600 font-mono text-[11px]">--</div>
+            <div className="col-span-2 text-right text-zinc-600 text-[11px]">--</div>
             <div className="col-span-1 text-right text-zinc-600 font-mono text-[10px]">--</div>
           </div>
         )}
@@ -153,7 +155,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 }`}
               >
                 {/* Name */}
-                <div className="col-span-6 flex items-center gap-2.5 min-w-0 pr-2">
+                <div className="col-span-5 flex items-center gap-2.5 min-w-0 pr-2">
                   <FileIcon name={file.name} isDir={file.is_dir} />
                   <span className="truncate">{file.name}</span>
                 </div>
@@ -163,8 +165,13 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                   {file.is_dir ? '--' : formatBytes(file.size)}
                 </div>
 
+                {/* Owner / Group */}
+                <div className="col-span-2 text-right font-mono text-[11px] text-zinc-400 truncate">
+                  {file.owner ? `${file.owner}${file.group ? `:${file.group}` : ''}` : '--'}
+                </div>
+
                 {/* Modified date */}
-                <div className="col-span-3 text-right text-[11px] text-zinc-400">
+                <div className="col-span-2 text-right text-[11px] text-zinc-400">
                   {formatDate(file.modified_at)}
                 </div>
 

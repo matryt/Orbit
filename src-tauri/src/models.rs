@@ -28,6 +28,8 @@ pub struct FileEntry {
     pub size: u64,
     pub modified_at: String,
     pub permissions: Option<String>,
+    pub owner: Option<String>,
+    pub group: Option<String>,
     pub etag: Option<String>,
 }
 

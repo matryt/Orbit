@@ -79,6 +79,7 @@ export const QuickLookModal: React.FC = () => {
               </h3>
               <p className="text-[10px] text-zinc-500 font-mono">
                 {quickLookFile.is_dir ? 'Dossier' : formatBytes(quickLookFile.size)} • {formatDate(quickLookFile.modified_at)}
+                {quickLookFile.owner && ` • ${quickLookFile.owner}${quickLookFile.group ? `:${quickLookFile.group}` : ''}`}
               </p>
             </div>
           </div>

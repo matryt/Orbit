@@ -68,3 +68,4 @@ impl ConfigService {
         Self::save_profiles(app, &profiles)
     }
 }
+

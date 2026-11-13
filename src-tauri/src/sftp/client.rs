@@ -32,6 +32,7 @@ impl Handler for SshHandler {
 pub struct SftpProvider {
     session: SftpSession,
     _handle: Handle<SshHandler>,
+    username: String,
 }
 
 impl SftpProvider {
@@ -255,6 +256,7 @@ impl SftpProvider {
             Self {
                 session: sftp_session,
                 _handle: handle,
+                username: config.username,
             },
             logs,
         ))
@@ -307,6 +309,25 @@ impl StorageProvider for SftpProvider {
             let permissions = format_permissions(meta.permissions, is_dir);
             let modified_at = format_mtime(meta.mtime);
 
+            let owner = meta.uid.map(|u| {
+                if u == 0 {
+                    "root".to_string()
+                } else if u == 1000 {
+                    self.username.clone()
+                } else {
+                    u.to_string()
+                }
+            });
+            let group = meta.gid.map(|g| {
+                if g == 0 {
+                    "root".to_string()
+                } else if g == 1000 {
+                    self.username.clone()
+                } else {
+                    g.to_string()
+                }
+            });
+
             entries.push(FileEntry {
                 name: entry.file_name(),
                 path: entry.path(),
@@ -314,6 +335,8 @@ impl StorageProvider for SftpProvider {
                 size,
                 modified_at,
                 permissions: Some(permissions),
+                owner,
+                group,
                 etag: None,
             });
         }

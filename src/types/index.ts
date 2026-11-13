@@ -23,6 +23,8 @@ export interface FileEntry {
   size: number;
   modified_at: string;
   permissions?: string;
+  owner?: string;
+  group?: string;
   etag?: string;
 }
 
