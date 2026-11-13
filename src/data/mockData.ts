@@ -75,6 +75,8 @@ export const MOCK_LOCAL_FILES: FileEntry[] = [
 export const MOCK_TRANSFERS: TransferItem[] = [
   {
     id: 'tx-1',
+    serverName: 'AWS S3 Production',
+    serverType: 's3',
     fileName: 'archive-v2.tar.gz',
     remotePath: '/backup/archive-v2.tar.gz',
     localPath: '/Users/mac/archive-v2.tar.gz',
@@ -86,6 +88,8 @@ export const MOCK_TRANSFERS: TransferItem[] = [
   },
   {
     id: 'tx-2',
+    serverName: 'Cloudflare R2 (CDN)',
+    serverType: 's3',
     fileName: 'hero-banner.jpg',
     remotePath: '/images/hero-banner.jpg',
     localPath: '/Users/mac/Downloads/hero-banner.jpg',
@@ -138,3 +142,4 @@ echo "✨ Déploiement terminé avec succès !"
 [2026-11-13 19:20:22] GET /configs/nginx.conf HTTP/1.1 - 200 OK (4ms)
 `
 };
+

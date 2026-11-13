@@ -60,3 +60,4 @@ export const DualPaneView: React.FC = () => {
     </div>
   );
 };
+

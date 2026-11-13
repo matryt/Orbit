@@ -22,8 +22,9 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   selectedPath,
   onSelect,
   title,
+  isLocal = false,
 }) => {
-  const { setQuickLookFile, toggleQuickLook } = useOrbitStore();
+  const { setQuickLookFile, setActivePane } = useOrbitStore();
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Navigate up one folder
@@ -63,12 +64,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       if (selected) {
         handleRowDoubleClick(selected);
       }
-    } else if (e.code === 'Space') {
-      e.preventDefault();
-      const selected = files.find((f) => f.path === selectedPath);
-      if (selected && !selected.is_dir) {
-        toggleQuickLook();
-      }
     }
   };
 
@@ -76,6 +71,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     <div
       ref={containerRef}
       tabIndex={0}
+      onFocus={() => setActivePane(isLocal ? 'local' : 'remote')}
+      onClick={() => setActivePane(isLocal ? 'local' : 'remote')}
       onKeyDown={handleKeyDown}
       className="flex-1 flex flex-col h-full bg-background overflow-hidden outline-none select-none"
     >

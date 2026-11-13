@@ -26,6 +26,8 @@ export interface FileEntry {
 
 export interface TransferItem {
   id: string;
+  serverName?: string;
+  serverType?: StorageType;
   fileName: string;
   remotePath: string;
   localPath: string;
@@ -33,5 +35,5 @@ export interface TransferItem {
   bytesTransferred: number;
   totalBytes: number;
   speedBps: number;
-  status: 'queued' | 'transferring' | 'completed' | 'failed';
+  status: 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
 }

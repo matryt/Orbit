@@ -64,3 +64,4 @@ export const FileIcon: React.FC<FileIconProps> = ({ name, isDir, className = 'w-
       return <File className={`${className} text-zinc-400`} />;
   }
 };
+

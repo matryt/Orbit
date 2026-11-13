@@ -9,6 +9,10 @@ interface OrbitState {
   setActiveProfile: (id: string) => void;
   addProfile: (profile: ConnectionProfile) => void;
 
+  // Active Pane (for keyboard shortcuts and Quick Look)
+  activePane: 'remote' | 'local';
+  setActivePane: (pane: 'remote' | 'local') => void;
+
   // Remote Explorer
   currentPath: string;
   setCurrentPath: (path: string) => void;
@@ -41,6 +45,10 @@ interface OrbitState {
   isTransferDrawerOpen: boolean;
   toggleTransferDrawer: () => void;
   setTransferDrawerOpen: (open: boolean) => void;
+  pauseTransfer: (id: string) => void;
+  resumeTransfer: (id: string) => void;
+  cancelTransfer: (id: string) => void;
+  clearCompletedTransfers: () => void;
 
   // Modals
   isNewConnectionModalOpen: boolean;
@@ -68,6 +76,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }));
   },
 
+  activePane: 'remote',
+  setActivePane: (pane) => set({ activePane: pane }),
+
   currentPath: '/',
   setCurrentPath: (path) => {
     set({
@@ -83,8 +94,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     const lower = searchQuery.toLowerCase();
     return list.filter((f) => f.name.toLowerCase().includes(lower));
   },
-  selectedRemotePath: null,
-  selectedRemotePaths: [],
+  selectedRemotePath: '/app-config.json',
+  selectedRemotePaths: ['/app-config.json'],
   selectRemoteFile: (path, multi = false) => {
     const { selectedRemotePaths } = get();
     if (multi) {
@@ -95,11 +106,13 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       set({
         selectedRemotePaths: newPaths,
         selectedRemotePath: newPaths[newPaths.length - 1] || null,
+        activePane: 'remote',
       });
     } else {
       set({
         selectedRemotePaths: [path],
         selectedRemotePath: path,
+        activePane: 'remote',
       });
     }
   },
@@ -111,7 +124,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   setLocalPath: (path) => set({ localPath: path }),
   localFiles: MOCK_LOCAL_FILES,
   selectedLocalPath: null,
-  selectLocalFile: (path) => set({ selectedLocalPath: path }),
+  selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
 
   isDualPane: false,
   toggleDualPane: () => set((state) => ({ isDualPane: !state.isDualPane })),
@@ -122,13 +135,37 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   quickLookFile: null,
   setQuickLookFile: (file) => set({ quickLookFile: file }),
   toggleQuickLook: () => {
-    const { quickLookFile, selectedRemotePath, getRemoteFiles } = get();
+    const {
+      quickLookFile,
+      selectedRemotePath,
+      getRemoteFiles,
+      activePane,
+      selectedLocalPath,
+      localFiles,
+    } = get();
+
     if (quickLookFile) {
       set({ quickLookFile: null });
-    } else if (selectedRemotePath) {
-      const file = getRemoteFiles().find((f) => f.path === selectedRemotePath);
-      if (file && !file.is_dir) {
-        set({ quickLookFile: file });
+      return;
+    }
+
+    if (activePane === 'local') {
+      const targetPath = selectedLocalPath || (localFiles.length > 0 ? localFiles[0].path : null);
+      if (targetPath) {
+        const file = localFiles.find((f) => f.path === targetPath);
+        if (file) {
+          set({ quickLookFile: file, selectedLocalPath: file.path });
+          return;
+        }
+      }
+    }
+
+    const remoteFiles = getRemoteFiles();
+    const targetPath = selectedRemotePath || (remoteFiles.length > 0 ? remoteFiles[0].path : null);
+    if (targetPath) {
+      const file = remoteFiles.find((f) => f.path === targetPath);
+      if (file) {
+        set({ quickLookFile: file, selectedRemotePath: file.path });
       }
     }
   },
@@ -138,6 +175,36 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   toggleTransferDrawer: () =>
     set((state) => ({ isTransferDrawerOpen: !state.isTransferDrawerOpen })),
   setTransferDrawerOpen: (open) => set({ isTransferDrawerOpen: open }),
+
+  pauseTransfer: (id) => {
+    set((state) => ({
+      transfers: state.transfers.map((tx) =>
+        tx.id === id ? { ...tx, status: 'paused', speedBps: 0 } : tx
+      ),
+    }));
+  },
+
+  resumeTransfer: (id) => {
+    set((state) => ({
+      transfers: state.transfers.map((tx) =>
+        tx.id === id ? { ...tx, status: 'transferring', speedBps: 24500000 } : tx
+      ),
+    }));
+  },
+
+  cancelTransfer: (id) => {
+    set((state) => ({
+      transfers: state.transfers.map((tx) =>
+        tx.id === id ? { ...tx, status: 'cancelled', speedBps: 0 } : tx
+      ),
+    }));
+  },
+
+  clearCompletedTransfers: () => {
+    set((state) => ({
+      transfers: state.transfers.filter((tx) => tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'queued'),
+    }));
+  },
 
   isNewConnectionModalOpen: false,
   setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),
