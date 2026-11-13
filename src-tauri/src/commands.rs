@@ -3,9 +3,12 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::config_service::ConfigService;
 use crate::error::AppError;
 use crate::keyring_service::KeyringService;
-use crate::models::{ConnectionTestResult, FileEntry, SftpConnectConfig, TransferProgress};
+use crate::models::{
+    ConnectionProfile, ConnectionTestResult, FileEntry, SftpConnectConfig, TransferProgress,
+};
 use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 
@@ -160,5 +163,21 @@ pub async fn get_secret(profile_id: String) -> Result<Option<String>, AppError> 
 #[tauri::command]
 pub async fn delete_secret(profile_id: String) -> Result<(), AppError> {
     KeyringService::delete_secret(&profile_id)
+}
+
+#[tauri::command]
+pub async fn load_profiles(app: tauri::AppHandle) -> Result<Vec<ConnectionProfile>, AppError> {
+    ConfigService::load_profiles(&app)
+}
+
+#[tauri::command]
+pub async fn save_profile(profile: ConnectionProfile, app: tauri::AppHandle) -> Result<(), AppError> {
+    ConfigService::save_profile(&app, profile)
+}
+
+#[tauri::command]
+pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), AppError> {
+    let _ = KeyringService::delete_secret(&profile_id);
+    ConfigService::delete_profile(&app, &profile_id)
 }
 

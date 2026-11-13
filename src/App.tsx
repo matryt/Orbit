@@ -10,7 +10,12 @@ import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 
 export function App() {
-  const { toggleDualPane, toggleQuickLook, quickLookFile, setQuickLookFile } = useOrbitStore();
+  const { toggleDualPane, toggleQuickLook, quickLookFile, setQuickLookFile, loadPersistedProfiles } = useOrbitStore();
+
+  // Load saved profiles from disk on startup
+  useEffect(() => {
+    loadPersistedProfiles();
+  }, [loadPersistedProfiles]);
 
   // Global keyboard shortcuts
   useEffect(() => {

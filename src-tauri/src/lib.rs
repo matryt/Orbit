@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod config_service;
 pub mod error;
 pub mod keyring_service;
 pub mod models;
@@ -47,6 +48,9 @@ pub fn run() {
             commands::save_secret,
             commands::get_secret,
             commands::delete_secret,
+            commands::load_profiles,
+            commands::save_profile,
+            commands::delete_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

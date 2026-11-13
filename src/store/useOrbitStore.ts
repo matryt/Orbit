@@ -1,14 +1,16 @@
 import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, TransferItem } from '../types';
-import { MOCK_PROFILES, MOCK_REMOTE_FILES, MOCK_LOCAL_FILES, MOCK_TRANSFERS } from '../data/mockData';
+import { MOCK_REMOTE_FILES, MOCK_LOCAL_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress } from '../services/storageApi';
 
 interface OrbitState {
   // Profiles
   profiles: ConnectionProfile[];
   activeProfileId: string;
+  loadPersistedProfiles: () => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
   addProfile: (profile: ConnectionProfile, secret?: string) => Promise<void>;
+  deleteProfile: (id: string) => Promise<void>;
   connectProfile: (profileId: string, secret?: string) => Promise<void>;
 
   // Connection state & error
@@ -70,45 +72,98 @@ interface OrbitState {
 }
 
 export const useOrbitStore = create<OrbitState>((set, get) => ({
-  profiles: MOCK_PROFILES,
-  activeProfileId: 'prof-1',
-    isConnecting: false,
+  profiles: [],
+  activeProfileId: '',
+  isConnecting: false,
+  connectionError: null,
+  clearConnectionError: () => set({ connectionError: null }),
+
+  loadPersistedProfiles: async () => {
+    try {
+      const persisted = await storageApi.loadProfiles();
+      if (persisted && persisted.length > 0) {
+        set({ profiles: persisted });
+        const currentActive = get().activeProfileId;
+        const exists = persisted.some((p) => p.id === currentActive);
+        if (!currentActive || !exists) {
+          await get().setActiveProfile(persisted[0].id);
+        }
+      } else {
+        set({ profiles: [], activeProfileId: '', remoteFiles: [] });
+      }
+    } catch (err) {
+      console.warn('Failed to load persisted profiles:', err);
+    }
+  },
+
+  setActiveProfile: async (id) => {
+    const profile = get().profiles.find((p) => p.id === id);
+    set({
+      activeProfileId: id,
+      currentPath: '/',
+      selectedRemotePath: null,
+      selectedRemotePaths: [],
       connectionError: null,
-        clearConnectionError: () => set({ connectionError: null }),
+    });
 
-          setActiveProfile: async (id) => {
-            const profile = get().profiles.find((p) => p.id === id);
-            set({
-              activeProfileId: id,
-              currentPath: '/',
-              selectedRemotePath: null,
-              selectedRemotePaths: [],
-              connectionError: null,
-            });
+    if (profile && profile.type === 'sftp') {
+      await get().connectProfile(id);
+    } else {
+      const files = MOCK_REMOTE_FILES['/'] || [];
+      set({ remoteFiles: files });
+    }
+  },
 
-            if (profile && profile.type === 'sftp') {
-              await get().connectProfile(id);
-            } else {
-              // Fallback or mock files
-              const files = MOCK_REMOTE_FILES['/'] || [];
-              set({ remoteFiles: files });
-            }
-          },
+  addProfile: async (profile, secret) => {
+    if (secret) {
+      await storageApi.saveSecret(profile.id, secret);
+    }
 
-              addProfile: async (profile, secret) => {
-                if (secret) {
-                  await storageApi.saveSecret(profile.id, secret);
-                }
-                set((state) => ({
-                  profiles: [...state.profiles, profile],
-                  activeProfileId: profile.id,
-                  currentPath: '/',
-                }));
+    try {
+      await storageApi.saveProfile(profile);
+    } catch (err) {
+      console.error('Failed to persist profile to connections.json:', err);
+    }
 
-                if (profile.type === 'sftp') {
-                  await get().connectProfile(profile.id, secret);
-                }
-              },
+    set((state) => {
+      const existingIdx = state.profiles.findIndex((p) => p.id === profile.id);
+      const updated = existingIdx >= 0
+        ? state.profiles.map((p) => (p.id === profile.id ? profile : p))
+        : [...state.profiles, profile];
+      return {
+        profiles: updated,
+        activeProfileId: profile.id,
+        currentPath: '/',
+      };
+    });
+
+    if (profile.type === 'sftp') {
+      await get().connectProfile(profile.id, secret);
+    }
+  },
+
+  deleteProfile: async (id: string) => {
+    try {
+      await storageApi.deleteProfile(id);
+    } catch (err) {
+      console.error('Failed to delete profile from storage:', err);
+    }
+
+    const { profiles, activeProfileId } = get();
+    const remaining = profiles.filter((p) => p.id !== id);
+    const nextActive = activeProfileId === id ? (remaining[0]?.id || '') : activeProfileId;
+
+    set({
+      profiles: remaining,
+      activeProfileId: nextActive,
+    });
+
+    if (nextActive) {
+      await get().setActiveProfile(nextActive);
+    } else {
+      set({ remoteFiles: [], currentPath: '/', selectedRemotePath: null, selectedRemotePaths: [] });
+    }
+  },
 
                 connectProfile: async (profileId, secret) => {
                   const profile = get().profiles.find((p) => p.id === profileId);
@@ -210,8 +265,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                     return remoteFiles.filter((f) => f.name.toLowerCase().includes(lower));
                                   },
 
-                                    selectedRemotePath: '/app-config.json',
-                                      selectedRemotePaths: ['/app-config.json'],
+  selectedRemotePath: null,
+  selectedRemotePaths: [],
                                         selectRemoteFile: (path, multi = false) => {
                                           const { selectedRemotePaths } = get();
                                           if (multi) {

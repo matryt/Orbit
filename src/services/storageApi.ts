@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionTestResult, FileEntry } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
 export interface SftpConnectParams {
@@ -231,5 +231,40 @@ export const storageApi = {
   async deleteSecret(profileId: string): Promise<void> {
     if (!isTauri()) return;
     await invoke('delete_secret', { profileId });
+  },
+
+  async loadProfiles(): Promise<ConnectionProfile[]> {
+    if (!isTauri()) {
+      const stored = localStorage.getItem('orbit_connections');
+      return stored ? JSON.parse(stored) : [];
+    }
+    return await invoke<ConnectionProfile[]>('load_profiles');
+  },
+
+  async saveProfile(profile: ConnectionProfile): Promise<void> {
+    if (!isTauri()) {
+      const stored = localStorage.getItem('orbit_connections');
+      const list: ConnectionProfile[] = stored ? JSON.parse(stored) : [];
+      const idx = list.findIndex((p) => p.id === profile.id);
+      if (idx >= 0) {
+        list[idx] = profile;
+      } else {
+        list.push(profile);
+      }
+      localStorage.setItem('orbit_connections', JSON.stringify(list));
+      return;
+    }
+    await invoke('save_profile', { profile });
+  },
+
+  async deleteProfile(profileId: string): Promise<void> {
+    if (!isTauri()) {
+      const stored = localStorage.getItem('orbit_connections');
+      const list: ConnectionProfile[] = stored ? JSON.parse(stored) : [];
+      const filtered = list.filter((p) => p.id !== profileId);
+      localStorage.setItem('orbit_connections', JSON.stringify(filtered));
+      return;
+    }
+    await invoke('delete_profile', { profileId });
   },
 };

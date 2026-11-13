@@ -1,6 +1,26 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub storage_type: String, // "s3" | "sftp"
+    pub endpoint: Option<String>,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub username: Option<String>,
+    #[serde(rename = "authType")]
+    pub auth_type: Option<String>,
+    #[serde(rename = "keyPath")]
+    pub key_path: Option<String>,
+    #[serde(rename = "isFavorite", default)]
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub path: String,

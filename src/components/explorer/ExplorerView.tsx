@@ -3,7 +3,7 @@ import { useOrbitStore } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
 import { FileEntry } from '../../types';
-import { FolderUp, HardDrive } from 'lucide-react';
+import { FolderUp, HardDrive, Server, Plus } from 'lucide-react';
 
 interface ExplorerViewProps {
   files: FileEntry[];
@@ -24,7 +24,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   title,
   isLocal = false,
 }) => {
-  const { setQuickLookFile, setActivePane } = useOrbitStore();
+  const { setQuickLookFile, setActivePane, profiles, setNewConnectionModalOpen } = useOrbitStore();
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Navigate up one folder
@@ -115,8 +115,28 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         )}
 
         {files.length === 0 ? (
-          <div className="h-48 flex flex-col items-center justify-center text-zinc-500 text-xs">
-            <p>Dossier vide ou aucun fichier trouvé</p>
+          <div className="h-64 flex flex-col items-center justify-center text-center p-6 text-zinc-500">
+            {!isLocal && profiles.length === 0 ? (
+              <>
+                <div className="w-10 h-10 rounded-full bg-white/5 border border-border-subtle flex items-center justify-center mb-2.5">
+                  <Server className="w-5 h-5 text-zinc-500" />
+                </div>
+                <p className="text-zinc-300 text-xs font-medium">Aucun serveur connecté</p>
+                <p className="text-zinc-500 text-[11px] mt-1 mb-3">
+                  Créez ou sélectionnez une connexion pour explorer vos fichiers distants.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setNewConnectionModalOpen(true)}
+                  className="px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-all flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Nouvelle connexion</span>
+                </button>
+              </>
+            ) : (
+              <p className="text-xs">Dossier vide ou aucun fichier trouvé</p>
+            )}
           </div>
         ) : (
           files.map((file) => {
