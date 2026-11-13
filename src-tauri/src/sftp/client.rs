@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use russh::client::{self, Handle, Handler};
+use russh::keys::PublicKeyOrCertificate;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::load_secret_key;
-use russh::keys::PublicKeyOrCertificate;
 use russh_sftp::client::SftpSession;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,9 +47,21 @@ impl SftpProvider {
         let mut logs = Vec::new();
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
 
-        logs.push(format!("[{}] Démarrage de la séquence de connexion SFTP...", now()));
-        logs.push(format!("[{}] Cible : {}:{}", now(), config.host, config.port));
-        logs.push(format!("[{}] Utilisateur SSH : '{}'", now(), config.username));
+        logs.push(format!(
+            "[{}] Démarrage de la séquence de connexion SFTP...",
+            now()
+        ));
+        logs.push(format!(
+            "[{}] Cible : {}:{}",
+            now(),
+            config.host,
+            config.port
+        ));
+        logs.push(format!(
+            "[{}] Utilisateur SSH : '{}'",
+            now(),
+            config.username
+        ));
 
         let ssh_config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(30)),
@@ -57,11 +69,18 @@ impl SftpProvider {
         });
 
         let addr = format!("{}:{}", config.host, config.port);
-        logs.push(format!("[{}] 1/4 Connexion TCP socket vers {}...", now(), addr));
+        logs.push(format!(
+            "[{}] 1/4 Connexion TCP socket vers {}...",
+            now(),
+            addr
+        ));
 
         let mut handle = match client::connect(ssh_config, &addr, SshHandler).await {
             Ok(h) => {
-                logs.push(format!("[{}] Connexion TCP socket établie avec succès.", now()));
+                logs.push(format!(
+                    "[{}] Connexion TCP socket établie avec succès.",
+                    now()
+                ));
                 h
             }
             Err(e) => {
@@ -76,7 +95,10 @@ impl SftpProvider {
             }
         };
 
-        logs.push(format!("[{}] 2/4 Négociation KEX et algorithmes SSH validés.", now()));
+        logs.push(format!(
+            "[{}] 2/4 Négociation KEX et algorithmes SSH validés.",
+            now()
+        ));
         logs.push(format!("[{}] 3/4 Début de l'authentification...", now()));
 
         // Authentication: Password or SSH Key
@@ -91,15 +113,26 @@ impl SftpProvider {
                 PathBuf::from(&key_path)
             };
 
-            logs.push(format!("[{}] Méthode : Clé privée SSH ({})", now(), expanded_path.display()));
+            logs.push(format!(
+                "[{}] Méthode : Clé privée SSH ({})",
+                now(),
+                expanded_path.display()
+            ));
 
             let secret_key = match load_secret_key(&expanded_path, config.passphrase.as_deref()) {
                 Ok(k) => {
-                    logs.push(format!("[{}] Clé privée chargée et déchiffrée avec succès (type: {:?}).", now(), k.algorithm()));
+                    logs.push(format!(
+                        "[{}] Clé privée chargée et déchiffrée avec succès (type: {:?}).",
+                        now(),
+                        k.algorithm()
+                    ));
                     k
                 }
                 Err(e) => {
-                    let err_msg = format!("Impossible de charger la clé {}: {e}", expanded_path.display());
+                    let err_msg = format!(
+                        "Impossible de charger la clé {}: {e}",
+                        expanded_path.display()
+                    );
                     logs.push(format!("[{}] ❌ {}", now(), err_msg));
                     logs.push(format!(
                         "[{}] ℹ️ Conseil: Vérifiez le chemin ou saisissez la passphrase si la clé est chiffrée.",
@@ -114,31 +147,52 @@ impl SftpProvider {
 
             // Modern OpenSSH servers (Oracle Linux, Ubuntu 22+, Debian 12+, RHEL 9) reject legacy ssh-rsa (SHA-1).
             // They require rsa-sha2-512 or rsa-sha2-256. For ed25519/ecdsa, hash_alg is ignored.
-            let hash_candidates: Vec<(Option<russh::keys::HashAlg>, &str)> = if key_arc.algorithm().is_rsa() {
-                vec![
-                    (Some(russh::keys::HashAlg::Sha512), "rsa-sha2-512"),
-                    (Some(russh::keys::HashAlg::Sha256), "rsa-sha2-256"),
-                    (None, "ssh-rsa (legacy)"),
-                ]
-            } else {
-                vec![(None, "standard")]
-            };
+            let hash_candidates: Vec<(Option<russh::keys::HashAlg>, &str)> =
+                if key_arc.algorithm().is_rsa() {
+                    vec![
+                        (Some(russh::keys::HashAlg::Sha512), "rsa-sha2-512"),
+                        (Some(russh::keys::HashAlg::Sha256), "rsa-sha2-256"),
+                        (None, "ssh-rsa (legacy)"),
+                    ]
+                } else {
+                    vec![(None, "standard")]
+                };
 
             for (hash_alg, alg_name) in hash_candidates {
-                logs.push(format!("[{}] Négociation de signature avec l'algorithme : {}...", now(), alg_name));
+                logs.push(format!(
+                    "[{}] Négociation de signature avec l'algorithme : {}...",
+                    now(),
+                    alg_name
+                ));
                 let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
 
-                match handle.authenticate_publickey(&config.username, key_with_alg).await {
+                match handle
+                    .authenticate_publickey(&config.username, key_with_alg)
+                    .await
+                {
                     Ok(res) if res.success() => {
-                        logs.push(format!("[{}] Authentification par clé SSH acceptée ({}) !", now(), alg_name));
+                        logs.push(format!(
+                            "[{}] Authentification par clé SSH acceptée ({}) !",
+                            now(),
+                            alg_name
+                        ));
                         authenticated = true;
                         break;
                     }
                     Ok(_) => {
-                        logs.push(format!("[{}] Algorithme {} refusé par le serveur, essai du suivant...", now(), alg_name));
+                        logs.push(format!(
+                            "[{}] Algorithme {} refusé par le serveur, essai du suivant...",
+                            now(),
+                            alg_name
+                        ));
                     }
                     Err(e) => {
-                        logs.push(format!("[{}] Erreur technique avec algorithme {}: {}", now(), alg_name, e));
+                        logs.push(format!(
+                            "[{}] Erreur technique avec algorithme {}: {}",
+                            now(),
+                            alg_name,
+                            e
+                        ));
                     }
                 }
             }
@@ -155,9 +209,15 @@ impl SftpProvider {
             }
         } else if let Some(password) = config.password {
             logs.push(format!("[{}] Méthode : Mot de passe", now()));
-            match handle.authenticate_password(&config.username, password).await {
+            match handle
+                .authenticate_password(&config.username, password)
+                .await
+            {
                 Ok(res) if res.success() => {
-                    logs.push(format!("[{}] Authentification par mot de passe acceptée !", now()));
+                    logs.push(format!(
+                        "[{}] Authentification par mot de passe acceptée !",
+                        now()
+                    ));
                 }
                 Ok(_) => {
                     let err_msg = "Nom d'utilisateur ou mot de passe incorrect".to_string();
@@ -171,7 +231,10 @@ impl SftpProvider {
                 }
             }
         } else {
-            logs.push(format!("[{}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...", now()));
+            logs.push(format!(
+                "[{}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...",
+                now()
+            ));
             let mut authenticated = false;
             if let Some(home) = dirs::home_dir() {
                 let default_keys = [home.join(".ssh/id_ed25519"), home.join(".ssh/id_rsa")];
@@ -180,21 +243,30 @@ impl SftpProvider {
                         logs.push(format!("[{}] Tentative avec {}", now(), key_p.display()));
                         if let Ok(key) = load_secret_key(&key_p, config.passphrase.as_deref()) {
                             let key_arc = Arc::new(key);
-                            let hash_candidates: Vec<Option<russh::keys::HashAlg>> = if key_arc.algorithm().is_rsa() {
-                                vec![
-                                    Some(russh::keys::HashAlg::Sha512),
-                                    Some(russh::keys::HashAlg::Sha256),
-                                    None,
-                                ]
-                            } else {
-                                vec![None]
-                            };
+                            let hash_candidates: Vec<Option<russh::keys::HashAlg>> =
+                                if key_arc.algorithm().is_rsa() {
+                                    vec![
+                                        Some(russh::keys::HashAlg::Sha512),
+                                        Some(russh::keys::HashAlg::Sha256),
+                                        None,
+                                    ]
+                                } else {
+                                    vec![None]
+                                };
 
                             for hash_alg in hash_candidates {
-                                let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
-                                if let Ok(res) = handle.authenticate_publickey(&config.username, key_with_alg).await {
+                                let key_with_alg =
+                                    PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
+                                if let Ok(res) = handle
+                                    .authenticate_publickey(&config.username, key_with_alg)
+                                    .await
+                                {
                                     if res.success() {
-                                        logs.push(format!("[{}] Authentification réussie avec {}", now(), key_p.display()));
+                                        logs.push(format!(
+                                            "[{}] Authentification réussie avec {}",
+                                            now(),
+                                            key_p.display()
+                                        ));
                                         authenticated = true;
                                         break;
                                     }
@@ -215,7 +287,10 @@ impl SftpProvider {
             }
         }
 
-        logs.push(format!("[{}] 4/4 Ouverture du canal SSH et du sous-système SFTP...", now()));
+        logs.push(format!(
+            "[{}] 4/4 Ouverture du canal SSH et du sous-système SFTP...",
+            now()
+        ));
         let channel = match handle.channel_open_session().await {
             Ok(c) => c,
             Err(e) => {
@@ -227,7 +302,10 @@ impl SftpProvider {
 
         match channel.request_subsystem(true, "sftp").await {
             Ok(_) => {
-                logs.push(format!("[{}] Sous-système SFTP accepté par le serveur.", now()));
+                logs.push(format!(
+                    "[{}] Sous-système SFTP accepté par le serveur.",
+                    now()
+                ));
             }
             Err(e) => {
                 let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
@@ -274,7 +352,10 @@ fn format_permissions(mode: Option<u32>, is_dir: bool) -> String {
         let r_oth = if m & 0o004 != 0 { 'r' } else { '-' };
         let w_oth = if m & 0o002 != 0 { 'w' } else { '-' };
         let x_oth = if m & 0o001 != 0 { 'x' } else { '-' };
-        format!("{}{}{}{}{}{}{}{}{}", r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth)
+        format!(
+            "{}{}{}{}{}{}{}{}{}",
+            r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth
+        )
     } else if is_dir {
         "rwxr-xr-x".to_string()
     } else {
@@ -379,10 +460,9 @@ impl StorageProvider for SftpProvider {
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), AppError> {
-        self.session
-            .rename(old_path, new_path)
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to rename {old_path} to {new_path}: {e}")))?;
+        self.session.rename(old_path, new_path).await.map_err(|e| {
+            AppError::Sftp(format!("Failed to rename {old_path} to {new_path}: {e}"))
+        })?;
         Ok(())
     }
 
@@ -409,9 +489,12 @@ impl StorageProvider for SftpProvider {
         remote_path: String,
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError> {
-        let mut local_file = tokio::fs::File::open(&local_path)
-            .await
-            .map_err(|e| AppError::Io(format!("Cannot open local file {}: {e}", local_path.display())))?;
+        let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| {
+            AppError::Io(format!(
+                "Cannot open local file {}: {e}",
+                local_path.display()
+            ))
+        })?;
 
         let total_bytes = local_file
             .metadata()
@@ -419,11 +502,10 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
-        let mut remote_file = self
-            .session
-            .create(&remote_path)
-            .await
-            .map_err(|e| AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}")))?;
+        let mut remote_file =
+            self.session.create(&remote_path).await.map_err(|e| {
+                AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
+            })?;
 
         let mut buffer = [0u8; 64 * 1024]; // 64 KiB chunks
         let mut bytes_transferred = 0u64;
@@ -494,11 +576,10 @@ impl StorageProvider for SftpProvider {
         local_path: PathBuf,
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError> {
-        let mut remote_file = self
-            .session
-            .open(&remote_path)
-            .await
-            .map_err(|e| AppError::Sftp(format!("Cannot open remote file {remote_path}: {e}")))?;
+        let mut remote_file =
+            self.session.open(&remote_path).await.map_err(|e| {
+                AppError::Sftp(format!("Cannot open remote file {remote_path}: {e}"))
+            })?;
 
         let meta = remote_file
             .metadata()
@@ -506,9 +587,12 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Sftp(format!("Cannot get remote file metadata: {e}")))?;
         let total_bytes = meta.size.unwrap_or(0);
 
-        let mut local_file = tokio::fs::File::create(&local_path)
-            .await
-            .map_err(|e| AppError::Io(format!("Cannot create local file {}: {e}", local_path.display())))?;
+        let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| {
+            AppError::Io(format!(
+                "Cannot create local file {}: {e}",
+                local_path.display()
+            ))
+        })?;
 
         let mut buffer = [0u8; 64 * 1024]; // 64 KiB chunks
         let mut bytes_transferred = 0u64;

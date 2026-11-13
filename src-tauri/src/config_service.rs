@@ -15,8 +15,9 @@ impl ConfigService {
             .map_err(|e| AppError::Io(format!("Impossible d'accéder au dossier de config: {e}")))?;
 
         if !config_dir.exists() {
-            fs::create_dir_all(&config_dir)
-                .map_err(|e| AppError::Io(format!("Impossible de créer le dossier de config: {e}")))?;
+            fs::create_dir_all(&config_dir).map_err(|e| {
+                AppError::Io(format!("Impossible de créer le dossier de config: {e}"))
+            })?;
         }
 
         Ok(config_dir.join("connections.json"))
@@ -35,8 +36,11 @@ impl ConfigService {
             return Ok(Vec::new());
         }
 
-        let profiles: Vec<ConnectionProfile> = serde_json::from_str(&content)
-            .map_err(|e| AppError::Io(format!("Erreur de désérialisation de connections.json: {e}")))?;
+        let profiles: Vec<ConnectionProfile> = serde_json::from_str(&content).map_err(|e| {
+            AppError::Io(format!(
+                "Erreur de désérialisation de connections.json: {e}"
+            ))
+        })?;
 
         Ok(profiles)
     }
@@ -68,4 +72,3 @@ impl ConfigService {
         Self::save_profiles(app, &profiles)
     }
 }
-

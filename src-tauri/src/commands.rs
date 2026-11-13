@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::ipc::Channel;
 use tauri::State;
+use tauri::ipc::Channel;
 
 use crate::config_service::ConfigService;
 use crate::error::AppError;
@@ -134,7 +134,9 @@ pub async fn storage_upload_file(
 ) -> Result<(), AppError> {
     let provider = state.get_provider(profile_id.as_deref()).await?;
     let path_buf = PathBuf::from(local_path);
-    provider.upload_file(path_buf, remote_path, progress_tx).await
+    provider
+        .upload_file(path_buf, remote_path, progress_tx)
+        .await
 }
 
 #[tauri::command]
@@ -147,7 +149,9 @@ pub async fn storage_download_file(
 ) -> Result<(), AppError> {
     let provider = state.get_provider(profile_id.as_deref()).await?;
     let path_buf = PathBuf::from(local_path);
-    provider.download_file(remote_path, path_buf, progress_tx).await
+    provider
+        .download_file(remote_path, path_buf, progress_tx)
+        .await
 }
 
 #[tauri::command]
@@ -171,7 +175,10 @@ pub async fn load_profiles(app: tauri::AppHandle) -> Result<Vec<ConnectionProfil
 }
 
 #[tauri::command]
-pub async fn save_profile(profile: ConnectionProfile, app: tauri::AppHandle) -> Result<(), AppError> {
+pub async fn save_profile(
+    profile: ConnectionProfile,
+    app: tauri::AppHandle,
+) -> Result<(), AppError> {
     ConfigService::save_profile(&app, profile)
 }
 
@@ -180,4 +187,3 @@ pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result
     let _ = KeyringService::delete_secret(&profile_id);
     ConfigService::delete_profile(&app, &profile_id)
 }
-

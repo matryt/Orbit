@@ -40,7 +40,10 @@ impl SessionManager {
         }
     }
 
-    pub async fn get_provider(&self, profile_id: Option<&str>) -> Result<Arc<dyn StorageProvider>, AppError> {
+    pub async fn get_provider(
+        &self,
+        profile_id: Option<&str>,
+    ) -> Result<Arc<dyn StorageProvider>, AppError> {
         let map = self.providers.read().await;
 
         let target_id = match profile_id {
@@ -62,4 +65,3 @@ impl SessionManager {
         ))
     }
 }
-

@@ -1,8 +1,8 @@
+use crate::error::AppError;
+use crate::models::{FileEntry, TransferProgress};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
-use crate::error::AppError;
-use crate::models::{FileEntry, TransferProgress};
 
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
@@ -24,4 +24,3 @@ pub trait StorageProvider: Send + Sync {
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError>;
 }
-
