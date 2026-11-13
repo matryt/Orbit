@@ -10,6 +10,24 @@ use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 
 #[tauri::command]
+pub async fn test_sftp_connection(
+    mut config: SftpConnectConfig,
+) -> Result<String, AppError> {
+    if config.password.is_none() && config.passphrase.is_none() {
+        if let Ok(Some(secret)) = KeyringService::get_secret(&config.profile_id) {
+            if config.key_path.is_some() {
+                config.passphrase = Some(secret);
+            } else {
+                config.password = Some(secret);
+            }
+        }
+    }
+
+    let _provider = SftpProvider::connect(config).await?;
+    Ok("Connexion SFTP établie avec succès ! Authentification et sous-système SFTP validés.".into())
+}
+
+#[tauri::command]
 pub async fn connect_sftp(
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,

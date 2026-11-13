@@ -34,6 +34,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::test_sftp_connection,
             commands::connect_sftp,
             commands::disconnect,
             commands::storage_list_dir,

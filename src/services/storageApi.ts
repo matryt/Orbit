@@ -24,13 +24,51 @@ export const isTauri = () => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 };
 
+export function formatConnectionError(err: any): string {
+  const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+
+  if (msg.includes('Failed to connect to host') || msg.includes('Connection refused') || msg.includes('timed out')) {
+    return 'Hôte injoignable : Vérifiez l\'adresse IP/domaine, le port et l\'état du serveur SSH.';
+  }
+  if (msg.includes('Could not load SSH key')) {
+    return 'Clé SSH introuvable ou illisible : Vérifiez le chemin du fichier et les permissions.';
+  }
+  if (msg.includes('SSH key authentication rejected') || msg.includes('Invalid username or password') || msg.includes('auth failed')) {
+    return 'Authentification refusée : Nom d\'utilisateur, clé SSH ou mot de passe incorrect.';
+  }
+  if (msg.includes('No password or valid SSH key provided')) {
+    return 'Authentification manquante : Veuillez indiquer un mot de passe ou sélectionner une clé SSH valide.';
+  }
+  if (msg.includes('Keyring error')) {
+    return 'Erreur de trousseau OS : Impossible d\'accéder au trousseau de clés du système.';
+  }
+  return msg;
+}
+
 export const storageApi = {
+  async testSftp(params: SftpConnectParams): Promise<string> {
+    if (!isTauri()) {
+      await new Promise((r) => setTimeout(r, 600));
+      if (!params.host) throw new Error('Veuillez renseigner un hôte.');
+      return 'Test réussi (mode simulé) : Serveur accessible et authentification validée.';
+    }
+    try {
+      return await invoke<string>('test_sftp_connection', { config: params });
+    } catch (err: any) {
+      throw new Error(formatConnectionError(err));
+    }
+  },
+
   async connectSftp(params: SftpConnectParams): Promise<void> {
     if (!isTauri()) {
       console.log('[Mock] Connecting SFTP:', params);
       return;
     }
-    await invoke('connect_sftp', { config: params });
+    try {
+      await invoke('connect_sftp', { config: params });
+    } catch (err: any) {
+      throw new Error(formatConnectionError(err));
+    }
   },
 
   async disconnect(profileId: string): Promise<void> {

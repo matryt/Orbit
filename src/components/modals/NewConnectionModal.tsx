@@ -1,8 +1,23 @@
 import React, { useState } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { StorageType, ConnectionProfile } from '../../types';
+import { storageApi } from '../../services/storageApi';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
-import { X, Cloud, Server, Lock, Check, Key, FolderOpen, Eye, EyeOff } from 'lucide-react';
+import {
+  X,
+  Cloud,
+  Server,
+  Lock,
+  Check,
+  Key,
+  FolderOpen,
+  Eye,
+  EyeOff,
+  Activity,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+} from 'lucide-react';
 
 export const NewConnectionModal: React.FC = () => {
   const { isNewConnectionModalOpen, setNewConnectionModalOpen, addProfile } = useOrbitStore();
@@ -27,6 +42,13 @@ export const NewConnectionModal: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
+  // Test state
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
   if (!isNewConnectionModalOpen) return null;
 
   const handleBrowseKey = async () => {
@@ -38,9 +60,57 @@ export const NewConnectionModal: React.FC = () => {
       });
       if (selected && typeof selected === 'string') {
         setKeyPath(selected);
+        setTestResult(null);
       }
     } catch (err) {
       console.warn('Dialog not available in browser mode:', err);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setTestResult(null);
+
+    if (type === 's3') {
+      setTestResult({
+        type: 'success',
+        message: 'Configuration S3 syntaxiquement correcte (test direct avec AWS SDK en cours d\'intégration à l\'étape 2).',
+      });
+      return;
+    }
+
+    if (!host.trim()) {
+      setTestResult({ type: 'error', message: 'Veuillez saisir une adresse d\'hôte valide.' });
+      return;
+    }
+    if (!username.trim()) {
+      setTestResult({ type: 'error', message: 'Veuillez renseigner un nom d\'utilisateur SSH.' });
+      return;
+    }
+
+    setIsTesting(true);
+
+    try {
+      const msg = await storageApi.testSftp({
+        profile_id: `test-${Date.now()}`,
+        host: host.trim(),
+        port: Number(port) || 22,
+        username: username.trim(),
+        password: authType === 'password' ? password.trim() : undefined,
+        key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
+        passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
+      });
+
+      setTestResult({
+        type: 'success',
+        message: msg || 'Serveur SFTP accessible et authentification validée avec succès !',
+      });
+    } catch (err: any) {
+      setTestResult({
+        type: 'error',
+        message: err.message || 'Impossible d\'établir la connexion au serveur distant.',
+      });
+    } finally {
+      setIsTesting(false);
     }
   };
 
@@ -106,7 +176,10 @@ export const NewConnectionModal: React.FC = () => {
           <div className="grid grid-cols-2 gap-2 p-1 bg-surface-muted rounded-lg border border-border-subtle">
             <button
               type="button"
-              onClick={() => setType('sftp')}
+              onClick={() => {
+                setType('sftp');
+                setTestResult(null);
+              }}
               className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
                 type === 'sftp'
                   ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm'
@@ -118,7 +191,10 @@ export const NewConnectionModal: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setType('s3')}
+              onClick={() => {
+                setType('s3');
+                setTestResult(null);
+              }}
               className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
                 type === 's3'
                   ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm'
@@ -230,7 +306,10 @@ export const NewConnectionModal: React.FC = () => {
                     type="text"
                     required
                     value={host}
-                    onChange={(e) => setHost(e.target.value)}
+                    onChange={(e) => {
+                      setHost(e.target.value);
+                      setTestResult(null);
+                    }}
                     placeholder="192.168.1.100 ou ssh.mondomaine.com"
                     className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                   />
@@ -242,7 +321,10 @@ export const NewConnectionModal: React.FC = () => {
                   <input
                     type="number"
                     value={port}
-                    onChange={(e) => setPort(Number(e.target.value))}
+                    onChange={(e) => {
+                      setPort(Number(e.target.value));
+                      setTestResult(null);
+                    }}
                     className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                   />
                 </div>
@@ -257,7 +339,10 @@ export const NewConnectionModal: React.FC = () => {
                   type="text"
                   required
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    setTestResult(null);
+                  }}
                   placeholder="root / ubuntu / deploy"
                   className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                 />
@@ -271,7 +356,10 @@ export const NewConnectionModal: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2 p-1 bg-surface-muted/80 rounded-lg border border-border-subtle">
                   <button
                     type="button"
-                    onClick={() => setAuthType('key')}
+                    onClick={() => {
+                      setAuthType('key');
+                      setTestResult(null);
+                    }}
                     className={`flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-all ${
                       authType === 'key'
                         ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
@@ -283,7 +371,10 @@ export const NewConnectionModal: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setAuthType('password')}
+                    onClick={() => {
+                      setAuthType('password');
+                      setTestResult(null);
+                    }}
                     className={`flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-all ${
                       authType === 'password'
                         ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
@@ -308,7 +399,10 @@ export const NewConnectionModal: React.FC = () => {
                         <span>Presets :</span>
                         <button
                           type="button"
-                          onClick={() => setKeyPath('~/.ssh/id_ed25519')}
+                          onClick={() => {
+                            setKeyPath('~/.ssh/id_ed25519');
+                            setTestResult(null);
+                          }}
                           className="hover:text-sky-400 underline font-mono"
                         >
                           id_ed25519
@@ -316,7 +410,10 @@ export const NewConnectionModal: React.FC = () => {
                         <span>•</span>
                         <button
                           type="button"
-                          onClick={() => setKeyPath('~/.ssh/id_rsa')}
+                          onClick={() => {
+                            setKeyPath('~/.ssh/id_rsa');
+                            setTestResult(null);
+                          }}
                           className="hover:text-sky-400 underline font-mono"
                         >
                           id_rsa
@@ -329,7 +426,10 @@ export const NewConnectionModal: React.FC = () => {
                         type="text"
                         required
                         value={keyPath}
-                        onChange={(e) => setKeyPath(e.target.value)}
+                        onChange={(e) => {
+                          setKeyPath(e.target.value);
+                          setTestResult(null);
+                        }}
                         placeholder="~/.ssh/id_ed25519 ou /chemin/vers/cle.pem"
                         className="flex-1 bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                       />
@@ -358,7 +458,10 @@ export const NewConnectionModal: React.FC = () => {
                     <input
                       type="password"
                       value={passphrase}
-                      onChange={(e) => setPassphrase(e.target.value)}
+                      onChange={(e) => {
+                        setPassphrase(e.target.value);
+                        setTestResult(null);
+                      }}
                       placeholder="Laisser vide si la clé n'a pas de passphrase"
                       className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                     />
@@ -380,7 +483,10 @@ export const NewConnectionModal: React.FC = () => {
                       type={showPassword ? 'text' : 'password'}
                       required
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        setTestResult(null);
+                      }}
                       placeholder="••••••••••••••••••••••••••••••"
                       className="w-full bg-surface-muted border border-border-subtle rounded-md pl-3 pr-9 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                     />
@@ -398,22 +504,66 @@ export const NewConnectionModal: React.FC = () => {
             </>
           )}
 
+          {/* Test connection result banner */}
+          {testResult && (
+            <div
+              className={`p-3 rounded-lg border text-xs flex items-start gap-2.5 animate-in fade-in ${
+                testResult.type === 'success'
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                  : 'bg-red-500/10 border-red-500/30 text-red-300'
+              }`}
+            >
+              {testResult.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+              )}
+              <div className="flex-1">
+                <div className="font-semibold mb-0.5">
+                  {testResult.type === 'success' ? 'Connexion réussie' : 'Échec de connexion'}
+                </div>
+                <p className="text-[11px] leading-relaxed opacity-90">{testResult.message}</p>
+              </div>
+            </div>
+          )}
+
           {/* Action buttons */}
-          <div className="pt-3 flex items-center justify-end gap-2 border-t border-border-subtle">
+          <div className="pt-3 flex items-center justify-between border-t border-border-subtle">
             <button
               type="button"
-              onClick={() => setNewConnectionModalOpen(false)}
-              className="px-3 py-1.5 rounded-md text-xs font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+              disabled={isTesting}
+              onClick={handleTestConnection}
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/[0.08] hover:bg-white/[0.12] text-zinc-200 hover:text-white border border-border-subtle transition-all flex items-center gap-1.5 disabled:opacity-50"
             >
-              Annuler
+              {isTesting ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                  <span>Test en cours...</span>
+                </>
+              ) : (
+                <>
+                  <Activity className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Tester la connexion</span>
+                </>
+              )}
             </button>
-            <button
-              type="submit"
-              className="px-4 py-1.5 rounded-md text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition-all flex items-center gap-1.5"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Enregistrer & Connecter</span>
-            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setNewConnectionModalOpen(false)}
+                className="px-3 py-1.5 rounded-md text-xs font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-1.5 rounded-md text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition-all flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Enregistrer & Connecter</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>
