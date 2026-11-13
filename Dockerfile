@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for Orbit CI & Testing
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Install system dependencies for Tauri and Node.js
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,21 +19,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Add rustfmt and clippy components
+RUN rustup component add rustfmt clippy
+
 WORKDIR /app
 
 # Copy dependency manifests first for better caching
 COPY package*.json ./
 RUN npm ci
 
-COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
-WORKDIR /app/src-tauri
-# Fetch rust dependencies
-RUN cargo fetch
-WORKDIR /app
-
 # Copy all source files
 COPY . .
 
-# Run validation checks
-CMD ["sh", "-c", "npm run build && cd src-tauri && cargo clippy -- -D warnings && cargo test"]
+# Run all CI checks inside the Linux container
+RUN npm run build
+RUN cd src-tauri && cargo fmt --all -- --check
+RUN cd src-tauri && cargo clippy -- -D warnings
+RUN cd src-tauri && cargo test
 
