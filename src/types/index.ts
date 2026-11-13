@@ -10,6 +10,8 @@ export interface ConnectionProfile {
   host?: string;
   port?: number;
   username?: string;
+  authType?: 'password' | 'key';
+  keyPath?: string;
   status: 'connected' | 'idle' | 'error';
   isFavorite: boolean;
 }

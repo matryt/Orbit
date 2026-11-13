@@ -117,18 +117,21 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                   set({ isConnecting: true, connectionError: null });
 
                   try {
-                    let pwd = secret;
-                    if (!pwd) {
-                      pwd = (await storageApi.getSecret(profileId)) || undefined;
+                    let secretVal = secret;
+                    if (!secretVal) {
+                      secretVal = (await storageApi.getSecret(profileId)) || undefined;
                     }
+
+                    const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
 
                     await storageApi.connectSftp({
                       profile_id: profile.id,
                       host: profile.host || '',
                       port: profile.port || 22,
                       username: profile.username || 'root',
-                      password: pwd,
-                      key_path: undefined,
+                      password: !isKeyAuth ? secretVal : undefined,
+                      key_path: isKeyAuth ? profile.keyPath || undefined : undefined,
+                      passphrase: isKeyAuth ? secretVal : undefined,
                     });
 
                     // Update status to connected
