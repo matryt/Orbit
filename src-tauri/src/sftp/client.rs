@@ -94,7 +94,7 @@ impl SftpProvider {
 
             let secret_key = match load_secret_key(&expanded_path, config.passphrase.as_deref()) {
                 Ok(k) => {
-                    logs.push(format!("[{}] Clé privée chargée et déchiffrée avec succès.", now()));
+                    logs.push(format!("[{}] Clé privée chargée et déchiffrée avec succès (type: {:?}).", now(), k.algorithm()));
                     k
                 }
                 Err(e) => {
@@ -108,27 +108,49 @@ impl SftpProvider {
                 }
             };
 
-            let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(secret_key), None);
+            let key_arc = Arc::new(secret_key);
+            let mut authenticated = false;
 
-            match handle.authenticate_publickey(&config.username, key_with_alg).await {
-                Ok(res) if res.success() => {
-                    logs.push(format!("[{}] Authentification par clé SSH acceptée par le serveur !", now()));
+            // Modern OpenSSH servers (Oracle Linux, Ubuntu 22+, Debian 12+, RHEL 9) reject legacy ssh-rsa (SHA-1).
+            // They require rsa-sha2-512 or rsa-sha2-256. For ed25519/ecdsa, hash_alg is ignored.
+            let hash_candidates: Vec<(Option<russh::keys::HashAlg>, &str)> = if key_arc.algorithm().is_rsa() {
+                vec![
+                    (Some(russh::keys::HashAlg::Sha512), "rsa-sha2-512"),
+                    (Some(russh::keys::HashAlg::Sha256), "rsa-sha2-256"),
+                    (None, "ssh-rsa (legacy)"),
+                ]
+            } else {
+                vec![(None, "standard")]
+            };
+
+            for (hash_alg, alg_name) in hash_candidates {
+                logs.push(format!("[{}] Négociation de signature avec l'algorithme : {}...", now(), alg_name));
+                let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
+
+                match handle.authenticate_publickey(&config.username, key_with_alg).await {
+                    Ok(res) if res.success() => {
+                        logs.push(format!("[{}] Authentification par clé SSH acceptée ({}) !", now(), alg_name));
+                        authenticated = true;
+                        break;
+                    }
+                    Ok(_) => {
+                        logs.push(format!("[{}] Algorithme {} refusé par le serveur, essai du suivant...", now(), alg_name));
+                    }
+                    Err(e) => {
+                        logs.push(format!("[{}] Erreur technique avec algorithme {}: {}", now(), alg_name, e));
+                    }
                 }
-                Ok(_) => {
-                    let err_msg = "Le serveur SSH a rejeté la clé publique (SSH_MSG_USERAUTH_FAILURE)".to_string();
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                    logs.push(format!(
-                        "[{}] ℹ️ Conseil: Vérifiez que votre clé publique (.pub) est ajoutée dans ~/.ssh/authorized_keys sur le serveur pour l'utilisateur '{}'.",
-                        now(),
-                        config.username
-                    ));
-                    return Err((AppError::Auth(err_msg), logs));
-                }
-                Err(e) => {
-                    let err_msg = format!("Erreur lors de l'authentification par clé: {e}");
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                    return Err((AppError::Auth(err_msg), logs));
-                }
+            }
+
+            if !authenticated {
+                let err_msg = "Le serveur SSH a rejeté la clé publique pour tous les algorithmes (SSH_MSG_USERAUTH_FAILURE)".to_string();
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                logs.push(format!(
+                    "[{}] ℹ️ Conseil: Vérifiez que votre clé publique (.pub) est ajoutée dans ~/.ssh/authorized_keys sur le serveur pour l'utilisateur '{}'.",
+                    now(),
+                    config.username
+                ));
+                return Err((AppError::Auth(err_msg), logs));
             }
         } else if let Some(password) = config.password {
             logs.push(format!("[{}] Méthode : Mot de passe", now()));
@@ -156,13 +178,29 @@ impl SftpProvider {
                     if key_p.exists() {
                         logs.push(format!("[{}] Tentative avec {}", now(), key_p.display()));
                         if let Ok(key) = load_secret_key(&key_p, config.passphrase.as_deref()) {
-                            let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-                            if let Ok(res) = handle.authenticate_publickey(&config.username, key_with_alg).await {
-                                if res.success() {
-                                    logs.push(format!("[{}] Authentification réussie avec {}", now(), key_p.display()));
-                                    authenticated = true;
-                                    break;
+                            let key_arc = Arc::new(key);
+                            let hash_candidates: Vec<Option<russh::keys::HashAlg>> = if key_arc.algorithm().is_rsa() {
+                                vec![
+                                    Some(russh::keys::HashAlg::Sha512),
+                                    Some(russh::keys::HashAlg::Sha256),
+                                    None,
+                                ]
+                            } else {
+                                vec![None]
+                            };
+
+                            for hash_alg in hash_candidates {
+                                let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
+                                if let Ok(res) = handle.authenticate_publickey(&config.username, key_with_alg).await {
+                                    if res.success() {
+                                        logs.push(format!("[{}] Authentification réussie avec {}", now(), key_p.display()));
+                                        authenticated = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if authenticated {
+                                break;
                             }
                         }
                     }
