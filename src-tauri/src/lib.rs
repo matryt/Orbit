@@ -19,19 +19,22 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionManager::new())
-        .setup(|app| {
-            let window = app.get_webview_window("main").unwrap();
-
-            #[cfg(target_os = "macos")]
+        .setup(|_app| {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                use window_vibrancy::{NSVisualEffectMaterial, apply_vibrancy};
-                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None);
-            }
+                let window = _app.get_webview_window("main").unwrap();
 
-            #[cfg(target_os = "windows")]
-            {
-                use window_vibrancy::apply_mica;
-                let _ = apply_mica(&window, None);
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{NSVisualEffectMaterial, apply_vibrancy};
+                    let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None);
+                }
+
+                #[cfg(target_os = "windows")]
+                {
+                    use window_vibrancy::apply_mica;
+                    let _ = apply_mica(&window, None);
+                }
             }
 
             Ok(())
