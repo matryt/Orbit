@@ -38,7 +38,6 @@ pub async fn test_sftp_connection(
 ) -> Result<ConnectionTestResult, AppError> {
     let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
         Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
-    let prompt_mgr = Arc::clone(&host_key_mgr);
 
     let test_task = async move {
         // Run synchronous keyring lookup on a blocking thread inside the timeout
@@ -55,12 +54,7 @@ pub async fn test_sftp_connection(
             }
         }
 
-        SftpProvider::connect_with_logs_and_prompt(
-            config,
-            Some(prompt_handler),
-            Some(prompt_mgr),
-        )
-        .await
+        SftpProvider::connect_with_logs_and_prompt(config, Some(prompt_handler)).await
     };
 
     match tokio::time::timeout(std::time::Duration::from_secs(90), test_task).await {
@@ -94,7 +88,6 @@ pub async fn connect_sftp(
 ) -> Result<(), AppError> {
     let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
         Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
-    let prompt_mgr = Arc::clone(&host_key_mgr);
 
     // If password or passphrase not provided directly, look in system keyring on a blocking thread
     if config.password.is_none() && config.passphrase.is_none() {
@@ -111,13 +104,18 @@ pub async fn connect_sftp(
     }
 
     let profile_id = config.profile_id.clone();
-    let provider = SftpProvider::connect_with_prompt(
-        config,
-        Some(prompt_handler),
-        Some(prompt_mgr),
-    )
-    .await?;
-    state.set_provider(profile_id, Arc::new(provider)).await;
+    let generation = state.start_connecting(&profile_id).await;
+
+    let provider = SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await?;
+
+    if !state
+        .complete_connecting(&profile_id, generation, Arc::new(provider))
+        .await
+    {
+        return Err(AppError::NotConnected(
+            "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
+        ));
+    }
     Ok(())
 }
 

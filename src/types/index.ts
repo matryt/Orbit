@@ -55,7 +55,7 @@ export interface HostKeyPromptRequest {
   key_type: string;
   fingerprint: string;
   is_new: boolean;
-  changed_line?: number;
+  changed_line?: number | null;
 }
 
 export type HostKeyDecision = 'accept_and_remember' | 'accept_once' | 'reject';

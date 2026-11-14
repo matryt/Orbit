@@ -15,45 +15,57 @@ export const HostKeyVerificationModal: React.FC = () => {
   useEffect(() => {
     if (!isTauri()) return;
 
+    let isMounted = true;
     let unlistenPrompt: (() => void) | undefined;
     let unlistenExpired: (() => void) | undefined;
 
-    // Buffer initial pending prompts in case connection started before listener attached
-    storageApi
-      .getPendingHostKeyPrompts()
-      .then((pending) => {
-        if (pending && pending.length > 0) {
+    const setup = async () => {
+      try {
+        const [cleanupPrompt, cleanupExpired] = await Promise.all([
+          listen<HostKeyPromptRequest>('ssh:host-key-prompt', (event) => {
+            if (!isMounted) return;
+            setPrompts((prev) => {
+              if (prev.some((p) => p.request_id === event.payload.request_id)) {
+                return prev;
+              }
+              return [...prev, event.payload];
+            });
+            setCopied(false);
+            setSubmitError(null);
+          }),
+          listen<{ request_id: string }>('ssh:host-key-expired', (event) => {
+            if (!isMounted) return;
+            setPrompts((prev) => prev.filter((p) => p.request_id !== event.payload.request_id));
+          }),
+        ]);
+
+        if (!isMounted) {
+          cleanupPrompt();
+          cleanupExpired();
+          return;
+        }
+
+        unlistenPrompt = cleanupPrompt;
+        unlistenExpired = cleanupExpired;
+
+        // Query pending prompts only after listeners are guaranteed to be registered
+        const pending = await storageApi.getPendingHostKeyPrompts();
+        if (isMounted && pending && pending.length > 0) {
           setPrompts((prev) => {
             const existingIds = new Set(prev.map((p) => p.request_id));
             const newPrompts = pending.filter((p) => !existingIds.has(p.request_id));
             return [...prev, ...newPrompts];
           });
         }
-      })
-      .catch((err) => {
-        console.error('Failed to get pending host key prompts:', err);
-      });
+      } catch (err) {
+        console.error('Failed to setup host key prompt listeners:', err);
+      }
+    };
 
-    listen<HostKeyPromptRequest>('ssh:host-key-prompt', (event) => {
-      setPrompts((prev) => {
-        if (prev.some((p) => p.request_id === event.payload.request_id)) {
-          return prev;
-        }
-        return [...prev, event.payload];
-      });
-      setCopied(false);
-      setSubmitError(null);
-    }).then((cleanup) => {
-      unlistenPrompt = cleanup;
-    });
-
-    listen<{ request_id: string }>('ssh:host-key-expired', (event) => {
-      setPrompts((prev) => prev.filter((p) => p.request_id !== event.payload.request_id));
-    }).then((cleanup) => {
-      unlistenExpired = cleanup;
-    });
+    setup();
 
     return () => {
+      isMounted = false;
       if (unlistenPrompt) unlistenPrompt();
       if (unlistenExpired) unlistenExpired();
     };

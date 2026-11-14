@@ -99,7 +99,6 @@ pub struct SshHandler {
     port: u16,
     key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
     prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
-    prompt_manager: Option<Arc<HostKeyPromptManager>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,14 +130,12 @@ impl SshHandler {
         port: u16,
         key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
-        prompt_manager: Option<Arc<HostKeyPromptManager>>,
     ) -> Self {
         Self {
             host,
             port,
             key_status,
             prompt_handler,
-            prompt_manager,
         }
     }
 }
@@ -208,15 +205,6 @@ impl Handler for SshHandler {
             }
         };
 
-        // Vérifier si une connexion concurrente a déjà validé cette clé en mémoire
-        if let Some(ref mgr) = self.prompt_manager {
-            if mgr.is_in_flight_enrolled(&host, port, &pubkey).await {
-                let mut status = key_status.lock().await;
-                *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
-                return Ok(true);
-            }
-        }
-
         // Sérialisation des opérations known_hosts pour la vérification (verrou relâché immédiatement après)
         let check_res = {
             let _lock = KNOWN_HOSTS_LOCK.lock().await;
@@ -253,9 +241,6 @@ impl Handler for SshHandler {
                     let decision = handler.prompt(req).await;
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
-                            if let Some(ref mgr) = self.prompt_manager {
-                                mgr.record_in_flight_enrollment(host, port, pubkey.clone()).await;
-                            }
                             let mut status = key_status.lock().await;
                             *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
                             Ok(true)
@@ -274,10 +259,12 @@ impl Handler for SshHandler {
                         }
                     }
                 } else {
-                    // Mode sans invite (ex: tests automatisés sans UI) : TOFU différé
+                    // Mode sans invite (ex: appel programmatique sans UI) : rejet strict par sécurité
                     let mut status = key_status.lock().await;
-                    *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
-                    Ok(true)
+                    *status = Some(HostKeyStatus::Rejected(
+                        "Clé d'hôte SSH inconnue et aucun gestionnaire d'approbation disponible.".into(),
+                    ));
+                    Ok(false)
                 }
             }
             Ok(Err(russh::keys::Error::KeyChanged { line })) => {
@@ -299,9 +286,6 @@ impl Handler for SshHandler {
                     let decision = handler.prompt(req).await;
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
-                            if let Some(ref mgr) = self.prompt_manager {
-                                mgr.record_in_flight_enrollment(host, port, pubkey.clone()).await;
-                            }
                             let mut status = key_status.lock().await;
                             *status = Some(HostKeyStatus::PendingReplacement { pubkey, line });
                             Ok(true)
@@ -359,15 +343,14 @@ pub struct SftpProvider {
 
 impl SftpProvider {
     pub async fn connect(config: SftpConnectConfig) -> Result<Self, AppError> {
-        Self::connect_with_prompt(config, None, None).await
+        Self::connect_with_prompt(config, None).await
     }
 
     pub async fn connect_with_prompt(
         config: SftpConnectConfig,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
-        prompt_manager: Option<Arc<HostKeyPromptManager>>,
     ) -> Result<Self, AppError> {
-        let (provider, logs) = Self::connect_with_logs_and_prompt(config, prompt_handler, prompt_manager)
+        let (provider, logs) = Self::connect_with_logs_and_prompt(config, prompt_handler)
             .await
             .map_err(|(e, _)| e)?;
         for line in &logs {
@@ -379,13 +362,12 @@ impl SftpProvider {
     pub async fn connect_with_logs(
         config: SftpConnectConfig,
     ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
-        Self::connect_with_logs_and_prompt(config, None, None).await
+        Self::connect_with_logs_and_prompt(config, None).await
     }
 
     pub async fn connect_with_logs_and_prompt(
         config: SftpConnectConfig,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
-        prompt_manager: Option<Arc<HostKeyPromptManager>>,
     ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
         let mut logs = Vec::new();
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
@@ -424,7 +406,6 @@ impl SftpProvider {
             config.port,
             Arc::clone(&key_status),
             prompt_handler,
-            prompt_manager,
         );
 
         let mut handle = match client::connect(ssh_config, &addr, handler).await {
@@ -805,26 +786,24 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        logs.push(format!(
-                            "[{}] ⚠️ Avertissement : impossible d'enregistrer la clé d'hôte dans known_hosts : {e}",
-                            now()
-                        ));
+                        let err_msg = format!("Échec d'enregistrement de la clé dans ~/.ssh/known_hosts : {e}");
+                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                        return Err((AppError::Io(err_msg), logs));
                     }
                     Err(e) => {
-                        logs.push(format!(
-                            "[{}] ⚠️ Avertissement : erreur asynchrone lors de l'enregistrement : {e}",
-                            now()
-                        ));
+                        let err_msg = format!("Erreur système lors de l'enregistrement de la clé : {e}");
+                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                        return Err((AppError::Io(err_msg), logs));
                     }
                 }
             }
-            Some(HostKeyStatus::PendingReplacement { ref pubkey, .. }) => {
+            Some(HostKeyStatus::PendingReplacement { ref pubkey, line }) => {
                 let host = config.host.clone();
                 let port = config.port;
                 let pubkey_clone = pubkey.clone();
                 let _lock = KNOWN_HOSTS_LOCK.lock().await;
                 let replace_res = tokio::task::spawn_blocking(move || {
-                    replace_known_hosts_entry_atomic(&host, port, &pubkey_clone)
+                    replace_known_hosts_entry_atomic(&host, port, &pubkey_clone, Some(line))
                 })
                 .await;
 
@@ -838,16 +817,14 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        logs.push(format!(
-                            "[{}] ⚠️ Avertissement : impossible de remplacer la clé d'hôte dans known_hosts : {e}",
-                            now()
-                        ));
+                        let err_msg = format!("Échec du remplacement de la clé dans ~/.ssh/known_hosts : {e}");
+                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                        return Err((AppError::Io(err_msg), logs));
                     }
                     Err(e) => {
-                        logs.push(format!(
-                            "[{}] ⚠️ Avertissement : erreur asynchrone lors du remplacement de la clé : {e}",
-                            now()
-                        ));
+                        let err_msg = format!("Erreur système lors du remplacement de la clé : {e}");
+                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                        return Err((AppError::Io(err_msg), logs));
                     }
                 }
             }
@@ -1653,7 +1630,6 @@ docker:x:999:ubuntu,mathieu
             2222,
             Arc::clone(&status),
             Some(mock_handler),
-            None,
         );
 
         let server_key = PublicKeyOrCertificate::PublicKey {
@@ -1681,7 +1657,6 @@ docker:x:999:ubuntu,mathieu
             2222,
             Arc::clone(&status),
             Some(mock_handler),
-            None,
         );
 
         let server_key = PublicKeyOrCertificate::PublicKey {
@@ -1709,7 +1684,6 @@ docker:x:999:ubuntu,mathieu
             2222,
             Arc::clone(&status),
             Some(mock_handler),
-            None,
         );
 
         let server_key = PublicKeyOrCertificate::PublicKey {
@@ -1724,38 +1698,27 @@ docker:x:999:ubuntu,mathieu
     }
 
     #[tokio::test]
-    async fn test_ssh_handler_in_flight_enrollment_bypasses_prompt() {
+    async fn test_ssh_handler_no_prompt_handler_rejects_unknown_host() {
         let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let status = Arc::new(tokio::sync::Mutex::new(None));
-        let prompt_mgr = Arc::new(HostKeyPromptManager::new());
 
-        // Pre-record enrollment from an earlier concurrent connection
-        prompt_mgr
-            .record_in_flight_enrollment("test-prompt-host.invalid".to_string(), 2222, pk.clone())
-            .await;
-
-        // Even with a Reject handler, the prompt should NOT be invoked because in-flight enrollment exists!
-        let mock_handler = Arc::new(MockPromptHandler {
-            decision: HostKeyDecision::Reject,
-        });
-
+        // When prompt_handler is None, unknown keys must be rejected (fail-closed)
         let mut handler = SshHandler::new(
             "test-prompt-host.invalid".to_string(),
             2222,
             Arc::clone(&status),
-            Some(mock_handler),
-            Some(prompt_mgr),
+            None,
         );
 
         let server_key = PublicKeyOrCertificate::PublicKey {
-            key: pk.clone(),
+            key: pk,
             hash_alg: None,
         };
 
         let res = handler.check_server_key(&server_key).await.unwrap();
-        assert!(res);
+        assert!(!res);
         let current_status = status.lock().await.clone();
-        assert_eq!(current_status, Some(HostKeyStatus::PendingEnrollment(pk)));
+        assert!(matches!(current_status, Some(HostKeyStatus::Rejected(_))));
     }
 }
