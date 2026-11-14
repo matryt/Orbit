@@ -36,10 +36,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js 22 LTS
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -52,7 +52,7 @@ jobs:
 
       # Rust Cache: Dramatically speeds up builds (from ~18min to ~3min)
       - name: Rust Cache
-        uses: swatinem/rust-cache@400e7407cfd7a091e5fbb6afec01ec146c432b7c # v2.7.7
+        uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
         with:
           workspaces: src-tauri -> target
 
@@ -61,7 +61,7 @@ jobs:
 
       # Build frontend and compile Tauri native bundles
       - name: Build and Package with Tauri
-        uses: tauri-apps/tauri-action@ea1f12403fd95c98ee2fff70a34d5a818ceeb112 # v0.5.17
+        uses: tauri-apps/tauri-action@2a8db2c169af2fdc695133781e27ecba52daea75 # v0.5.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # NOTE: Pour activer la signature Apple officielle et la notarisation

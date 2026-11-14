@@ -9,7 +9,10 @@ pub mod provider;
 pub mod session;
 pub mod sftp;
 
+use std::sync::Arc;
+
 use session::SessionManager;
+use sftp::host_key::HostKeyPromptManager;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
@@ -20,6 +23,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionManager::new())
+        .manage(Arc::new(HostKeyPromptManager::new()))
         .setup(|_app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
@@ -43,6 +47,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::test_sftp_connection,
             commands::connect_sftp,
+            commands::respond_host_key_prompt,
+            commands::get_pending_host_key_prompts,
             commands::disconnect,
             commands::storage_list_dir,
             commands::storage_create_dir,
