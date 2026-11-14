@@ -16,6 +16,10 @@ use crate::error::AppError;
 use crate::models::{FileEntry, SftpConnectConfig, TransferProgress};
 use crate::provider::StorageProvider;
 
+/// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
+/// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
+static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct SshHandler {
     host: String,
     port: u16,
@@ -30,7 +34,7 @@ pub enum HostKeyStatus {
     Learned,
     /// Clé d'hôte modifiée ! Potentielle attaque Man-in-the-Middle.
     Changed { line: usize },
-    /// Erreur ou avertissement lors de la vérification (ex. absence de home dir).
+    /// Erreur lors de la vérification (fail-closed par sécurité).
     CheckFailed(String),
 }
 
@@ -55,16 +59,52 @@ impl Handler for SshHandler {
         &mut self,
         server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        let host = self.host.clone();
+        let port = self.port;
+        let key_status = Arc::clone(&self.key_status);
+
+        // Si le serveur présente un certificat OpenSSH, valider la signature, les dates et les principaux
         let pubkey = match server_public_key {
             PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             PublicKeyOrCertificate::Certificate(cert) => {
+                if let Err(e) = cert.verify_signature() {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Signature du certificat d'hôte invalide : {e}"
+                    )));
+                    return Ok(false);
+                }
+
+                let now_ts = Utc::now().timestamp() as u64;
+                if now_ts < cert.valid_after() || now_ts >= cert.valid_before() {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Certificat d'hôte SSH expiré ou pas encore valide (validité: {} - {})",
+                        cert.valid_after(),
+                        cert.valid_before()
+                    )));
+                    return Ok(false);
+                }
+
+                let principals = cert.valid_principals();
+                if !principals.is_empty()
+                    && !principals.iter().any(|p| {
+                        p == &host || (p.starts_with("*.") && host.ends_with(&p[1..]))
+                    })
+                {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Le certificat d'hôte n'est pas valide pour {host} (principaux autorisés: {principals:?})"
+                    )));
+                    return Ok(false);
+                }
+
                 russh::keys::ssh_key::PublicKey::from(cert.public_key().clone())
             }
         };
 
-        let host = self.host.clone();
-        let port = self.port;
-        let key_status = Arc::clone(&self.key_status);
+        // Sérialisation des opérations known_hosts pour empêcher les courses concurrentes
+        let _lock = KNOWN_HOSTS_LOCK.lock().await;
 
         let check_res = tokio::task::spawn_blocking({
             let host = host.clone();
@@ -92,19 +132,23 @@ impl Handler for SshHandler {
                 match learn_res {
                     Ok(Ok(())) => {
                         *status = Some(HostKeyStatus::Learned);
+                        Ok(true)
                     }
                     Ok(Err(e)) => {
                         *status = Some(HostKeyStatus::CheckFailed(format!(
                             "Échec de l'enregistrement de la clé dans ~/.ssh/known_hosts: {e}"
                         )));
+                        // Fail-closed pour ne pas se connecter sans clé enregistrée
+                        Ok(false)
                     }
                     Err(e) => {
                         *status = Some(HostKeyStatus::CheckFailed(format!(
                             "Erreur de tâche asynchrone lors de l'enregistrement: {e}"
                         )));
+                        // Fail-closed
+                        Ok(false)
                     }
                 }
-                Ok(true)
             }
             Ok(Err(russh::keys::Error::KeyChanged { line })) => {
                 // CRITICAL: Server host key has changed. Abort handshake immediately!
@@ -115,12 +159,14 @@ impl Handler for SshHandler {
             Ok(Err(e)) => {
                 let mut status = key_status.lock().await;
                 *status = Some(HostKeyStatus::CheckFailed(format!("{e}")));
-                Ok(true)
+                // Fail-closed : ne pas autoriser la connexion si la vérification échoue
+                Ok(false)
             }
             Err(e) => {
                 let mut status = key_status.lock().await;
                 *status = Some(HostKeyStatus::CheckFailed(format!("Task join error: {e}")));
-                Ok(true)
+                // Fail-closed
+                Ok(false)
             }
         }
     }
@@ -140,11 +186,15 @@ pub struct SftpProvider {
     _handle: Handle<SshHandler>,
     username: String,
     identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
+    pub host_key_status: Option<HostKeyStatus>,
 }
 
 impl SftpProvider {
     pub async fn connect(config: SftpConnectConfig) -> Result<Self, AppError> {
-        let (provider, _logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        let (provider, logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        for line in &logs {
+            eprintln!("{line}");
+        }
         Ok(provider)
     }
 
@@ -218,6 +268,11 @@ impl SftpProvider {
             Err(e) => {
                 let recorded_status = key_status.lock().await.clone();
                 if let Some(HostKeyStatus::Changed { line }) = recorded_status {
+                    let target_spec = if config.port == 22 {
+                        config.host.clone()
+                    } else {
+                        format!("[{}]:{}", config.host, config.port)
+                    };
                     let err_msg = format!(
                         "ALERTE DE SÉCURITÉ MITM : La clé d'hôte SSH pour {} a CHANGÉ (ligne {} dans ~/.ssh/known_hosts) ! Connexion bloquée.",
                         addr, line
@@ -228,10 +283,15 @@ impl SftpProvider {
                         now()
                     ));
                     logs.push(format!(
-                        "[{}] ℹ️ Si le serveur a légitimement été réinstallé, supprimez l'ancienne clé avec la commande : ssh-keygen -R {}",
-                        now(),
-                        config.host
+                        "[{}] ℹ️ Si le serveur a légitimement été réinstallé, supprimez l'ancienne clé avec la commande : ssh-keygen -R {target_spec}",
+                        now()
                     ));
+                    return Err((AppError::Ssh(err_msg), logs));
+                }
+
+                if let Some(HostKeyStatus::CheckFailed(reason)) = recorded_status {
+                    let err_msg = format!("Échec de vérification de la clé d'hôte SSH : {reason}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
                     return Err((AppError::Ssh(err_msg), logs));
                 }
 
@@ -507,12 +567,14 @@ impl SftpProvider {
             }
         };
 
+        let final_status = key_status.lock().await.clone();
         Ok((
             Self {
                 session: sftp_session,
                 _handle: handle,
                 username: config.username,
                 identities: tokio::sync::RwLock::new(None),
+                host_key_status: final_status,
             },
             logs,
         ))
@@ -802,12 +864,12 @@ impl StorageProvider for SftpProvider {
         let mut entries = Vec::new();
         for entry in read_dir {
             let name = entry.file_name();
-            // Ignorer les pseudo-répertoires '.' et '..'
-            if name == "." || name == ".." {
+            // Ignorer les pseudo-répertoires '.' et '..' et séparateurs
+            if name == "." || name == ".." || name.contains('/') {
                 continue;
             }
-            // Prévenir l'injection de séparateurs ou de traversal par un serveur compromis
-            if name.contains('/') || name.contains('\\') || name.contains("..") {
+            // Prévenir les attaques de Directory Traversal dans les noms retournés
+            if validate_path_safety(&name).is_err() {
                 continue;
             }
 
