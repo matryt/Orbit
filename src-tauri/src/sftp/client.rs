@@ -13,8 +13,11 @@ use tauri::ipc::Channel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::AppError;
-use crate::models::{FileEntry, SftpConnectConfig, TransferProgress};
+use crate::models::{
+    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, TransferProgress,
+};
 use crate::provider::StorageProvider;
+use crate::sftp::host_key::{HostKeyPromptHandler, HostKeyPromptManager, remove_known_hosts_line};
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
@@ -93,6 +96,7 @@ pub struct SshHandler {
     host: String,
     port: u16,
     key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+    prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,8 +105,17 @@ pub enum HostKeyStatus {
     Verified,
     /// Clé d'hôte en attente d'enregistrement (différé jusqu'au succès réel de la connexion).
     PendingEnrollment(russh::keys::ssh_key::PublicKey),
+    /// Clé d'hôte modifiée en attente de remplacement (différé jusqu'au succès réel de la connexion).
+    PendingReplacement {
+        pubkey: russh::keys::ssh_key::PublicKey,
+        line: usize,
+    },
     /// Nouvel hôte : clé acceptée et enregistrée dans ~/.ssh/known_hosts (TOFU).
     Learned,
+    /// Clé approuvée pour cette session uniquement (non enregistrée sur le disque).
+    AcceptedOnce,
+    /// Clé rejetée par l'utilisateur.
+    Rejected(String),
     /// Clé d'hôte modifiée ! Potentielle attaque Man-in-the-Middle.
     Changed { line: usize },
     /// Erreur lors de la vérification (fail-closed par sécurité).
@@ -114,11 +127,13 @@ impl SshHandler {
         host: String,
         port: u16,
         key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
     ) -> Self {
         Self {
             host,
             port,
             key_status,
+            prompt_handler,
         }
     }
 }
@@ -205,17 +220,88 @@ impl Handler for SshHandler {
                 Ok(true)
             }
             Ok(Ok(false)) => {
-                // Clé inconnue : on diffère l'enregistrement sur disque au moment où
-                // la connexion réussit (évite de persister des clés sur des tests annulés/expirés).
-                let mut status = key_status.lock().await;
-                *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
-                Ok(true)
+                // Clé inconnue (nouvel hôte).
+                let key_type = pubkey.algorithm().to_string();
+                let fingerprint = pubkey.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string();
+
+                if let Some(ref handler) = self.prompt_handler {
+                    let req = HostKeyPromptRequest {
+                        request_id: HostKeyPromptManager::generate_request_id(),
+                        host: host.clone(),
+                        port,
+                        key_type,
+                        fingerprint,
+                        is_new: true,
+                        changed_line: None,
+                    };
+
+                    let decision = handler.prompt(req).await;
+                    match decision {
+                        HostKeyDecision::AcceptAndRemember => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
+                            Ok(true)
+                        }
+                        HostKeyDecision::AcceptOnce => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::AcceptedOnce);
+                            Ok(true)
+                        }
+                        HostKeyDecision::Reject => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::Rejected(
+                                "Connexion annulée : l'empreinte de la clé d'hôte a été refusée.".into(),
+                            ));
+                            Ok(false)
+                        }
+                    }
+                } else {
+                    // Mode sans invite (ex: tests automatisés sans UI) : TOFU différé
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
+                    Ok(true)
+                }
             }
             Ok(Err(russh::keys::Error::KeyChanged { line })) => {
-                // CRITICAL: Server host key has changed. Abort handshake immediately!
-                let mut status = key_status.lock().await;
-                *status = Some(HostKeyStatus::Changed { line });
-                Ok(false)
+                // CRITICAL: Server host key has changed.
+                let key_type = pubkey.algorithm().to_string();
+                let fingerprint = pubkey.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string();
+
+                if let Some(ref handler) = self.prompt_handler {
+                    let req = HostKeyPromptRequest {
+                        request_id: HostKeyPromptManager::generate_request_id(),
+                        host: host.clone(),
+                        port,
+                        key_type,
+                        fingerprint,
+                        is_new: false,
+                        changed_line: Some(line),
+                    };
+
+                    let decision = handler.prompt(req).await;
+                    match decision {
+                        HostKeyDecision::AcceptAndRemember => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::PendingReplacement { pubkey, line });
+                            Ok(true)
+                        }
+                        HostKeyDecision::AcceptOnce => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::AcceptedOnce);
+                            Ok(true)
+                        }
+                        HostKeyDecision::Reject => {
+                            let mut status = key_status.lock().await;
+                            *status = Some(HostKeyStatus::Changed { line });
+                            Ok(false)
+                        }
+                    }
+                } else {
+                    // Mode sans invite : fail-closed immédiat
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::Changed { line });
+                    Ok(false)
+                }
             }
             Ok(Err(e)) => {
                 let mut status = key_status.lock().await;
@@ -252,7 +338,16 @@ pub struct SftpProvider {
 
 impl SftpProvider {
     pub async fn connect(config: SftpConnectConfig) -> Result<Self, AppError> {
-        let (provider, logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        Self::connect_with_prompt(config, None).await
+    }
+
+    pub async fn connect_with_prompt(
+        config: SftpConnectConfig,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+    ) -> Result<Self, AppError> {
+        let (provider, logs) = Self::connect_with_logs_and_prompt(config, prompt_handler)
+            .await
+            .map_err(|(e, _)| e)?;
         for line in &logs {
             eprintln!("{line}");
         }
@@ -261,6 +356,13 @@ impl SftpProvider {
 
     pub async fn connect_with_logs(
         config: SftpConnectConfig,
+    ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
+        Self::connect_with_logs_and_prompt(config, None).await
+    }
+
+    pub async fn connect_with_logs_and_prompt(
+        config: SftpConnectConfig,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
     ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
         let mut logs = Vec::new();
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
@@ -294,7 +396,12 @@ impl SftpProvider {
         ));
 
         let key_status = Arc::new(tokio::sync::Mutex::new(None));
-        let handler = SshHandler::new(config.host.clone(), config.port, Arc::clone(&key_status));
+        let handler = SshHandler::new(
+            config.host.clone(),
+            config.port,
+            Arc::clone(&key_status),
+            prompt_handler,
+        );
 
         let mut handle = match client::connect(ssh_config, &addr, handler).await {
             Ok(h) => {
@@ -326,7 +433,7 @@ impl SftpProvider {
                                 let mut status = key_status.lock().await;
                                 *status = Some(HostKeyStatus::Learned);
                                 logs.push(format!(
-                                    "[{}] 🔑 Nouvel hôte SSH approuvé (TOFU) : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                                    "[{}] 🔑 Nouvel hôte SSH approuvé : clé publique enregistrée dans ~/.ssh/known_hosts.",
                                     now()
                                 ));
                             }
@@ -344,9 +451,49 @@ impl SftpProvider {
                             }
                         }
                     }
+                    Some(HostKeyStatus::PendingReplacement { ref pubkey, line }) => {
+                        let host = config.host.clone();
+                        let port = config.port;
+                        let pubkey_clone = pubkey.clone();
+                        let _lock = KNOWN_HOSTS_LOCK.lock().await;
+                        let replace_res = tokio::task::spawn_blocking(move || {
+                            let _ = remove_known_hosts_line(line);
+                            russh::keys::known_hosts::learn_known_hosts(&host, port, &pubkey_clone)
+                        })
+                        .await;
+
+                        match replace_res {
+                            Ok(Ok(())) => {
+                                let mut status = key_status.lock().await;
+                                *status = Some(HostKeyStatus::Learned);
+                                logs.push(format!(
+                                    "[{}] 🔄 Clé d'hôte SSH remplacée (ligne {line}) : nouvelle empreinte enregistrée dans ~/.ssh/known_hosts.",
+                                    now()
+                                ));
+                            }
+                            Ok(Err(e)) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : impossible d'enregistrer la nouvelle clé d'hôte dans known_hosts : {e}",
+                                    now()
+                                ));
+                            }
+                            Err(e) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : erreur asynchrone lors du remplacement de la clé : {e}",
+                                    now()
+                                ));
+                            }
+                        }
+                    }
+                    Some(HostKeyStatus::AcceptedOnce) => {
+                        logs.push(format!(
+                            "[{}] ⚠️ Clé d'hôte SSH approuvée pour cette session uniquement (non enregistrée sur le disque).",
+                            now()
+                        ));
+                    }
                     Some(HostKeyStatus::Learned) => {
                         logs.push(format!(
-                            "[{}] 🔑 Nouvel hôte SSH approuvé (TOFU) : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                            "[{}] 🔑 Nouvel hôte SSH approuvé : clé publique enregistrée dans ~/.ssh/known_hosts.",
                             now()
                         ));
                     }
@@ -362,6 +509,11 @@ impl SftpProvider {
             }
             Err(e) => {
                 let recorded_status = key_status.lock().await.clone();
+                if let Some(HostKeyStatus::Rejected(ref reason)) = recorded_status {
+                    logs.push(format!("[{}] ❌ Connexion annulée : {reason}", now()));
+                    return Err((AppError::Ssh(format!("Connexion annulée : {reason}")), logs));
+                }
+
                 if let Some(HostKeyStatus::Changed { line }) = recorded_status {
                     let target_spec = if config.port == 22 {
                         config.host.clone()
@@ -1405,12 +1557,120 @@ docker:x:999:ubuntu,mathieu
         let l = HostKeyStatus::Learned;
         let c = HostKeyStatus::Changed { line: 42 };
         let f = HostKeyStatus::CheckFailed("error".into());
+        let a = HostKeyStatus::AcceptedOnce;
+        let r = HostKeyStatus::Rejected("user rejected".into());
 
         assert_eq!(v, HostKeyStatus::Verified);
         assert_eq!(l, HostKeyStatus::Learned);
         assert_eq!(c, HostKeyStatus::Changed { line: 42 });
+        assert_eq!(a, HostKeyStatus::AcceptedOnce);
+        assert_eq!(r, HostKeyStatus::Rejected("user rejected".into()));
         assert_ne!(v, l);
         assert_ne!(c, HostKeyStatus::Changed { line: 12 });
         assert_eq!(f, HostKeyStatus::CheckFailed("error".into()));
+    }
+
+    #[test]
+    fn test_fingerprint() {
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
+        let fp = pk.fingerprint(russh::keys::ssh_key::HashAlg::Sha256);
+        assert!(fp.to_string().starts_with("SHA256:"));
+    }
+
+    struct MockPromptHandler {
+        decision: HostKeyDecision,
+    }
+
+    #[async_trait]
+    impl HostKeyPromptHandler for MockPromptHandler {
+        async fn prompt(&self, req: HostKeyPromptRequest) -> HostKeyDecision {
+            assert_eq!(req.host, "test-prompt-host.invalid");
+            assert_eq!(req.port, 2222);
+            assert!(req.is_new);
+            assert!(req.fingerprint.starts_with("SHA256:"));
+            self.decision
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ssh_handler_check_server_key_prompt_accept_and_remember() {
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
+        let status = Arc::new(tokio::sync::Mutex::new(None));
+        let mock_handler = Arc::new(MockPromptHandler {
+            decision: HostKeyDecision::AcceptAndRemember,
+        });
+
+        let mut handler = SshHandler::new(
+            "test-prompt-host.invalid".to_string(),
+            2222,
+            Arc::clone(&status),
+            Some(mock_handler),
+        );
+
+        let server_key = PublicKeyOrCertificate::PublicKey {
+            key: pk.clone(),
+            hash_alg: None,
+        };
+
+        let res = handler.check_server_key(&server_key).await.unwrap();
+        assert!(res);
+        let current_status = status.lock().await.clone();
+        assert_eq!(current_status, Some(HostKeyStatus::PendingEnrollment(pk)));
+    }
+
+    #[tokio::test]
+    async fn test_ssh_handler_check_server_key_prompt_accept_once() {
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
+        let status = Arc::new(tokio::sync::Mutex::new(None));
+        let mock_handler = Arc::new(MockPromptHandler {
+            decision: HostKeyDecision::AcceptOnce,
+        });
+
+        let mut handler = SshHandler::new(
+            "test-prompt-host.invalid".to_string(),
+            2222,
+            Arc::clone(&status),
+            Some(mock_handler),
+        );
+
+        let server_key = PublicKeyOrCertificate::PublicKey {
+            key: pk,
+            hash_alg: None,
+        };
+
+        let res = handler.check_server_key(&server_key).await.unwrap();
+        assert!(res);
+        let current_status = status.lock().await.clone();
+        assert_eq!(current_status, Some(HostKeyStatus::AcceptedOnce));
+    }
+
+    #[tokio::test]
+    async fn test_ssh_handler_check_server_key_prompt_reject() {
+        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
+        let status = Arc::new(tokio::sync::Mutex::new(None));
+        let mock_handler = Arc::new(MockPromptHandler {
+            decision: HostKeyDecision::Reject,
+        });
+
+        let mut handler = SshHandler::new(
+            "test-prompt-host.invalid".to_string(),
+            2222,
+            Arc::clone(&status),
+            Some(mock_handler),
+        );
+
+        let server_key = PublicKeyOrCertificate::PublicKey {
+            key: pk,
+            hash_alg: None,
+        };
+
+        let res = handler.check_server_key(&server_key).await.unwrap();
+        assert!(!res);
+        let current_status = status.lock().await.clone();
+        assert!(matches!(current_status, Some(HostKeyStatus::Rejected(_))));
     }
 }

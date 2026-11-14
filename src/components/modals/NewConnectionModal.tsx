@@ -169,8 +169,8 @@ export const NewConnectionModal: React.FC = () => {
     try {
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error("Délai d'attente dépassé (9s) : le serveur SSH est injoignable.")),
-          9000
+          () => reject(new Error("Délai d'attente dépassé (65s) : aucune réponse reçue du serveur SSH ou de la validation.")),
+          65000
         )
       );
 

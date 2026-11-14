@@ -7,15 +7,31 @@ use crate::config_service::ConfigService;
 use crate::error::AppError;
 use crate::keyring_service::KeyringService;
 use crate::models::{
-    ConnectionProfile, ConnectionTestResult, FileEntry, SftpConnectConfig, TransferProgress,
+    ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, SftpConnectConfig,
+    TransferProgress,
 };
 use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
+use crate::sftp::host_key::{HostKeyPromptManager, TauriHostKeyPromptHandler};
+
+#[tauri::command]
+pub async fn respond_host_key_prompt(
+    request_id: String,
+    decision: HostKeyDecision,
+    host_key_mgr: State<'_, Arc<HostKeyPromptManager>>,
+) -> Result<bool, AppError> {
+    Ok(host_key_mgr.resolve_prompt(&request_id, decision).await)
+}
 
 #[tauri::command]
 pub async fn test_sftp_connection(
+    app: tauri::AppHandle,
+    host_key_mgr: State<'_, Arc<HostKeyPromptManager>>,
     mut config: SftpConnectConfig,
 ) -> Result<ConnectionTestResult, AppError> {
+    let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
+        Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
+
     let test_task = async move {
         // Run synchronous keyring lookup on a blocking thread inside the timeout
         if config.password.is_none() && config.passphrase.is_none() {
@@ -31,10 +47,10 @@ pub async fn test_sftp_connection(
             }
         }
 
-        SftpProvider::connect_with_logs(config).await
+        SftpProvider::connect_with_logs_and_prompt(config, Some(prompt_handler)).await
     };
 
-    match tokio::time::timeout(std::time::Duration::from_secs(8), test_task).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(65), test_task).await {
         Ok(Ok((_provider, logs))) => Ok(ConnectionTestResult {
             success: true,
             message: "Connexion SFTP établie avec succès ! Authentification et sous-système SFTP validés.".into(),
@@ -47,9 +63,9 @@ pub async fn test_sftp_connection(
         }),
         Err(_) => Ok(ConnectionTestResult {
             success: false,
-            message: "Délai d'attente dépassé (8s) : le serveur SSH est injoignable ou ne répond pas.".into(),
+            message: "Délai d'attente dépassé (65s) : aucune réponse reçue du serveur SSH ou validation annulée.".into(),
             logs: vec![
-                format!("[{}] ❌ Timeout : Aucune réponse du serveur après 8 secondes.", chrono::Utc::now().format("%H:%M:%S%.3f")),
+                format!("[{}] ❌ Timeout : Aucune réponse après 65 secondes.", chrono::Utc::now().format("%H:%M:%S%.3f")),
                 "ℹ️ Conseil: Vérifiez l'adresse IP / domaine et le port, ou assurez-vous que le serveur SSH est bien démarré.".into(),
             ],
         }),
@@ -58,9 +74,14 @@ pub async fn test_sftp_connection(
 
 #[tauri::command]
 pub async fn connect_sftp(
+    app: tauri::AppHandle,
+    host_key_mgr: State<'_, Arc<HostKeyPromptManager>>,
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
+    let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
+        Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
+
     // If password or passphrase not provided directly, look in system keyring on a blocking thread
     if config.password.is_none() && config.passphrase.is_none() {
         let pid = config.profile_id.clone();
@@ -76,7 +97,7 @@ pub async fn connect_sftp(
     }
 
     let profile_id = config.profile_id.clone();
-    let provider = SftpProvider::connect(config).await?;
+    let provider = SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await?;
     state.set_provider(profile_id, Arc::new(provider)).await;
     Ok(())
 }

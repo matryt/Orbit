@@ -47,3 +47,16 @@ export interface ConnectionTestResult {
   message: string;
   logs: string[];
 }
+
+export interface HostKeyPromptRequest {
+  request_id: string;
+  host: string;
+  port: number;
+  key_type: string;
+  fingerprint: string;
+  is_new: boolean;
+  changed_line?: number;
+}
+
+export type HostKeyDecision = 'accept_and_remember' | 'accept_once' | 'reject';
+
