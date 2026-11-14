@@ -48,6 +48,7 @@ pub fn run() {
             commands::test_sftp_connection,
             commands::connect_sftp,
             commands::respond_host_key_prompt,
+            commands::get_pending_host_key_prompts,
             commands::disconnect,
             commands::storage_list_dir,
             commands::storage_create_dir,

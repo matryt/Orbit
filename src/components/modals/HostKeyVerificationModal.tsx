@@ -2,57 +2,112 @@ import React, { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { HostKeyPromptRequest, HostKeyDecision } from '../../types';
 import { storageApi, isTauri } from '../../services/storageApi';
-import { ShieldCheck, ShieldAlert, Copy, Check, X, AlertTriangle, KeyRound } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, Copy, Check, X, AlertTriangle, KeyRound, AlertCircle } from 'lucide-react';
 
 export const HostKeyVerificationModal: React.FC = () => {
-  const [prompt, setPrompt] = useState<HostKeyPromptRequest | null>(null);
+  const [prompts, setPrompts] = useState<HostKeyPromptRequest[]>([]);
   const [copied, setCopied] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const currentPrompt = prompts[0] || null;
 
   useEffect(() => {
     if (!isTauri()) return;
 
-    let unlistenFn: (() => void) | undefined;
+    let unlistenPrompt: (() => void) | undefined;
+    let unlistenExpired: (() => void) | undefined;
+
+    // Buffer initial pending prompts in case connection started before listener attached
+    storageApi
+      .getPendingHostKeyPrompts()
+      .then((pending) => {
+        if (pending && pending.length > 0) {
+          setPrompts((prev) => {
+            const existingIds = new Set(prev.map((p) => p.request_id));
+            const newPrompts = pending.filter((p) => !existingIds.has(p.request_id));
+            return [...prev, ...newPrompts];
+          });
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to get pending host key prompts:', err);
+      });
 
     listen<HostKeyPromptRequest>('ssh:host-key-prompt', (event) => {
-      setPrompt(event.payload);
+      setPrompts((prev) => {
+        if (prev.some((p) => p.request_id === event.payload.request_id)) {
+          return prev;
+        }
+        return [...prev, event.payload];
+      });
       setCopied(false);
-      setIsSubmitting(false);
+      setSubmitError(null);
     }).then((cleanup) => {
-      unlistenFn = cleanup;
+      unlistenPrompt = cleanup;
+    });
+
+    listen<{ request_id: string }>('ssh:host-key-expired', (event) => {
+      setPrompts((prev) => prev.filter((p) => p.request_id !== event.payload.request_id));
+    }).then((cleanup) => {
+      unlistenExpired = cleanup;
     });
 
     return () => {
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      if (unlistenPrompt) unlistenPrompt();
+      if (unlistenExpired) unlistenExpired();
     };
   }, []);
 
+  // Escape key handler to reject the active prompt
+  useEffect(() => {
+    if (!currentPrompt) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleDecision('reject');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentPrompt, isSubmitting]);
+
   const handleDecision = async (decision: HostKeyDecision) => {
-    if (!prompt || isSubmitting) return;
+    if (!currentPrompt || isSubmitting) return;
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
-      await storageApi.respondHostKeyPrompt(prompt.request_id, decision);
-    } catch (err) {
+      const delivered = await storageApi.respondHostKeyPrompt(currentPrompt.request_id, decision);
+      if (delivered) {
+        // Enlève uniquement la requête dont la décision a abouti
+        setPrompts((prev) => prev.filter((p) => p.request_id !== currentPrompt.request_id));
+        setCopied(false);
+      } else {
+        setSubmitError("La requête a expiré ou n'a pas pu être délivrée. Veuillez réessayer.");
+      }
+    } catch (err: any) {
       console.error('Failed to respond to host key prompt:', err);
+      setSubmitError(
+        err?.message || "Échec de l'envoi de la décision. La fenêtre reste ouverte pour vous permettre de réessayer."
+      );
     } finally {
       setIsSubmitting(false);
-      setPrompt(null);
     }
   };
 
   const handleCopyFingerprint = () => {
-    if (!prompt?.fingerprint) return;
-    navigator.clipboard.writeText(prompt.fingerprint);
+    if (!currentPrompt?.fingerprint) return;
+    navigator.clipboard.writeText(currentPrompt.fingerprint);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  if (!prompt) return null;
+  if (!currentPrompt) return null;
 
-  const isNew = prompt.is_new;
+  const isNew = currentPrompt.is_new;
 
   return (
     <div
@@ -89,15 +144,22 @@ export const HostKeyVerificationModal: React.FC = () => {
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between">
-              <span
-                className={`text-[11px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full border ${
-                  isNew
-                    ? 'bg-sky-500/10 text-sky-400 border-sky-500/30'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                }`}
-              >
-                {isNew ? 'Nouvel hôte SSH détecté' : 'Alerte de sécurité critique'}
-              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-[11px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full border ${
+                    isNew
+                      ? 'bg-sky-500/10 text-sky-400 border-sky-500/30'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                  }`}
+                >
+                  {isNew ? 'Nouvel hôte SSH détecté' : 'Alerte de sécurité critique'}
+                </span>
+                {prompts.length > 1 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/10 text-zinc-300">
+                    1 sur {prompts.length}
+                  </span>
+                )}
+              </div>
               <button
                 disabled={isSubmitting}
                 onClick={() => handleDecision('reject')}
@@ -118,7 +180,7 @@ export const HostKeyVerificationModal: React.FC = () => {
               {isNew
                 ? "Ce serveur n'est pas encore enregistré dans votre fichier known_hosts. Vérifiez l'empreinte avant d'envoyer vos identifiants."
                 : `La clé présentée par le serveur diffère de celle enregistrée à la ligne ${
-                    prompt.changed_line ?? 'inconnue'
+                    currentPrompt.changed_line ?? 'inconnue'
                   } dans ~/.ssh/known_hosts. Quelqu'un tente peut-être d'intercepter votre connexion ou la machine a été réinstallée.`}
             </p>
           </div>
@@ -126,11 +188,18 @@ export const HostKeyVerificationModal: React.FC = () => {
 
         {/* Server & Fingerprint Card */}
         <div className="p-6 space-y-4 overflow-y-auto">
+          {submitError && (
+            <div className="flex items-center gap-2 p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl text-xs text-rose-300">
+              <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+              <p className="flex-1">{submitError}</p>
+            </div>
+          )}
+
           <div className="bg-[#0a0b0f] border border-border-subtle rounded-xl p-4 space-y-3 font-mono text-xs">
             <div className="flex items-center justify-between pb-2.5 border-b border-border-subtle/60">
               <span className="text-zinc-500 font-sans font-medium text-[11px]">Serveur distant</span>
               <span className="text-zinc-200 font-semibold font-mono">
-                {prompt.host}:{prompt.port}
+                {currentPrompt.host}:{currentPrompt.port}
               </span>
             </div>
 
@@ -138,7 +207,7 @@ export const HostKeyVerificationModal: React.FC = () => {
               <span className="text-zinc-500 font-sans font-medium text-[11px]">Algorithme de clé</span>
               <span className="text-sky-400 font-mono font-medium flex items-center gap-1.5">
                 <KeyRound className="w-3.5 h-3.5" />
-                {prompt.key_type}
+                {currentPrompt.key_type}
               </span>
             </div>
 
@@ -167,7 +236,7 @@ export const HostKeyVerificationModal: React.FC = () => {
               </div>
 
               <div className="p-2.5 bg-black/50 border border-border-subtle rounded-lg text-emerald-400 select-all break-all leading-relaxed text-[11px]">
-                {prompt.fingerprint}
+                {currentPrompt.fingerprint}
               </div>
             </div>
           </div>

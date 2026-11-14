@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
 export interface SftpConnectParams {
@@ -115,6 +115,13 @@ export const storageApi = {
       requestId,
       decision,
     });
+  },
+
+  async getPendingHostKeyPrompts(): Promise<HostKeyPromptRequest[]> {
+    if (!isTauri()) {
+      return [];
+    }
+    return await invoke<HostKeyPromptRequest[]>('get_pending_host_key_prompts');
   },
 
   async listDir(profileId: string | undefined, path: string): Promise<FileEntry[]> {
