@@ -3,9 +3,21 @@ updates:
   # Maintain dependencies for npm packages
   - package-ecosystem: "npm"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      frontend-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Tailwind v4 requires manual architectural migration from v3
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
       - "frontend"
@@ -13,9 +25,17 @@ updates:
   # Maintain dependencies for Cargo (Rust src-tauri)
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
+    target-branch: "develop"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      backend-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     labels:
       - "dependencies"
       - "backend"
@@ -23,9 +43,14 @@ updates:
   # Maintain GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "develop"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
+    groups:
+      actions-dependencies:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "ci"
