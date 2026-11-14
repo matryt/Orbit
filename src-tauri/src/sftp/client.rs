@@ -5,6 +5,7 @@ use russh::keys::PublicKeyOrCertificate;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::load_secret_key;
 use russh_sftp::client::SftpSession;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,10 +30,19 @@ impl Handler for SshHandler {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UserGroupMaps {
+    pub users: HashMap<u32, String>,
+    pub groups: HashMap<u32, String>,
+    pub current_uid: Option<u32>,
+    pub current_gid: Option<u32>,
+}
+
 pub struct SftpProvider {
     session: SftpSession,
     _handle: Handle<SshHandler>,
     username: String,
+    identities: tokio::sync::OnceCell<UserGroupMaps>,
 }
 
 impl SftpProvider {
@@ -361,10 +371,167 @@ impl SftpProvider {
                 session: sftp_session,
                 _handle: handle,
                 username: config.username,
+                identities: tokio::sync::OnceCell::new(),
             },
             logs,
         ))
     }
+
+    pub async fn get_or_load_identities(&self) -> &UserGroupMaps {
+        self.identities
+            .get_or_init(|| async {
+                Self::load_system_identities(&self.session, &self.username).await
+            })
+            .await
+    }
+
+    async fn load_system_identities(
+        session: &SftpSession,
+        current_username: &str,
+    ) -> UserGroupMaps {
+        let mut users = HashMap::new();
+        let mut groups = HashMap::new();
+        let mut current_uid = None;
+        let mut current_gid = None;
+
+        // 0 is root on Unix/Linux systems
+        users.insert(0, "root".to_string());
+        groups.insert(0, "root".to_string());
+
+        // 1. Try to read /etc/passwd (max 256KB, 1500ms timeout)
+        let passwd_str = tokio::time::timeout(
+            Duration::from_millis(1500),
+            read_remote_small_file(session, "/etc/passwd", 256 * 1024),
+        )
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(content) = passwd_str {
+            let parsed = parse_passwd(&content);
+            for (uid, name) in parsed {
+                if name == current_username {
+                    current_uid = Some(uid);
+                }
+                users.insert(uid, name);
+            }
+        }
+
+        // 2. Try to read /etc/group (max 256KB, 1500ms timeout)
+        let group_str = tokio::time::timeout(
+            Duration::from_millis(1500),
+            read_remote_small_file(session, "/etc/group", 256 * 1024),
+        )
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(content) = group_str {
+            let parsed = parse_group(&content);
+            for (gid, name) in parsed {
+                if name == current_username {
+                    current_gid = Some(gid);
+                }
+                groups.insert(gid, name);
+            }
+        }
+
+        // 3. Fallback: if current_uid is still unknown (e.g. SFTP chroot or non-standard server)
+        if current_uid.is_none() {
+            if let Ok(meta) = session.metadata(".").await {
+                if let Some(uid) = meta.uid {
+                    if uid != 0 {
+                        current_uid = Some(uid);
+                        users.entry(uid).or_insert_with(|| current_username.to_string());
+                    }
+                }
+                if let Some(gid) = meta.gid {
+                    if gid != 0 {
+                        current_gid = Some(gid);
+                        groups.entry(gid).or_insert_with(|| current_username.to_string());
+                    }
+                }
+            }
+        }
+
+        UserGroupMaps {
+            users,
+            groups,
+            current_uid,
+            current_gid,
+        }
+    }
+}
+
+async fn read_remote_small_file(
+    session: &SftpSession,
+    path: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    let mut file = session.open(path).await.ok()?;
+    let mut content = Vec::new();
+    let mut buf = [0u8; 8192];
+    while content.len() < max_bytes {
+        match file.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => content.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    String::from_utf8(content).ok()
+}
+
+pub fn parse_passwd(content: &str) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 {
+            let name = parts[0].trim();
+            if let Ok(uid) = parts[2].trim().parse::<u32>() {
+                map.insert(uid, name.to_string());
+            }
+        }
+    }
+    map
+}
+
+pub fn parse_group(content: &str) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 {
+            let name = parts[0].trim();
+            if let Ok(gid) = parts[2].trim().parse::<u32>() {
+                map.insert(gid, name.to_string());
+            }
+        }
+    }
+    map
+}
+
+pub fn resolve_identity(
+    id: Option<u32>,
+    cache: &HashMap<u32, String>,
+    current_id: Option<u32>,
+    current_name: &str,
+) -> Option<String> {
+    id.map(|val| {
+        if let Some(name) = cache.get(&val) {
+            name.clone()
+        } else if Some(val) == current_id {
+            current_name.to_string()
+        } else {
+            val.to_string()
+        }
+    })
 }
 
 fn format_permissions(mode: Option<u32>, is_dir: bool) -> String {
@@ -408,6 +575,8 @@ impl StorageProvider for SftpProvider {
             .await
             .map_err(|e| AppError::Sftp(format!("Failed to list directory {dir_path}: {e}")))?;
 
+        let identities = self.get_or_load_identities().await;
+
         let mut entries = Vec::new();
         for entry in read_dir {
             let is_dir = entry.file_type().is_dir();
@@ -416,24 +585,18 @@ impl StorageProvider for SftpProvider {
             let permissions = format_permissions(meta.permissions, is_dir);
             let modified_at = format_mtime(meta.mtime);
 
-            let owner = meta.uid.map(|u| {
-                if u == 0 {
-                    "root".to_string()
-                } else if u == 1000 {
-                    self.username.clone()
-                } else {
-                    u.to_string()
-                }
-            });
-            let group = meta.gid.map(|g| {
-                if g == 0 {
-                    "root".to_string()
-                } else if g == 1000 {
-                    self.username.clone()
-                } else {
-                    g.to_string()
-                }
-            });
+            let owner = resolve_identity(
+                meta.uid,
+                &identities.users,
+                identities.current_uid,
+                &self.username,
+            );
+            let group = resolve_identity(
+                meta.gid,
+                &identities.groups,
+                identities.current_gid,
+                &self.username,
+            );
 
             entries.push(FileEntry {
                 name: entry.file_name(),
@@ -681,5 +844,99 @@ impl StorageProvider for SftpProvider {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_passwd() {
+        let passwd = r#"
+# Standard Linux passwd file
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
+mathieu:x:1001:1001:Mathieu Cuvelier:/home/mathieu:/bin/zsh
+alice:x:1002:1002:Alice:/home/alice:/bin/bash
+"#;
+        let map = parse_passwd(passwd);
+        assert_eq!(map.get(&0).unwrap(), "root");
+        assert_eq!(map.get(&1).unwrap(), "daemon");
+        assert_eq!(map.get(&33).unwrap(), "www-data");
+        assert_eq!(map.get(&1000).unwrap(), "ubuntu");
+        assert_eq!(map.get(&1001).unwrap(), "mathieu");
+        assert_eq!(map.get(&1002).unwrap(), "alice");
+        assert_eq!(map.get(&9999), None);
+    }
+
+    #[test]
+    fn test_parse_group() {
+        let group = r#"
+root:x:0:
+daemon:x:1:
+www-data:x:33:
+ubuntu:x:1000:
+mathieu:x:1001:
+docker:x:999:ubuntu,mathieu
+"#;
+        let map = parse_group(group);
+        assert_eq!(map.get(&0).unwrap(), "root");
+        assert_eq!(map.get(&1).unwrap(), "daemon");
+        assert_eq!(map.get(&33).unwrap(), "www-data");
+        assert_eq!(map.get(&1000).unwrap(), "ubuntu");
+        assert_eq!(map.get(&1001).unwrap(), "mathieu");
+        assert_eq!(map.get(&999).unwrap(), "docker");
+    }
+
+    #[test]
+    fn test_resolve_identity() {
+        let mut users = HashMap::new();
+        users.insert(0, "root".to_string());
+        users.insert(1000, "ubuntu".to_string());
+        users.insert(1001, "mathieu".to_string());
+
+        let current_username = "mathieu";
+        let current_uid = Some(1001);
+
+        // 1. Root
+        assert_eq!(
+            resolve_identity(Some(0), &users, current_uid, current_username),
+            Some("root".to_string())
+        );
+        // 2. User 1000 is ubuntu (not mathieu!)
+        assert_eq!(
+            resolve_identity(Some(1000), &users, current_uid, current_username),
+            Some("ubuntu".to_string())
+        );
+        // 3. User 1001 is mathieu
+        assert_eq!(
+            resolve_identity(Some(1001), &users, current_uid, current_username),
+            Some("mathieu".to_string())
+        );
+        // 4. Unknown UID displays as string
+        assert_eq!(
+            resolve_identity(Some(1050), &users, current_uid, current_username),
+            Some("1050".to_string())
+        );
+        // 5. None returns None
+        assert_eq!(
+            resolve_identity(None, &users, current_uid, current_username),
+            None
+        );
+
+        // 6. Chroot fallback test where cache only has root, but current_uid is known
+        let mut fallback_users = HashMap::new();
+        fallback_users.insert(0, "root".to_string());
+        assert_eq!(
+            resolve_identity(Some(1001), &fallback_users, Some(1001), current_username),
+            Some("mathieu".to_string())
+        );
+        assert_eq!(
+            resolve_identity(Some(1000), &fallback_users, Some(1001), current_username),
+            Some("1000".to_string())
+        );
     }
 }
