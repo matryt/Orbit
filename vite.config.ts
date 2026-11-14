@@ -29,4 +29,14 @@ export default defineConfig(() => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    // Tauri supports modern WebKit on macOS and modern WebView2 on Windows
+    target:
+      process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    // Disabling minification prevents heuristic AV false positives (such as
+    // Microsoft Defender Trojan:Script/Wacatac.B!ml on macOS DMG packages).
+    // In a local Tauri desktop client, unminified JS runs at identical speed with zero network latency.
+    minify: false,
+    sourcemap: false,
+  },
 }));
