@@ -87,10 +87,37 @@ jobs:
               > xattr -cr /Applications/Orbit.app
               > ```
             * **Windows 10 / 11 (x64)** : Téléchargez l'installeur `.exe` (NSIS) ou `.msi`.
-
-            ---
-            #### 📋 Détail des nouveautés et commits inclus :
-          generateReleaseNotes: true
           releaseDraft: ${{ inputs.draft || false }}
           prerelease: false
           args: ${{ matrix.platform.args }}
+
+  finalize-release:
+    name: Finalize Release Notes
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - name: Append Generated Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "Generating release notes for tag $TAG..."
+          
+          # 1. Fetch auto-generated changelog
+          CHANGELOG=$(gh api "repos/${{ github.repository }}/releases/generate-notes" -f tag_name="$TAG" --jq .body)
+          
+          # 2. Fetch current release id and body
+          RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .id)
+          CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .body)
+          
+          # 3. Concatenate and update release
+          NEW_BODY="${CURRENT_BODY}
+
+          ---
+          ${CHANGELOG}"
+          
+          gh api -X PATCH "repos/${{ github.repository }}/releases/$RELEASE_ID" -f body="$NEW_BODY"
+          echo "Release notes successfully updated!"
