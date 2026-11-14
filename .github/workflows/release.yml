@@ -75,7 +75,22 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: 'Orbit v__VERSION__'
-          releaseBody: 'Voir les notes de version et les installeurs ci-dessous pour macOS (.dmg) et Windows (.exe / .msi).'
+          releaseBody: |
+            ### 🛸 Bienvenue dans Orbit v__VERSION__ !
+
+            Orbit est un client desktop moderne, rapide et esthétique pour **SFTP** et **S3**, conçu avec **Tauri v2**, **Rust** et **React 19**.
+
+            #### 📦 Téléchargement & Installation
+            * **macOS (Universal Apple Silicon & Intel)** : Téléchargez le fichier `.dmg`.
+              > **Premier lancement sur macOS** : L'application n'étant pas encore signée avec un certificat Apple payant ($99/an), exécutez cette commande une seule fois dans votre terminal si Gatekeeper bloque l'ouverture :
+              > ```bash
+              > xattr -cr /Applications/Orbit.app
+              > ```
+            * **Windows 10 / 11 (x64)** : Téléchargez l'installeur `.exe` (NSIS) ou `.msi`.
+
+            ---
+            #### 📋 Détail des nouveautés et commits inclus :
+          generateReleaseNotes: true
           releaseDraft: ${{ inputs.draft || false }}
           prerelease: false
           args: ${{ matrix.platform.args }}
