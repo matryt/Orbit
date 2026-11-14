@@ -26,16 +26,25 @@ pub async fn test_sftp_connection(
         }
     }
 
-    match SftpProvider::connect_with_logs(config).await {
-        Ok((_provider, logs)) => Ok(ConnectionTestResult {
+    let connect_future = SftpProvider::connect_with_logs(config);
+    match tokio::time::timeout(std::time::Duration::from_secs(8), connect_future).await {
+        Ok(Ok((_provider, logs))) => Ok(ConnectionTestResult {
             success: true,
             message: "Connexion SFTP établie avec succès ! Authentification et sous-système SFTP validés.".into(),
             logs,
         }),
-        Err((err, logs)) => Ok(ConnectionTestResult {
+        Ok(Err((err, logs))) => Ok(ConnectionTestResult {
             success: false,
             message: err.to_string(),
             logs,
+        }),
+        Err(_) => Ok(ConnectionTestResult {
+            success: false,
+            message: "Délai d'attente dépassé (8s) : le serveur SSH est injoignable ou ne répond pas.".into(),
+            logs: vec![
+                format!("[{}] ❌ Timeout : Aucune réponse du serveur après 8 secondes.", chrono::Utc::now().format("%H:%M:%S%.3f")),
+                "ℹ️ Conseil: Vérifiez l'adresse IP / domaine et le port, ou assurez-vous que le serveur SSH est bien démarré.".into(),
+            ],
         }),
     }
 }
