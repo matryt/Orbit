@@ -16,18 +16,25 @@ use crate::sftp::client::SftpProvider;
 pub async fn test_sftp_connection(
     mut config: SftpConnectConfig,
 ) -> Result<ConnectionTestResult, AppError> {
-    if config.password.is_none() && config.passphrase.is_none() {
-        if let Ok(Some(secret)) = KeyringService::get_secret(&config.profile_id) {
-            if config.key_path.is_some() {
-                config.passphrase = Some(secret);
-            } else {
-                config.password = Some(secret);
+    let test_task = async move {
+        // Run synchronous keyring lookup on a blocking thread inside the timeout
+        if config.password.is_none() && config.passphrase.is_none() {
+            let pid = config.profile_id.clone();
+            if let Ok(Ok(Some(secret))) =
+                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+            {
+                if config.key_path.is_some() {
+                    config.passphrase = Some(secret);
+                } else {
+                    config.password = Some(secret);
+                }
             }
         }
-    }
 
-    let connect_future = SftpProvider::connect_with_logs(config);
-    match tokio::time::timeout(std::time::Duration::from_secs(8), connect_future).await {
+        SftpProvider::connect_with_logs(config).await
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), test_task).await {
         Ok(Ok((_provider, logs))) => Ok(ConnectionTestResult {
             success: true,
             message: "Connexion SFTP établie avec succès ! Authentification et sous-système SFTP validés.".into(),
@@ -54,9 +61,12 @@ pub async fn connect_sftp(
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
-    // If password or passphrase not provided directly, look in system keyring
+    // If password or passphrase not provided directly, look in system keyring on a blocking thread
     if config.password.is_none() && config.passphrase.is_none() {
-        if let Ok(Some(secret)) = KeyringService::get_secret(&config.profile_id) {
+        let pid = config.profile_id.clone();
+        if let Ok(Ok(Some(secret))) =
+            tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+        {
             if config.key_path.is_some() {
                 config.passphrase = Some(secret);
             } else {
