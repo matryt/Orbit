@@ -10,7 +10,15 @@ import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 
 export function App() {
-  const { toggleDualPane, toggleQuickLook, quickLookFile, setQuickLookFile, loadPersistedProfiles } = useOrbitStore();
+  const {
+    toggleDualPane,
+    toggleQuickLook,
+    quickLookFile,
+    setQuickLookFile,
+    loadPersistedProfiles,
+    isNewConnectionModalOpen,
+    isExportModalOpen,
+  } = useOrbitStore();
 
   // Load saved profiles from disk on startup
   useEffect(() => {
@@ -75,8 +83,8 @@ export function App() {
 
       {/* Overlays & Modals */}
       <QuickLookModal />
-      <NewConnectionModal />
-      <ExportProfilesModal />
+      {isNewConnectionModalOpen && <NewConnectionModal />}
+      {isExportModalOpen && <ExportProfilesModal />}
     </div>
   );
 }

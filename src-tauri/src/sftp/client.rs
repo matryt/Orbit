@@ -119,7 +119,20 @@ impl SftpProvider {
                 expanded_path.display()
             ));
 
-            let secret_key = match load_secret_key(&expanded_path, config.passphrase.as_deref()) {
+            let p_clone = expanded_path.clone();
+            let pass_clone = config.passphrase.clone();
+            let secret_key_res = tokio::task::spawn_blocking(move || {
+                load_secret_key(&p_clone, pass_clone.as_deref())
+            })
+            .await
+            .map_err(|e| {
+                (
+                    AppError::Io(format!("Thread execution error while loading key: {e}")),
+                    logs.clone(),
+                )
+            })?;
+
+            let secret_key = match secret_key_res {
                 Ok(k) => {
                     logs.push(format!(
                         "[{}] Clé privée chargée et déchiffrée avec succès (type: {:?}).",
@@ -239,9 +252,22 @@ impl SftpProvider {
             if let Some(home) = dirs::home_dir() {
                 let default_keys = [home.join(".ssh/id_ed25519"), home.join(".ssh/id_rsa")];
                 for key_p in default_keys {
-                    if key_p.exists() {
+                    let p_check = key_p.clone();
+                    let exists = tokio::task::spawn_blocking(move || p_check.exists())
+                        .await
+                        .unwrap_or(false);
+                    if exists {
                         logs.push(format!("[{}] Tentative avec {}", now(), key_p.display()));
-                        if let Ok(key) = load_secret_key(&key_p, config.passphrase.as_deref()) {
+                        let p = key_p.clone();
+                        let pass = config.passphrase.clone();
+                        let loaded = tokio::task::spawn_blocking(move || {
+                            load_secret_key(&p, pass.as_deref())
+                        })
+                        .await
+                        .ok()
+                        .and_then(|res| res.ok());
+
+                        if let Some(key) = loaded {
                             let key_arc = Arc::new(key);
                             let hash_candidates: Vec<Option<russh::keys::HashAlg>> =
                                 if key_arc.algorithm().is_rsa() {
