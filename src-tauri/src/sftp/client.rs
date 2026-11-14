@@ -16,17 +16,220 @@ use crate::error::AppError;
 use crate::models::{FileEntry, SftpConnectConfig, TransferProgress};
 use crate::provider::StorageProvider;
 
-pub struct SshHandler;
+/// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
+/// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
+static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Vérifie si un certificat OpenSSH est validé par une autorité @cert-authority déclarée dans ~/.ssh/known_hosts.
+pub fn check_cert_authority(
+    host: &str,
+    port: u16,
+    cert: &russh::keys::ssh_key::Certificate,
+) -> Result<bool, russh::keys::Error> {
+    let known_hosts_path = match dirs::home_dir() {
+        Some(h) => h.join(".ssh").join("known_hosts"),
+        None => return Ok(false),
+    };
+
+    let f = match std::fs::File::open(&known_hosts_path) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(f);
+    let ca_key_data = cert.signature_key();
+
+    let host_port = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if !trimmed.starts_with("@cert-authority") {
+            continue;
+        }
+
+        // Format OpenSSH : @cert-authority <patterns> <key-type> <base64-key> [comment]
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let patterns = parts[1];
+        let ca_base64 = parts[3];
+
+        let host_matches = patterns.split(',').any(|pattern| {
+            if pattern == "*" || pattern == host || pattern == host_port {
+                true
+            } else if let Some(suffix) = pattern.strip_prefix("*.") {
+                host.ends_with(suffix) && host.len() > suffix.len()
+            } else {
+                false
+            }
+        });
+
+        if !host_matches {
+            continue;
+        }
+
+        if let Ok(ca_pubkey) = russh::keys::parse_public_key_base64(ca_base64) {
+            if ca_pubkey.key_data() == ca_key_data {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+pub struct SshHandler {
+    host: String,
+    port: u16,
+    key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostKeyStatus {
+    /// Clé d'hôte trouvée et validée dans ~/.ssh/known_hosts (ou autorité CA @cert-authority).
+    Verified,
+    /// Clé d'hôte en attente d'enregistrement (différé jusqu'au succès réel de la connexion).
+    PendingEnrollment(russh::keys::ssh_key::PublicKey),
+    /// Nouvel hôte : clé acceptée et enregistrée dans ~/.ssh/known_hosts (TOFU).
+    Learned,
+    /// Clé d'hôte modifiée ! Potentielle attaque Man-in-the-Middle.
+    Changed { line: usize },
+    /// Erreur lors de la vérification (fail-closed par sécurité).
+    CheckFailed(String),
+}
+
+impl SshHandler {
+    pub fn new(
+        host: String,
+        port: u16,
+        key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+    ) -> Self {
+        Self {
+            host,
+            port,
+            key_status,
+        }
+    }
+}
 
 impl Handler for SshHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKeyOrCertificate,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        // Accept host keys for the connection
-        Ok(true)
+        let host = self.host.clone();
+        let port = self.port;
+        let key_status = Arc::clone(&self.key_status);
+
+        // Si le serveur présente un certificat OpenSSH, valider la signature, les dates et @cert-authority
+        let pubkey = match server_public_key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            PublicKeyOrCertificate::Certificate(cert) => {
+                if let Err(e) = cert.verify_signature() {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Signature du certificat d'hôte invalide : {e}"
+                    )));
+                    return Ok(false);
+                }
+
+                let now_ts = Utc::now().timestamp() as u64;
+                if now_ts < cert.valid_after() || now_ts >= cert.valid_before() {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Certificat d'hôte SSH expiré ou pas encore valide (validité: {} - {})",
+                        cert.valid_after(),
+                        cert.valid_before()
+                    )));
+                    return Ok(false);
+                }
+
+                let principals = cert.valid_principals();
+                if !principals.is_empty()
+                    && !principals.iter().any(|p| {
+                        p == &host || (p.starts_with("*.") && host.ends_with(&p[1..]))
+                    })
+                {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::CheckFailed(format!(
+                        "Le certificat d'hôte n'est pas valide pour {host} (principaux autorisés: {principals:?})"
+                    )));
+                    return Ok(false);
+                }
+
+                // Vérifier si une autorité de certification @cert-authority valide ce certificat
+                let cert_clone = cert.clone();
+                let host_clone = host.clone();
+                let ca_check = tokio::task::spawn_blocking(move || {
+                    check_cert_authority(&host_clone, port, &cert_clone)
+                })
+                .await;
+
+                if let Ok(Ok(true)) = ca_check {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::Verified);
+                    return Ok(true);
+                }
+
+                russh::keys::ssh_key::PublicKey::from(cert.public_key().clone())
+            }
+        };
+
+        // Sérialisation des opérations known_hosts pour empêcher les courses concurrentes
+        let _lock = KNOWN_HOSTS_LOCK.lock().await;
+
+        let check_res = tokio::task::spawn_blocking({
+            let host = host.clone();
+            let pubkey = pubkey.clone();
+            move || russh::keys::check_known_hosts(&host, port, &pubkey)
+        })
+        .await;
+
+        match check_res {
+            Ok(Ok(true)) => {
+                let mut status = key_status.lock().await;
+                *status = Some(HostKeyStatus::Verified);
+                Ok(true)
+            }
+            Ok(Ok(false)) => {
+                // Clé inconnue : on diffère l'enregistrement sur disque au moment où
+                // la connexion réussit (évite de persister des clés sur des tests annulés/expirés).
+                let mut status = key_status.lock().await;
+                *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
+                Ok(true)
+            }
+            Ok(Err(russh::keys::Error::KeyChanged { line })) => {
+                // CRITICAL: Server host key has changed. Abort handshake immediately!
+                let mut status = key_status.lock().await;
+                *status = Some(HostKeyStatus::Changed { line });
+                Ok(false)
+            }
+            Ok(Err(e)) => {
+                let mut status = key_status.lock().await;
+                *status = Some(HostKeyStatus::CheckFailed(format!("{e}")));
+                // Fail-closed : ne pas autoriser la connexion si la vérification échoue
+                Ok(false)
+            }
+            Err(e) => {
+                let mut status = key_status.lock().await;
+                *status = Some(HostKeyStatus::CheckFailed(format!("Task join error: {e}")));
+                // Fail-closed
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -44,11 +247,15 @@ pub struct SftpProvider {
     _handle: Handle<SshHandler>,
     username: String,
     identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
+    pub host_key_status: Option<HostKeyStatus>,
 }
 
 impl SftpProvider {
     pub async fn connect(config: SftpConnectConfig) -> Result<Self, AppError> {
-        let (provider, _logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        let (provider, logs) = Self::connect_with_logs(config).await.map_err(|(e, _)| e)?;
+        for line in &logs {
+            eprintln!("{line}");
+        }
         Ok(provider)
     }
 
@@ -86,15 +293,103 @@ impl SftpProvider {
             addr
         ));
 
-        let mut handle = match client::connect(ssh_config, &addr, SshHandler).await {
+        let key_status = Arc::new(tokio::sync::Mutex::new(None));
+        let handler = SshHandler::new(config.host.clone(), config.port, Arc::clone(&key_status));
+
+        let mut handle = match client::connect(ssh_config, &addr, handler).await {
             Ok(h) => {
                 logs.push(format!(
                     "[{}] Connexion TCP socket établie avec succès.",
                     now()
                 ));
+                let recorded_status = key_status.lock().await.clone();
+                match recorded_status {
+                    Some(HostKeyStatus::Verified) => {
+                        logs.push(format!(
+                            "[{}] 🛡️ Empreinte de clé d'hôte SSH validée avec succès via ~/.ssh/known_hosts.",
+                            now()
+                        ));
+                    }
+                    Some(HostKeyStatus::PendingEnrollment(ref pubkey)) => {
+                        // La connexion TCP socket et la négociation KEX sont validées : on persiste maintenant la clé dans known_hosts
+                        let host = config.host.clone();
+                        let port = config.port;
+                        let pubkey_clone = pubkey.clone();
+                        let _lock = KNOWN_HOSTS_LOCK.lock().await;
+                        let learn_res = tokio::task::spawn_blocking(move || {
+                            russh::keys::known_hosts::learn_known_hosts(&host, port, &pubkey_clone)
+                        })
+                        .await;
+
+                        match learn_res {
+                            Ok(Ok(())) => {
+                                let mut status = key_status.lock().await;
+                                *status = Some(HostKeyStatus::Learned);
+                                logs.push(format!(
+                                    "[{}] 🔑 Nouvel hôte SSH approuvé (TOFU) : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                                    now()
+                                ));
+                            }
+                            Ok(Err(e)) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : impossible d'enregistrer la clé d'hôte dans known_hosts : {e}",
+                                    now()
+                                ));
+                            }
+                            Err(e) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : erreur de tâche asynchrone lors de l'enregistrement : {e}",
+                                    now()
+                                ));
+                            }
+                        }
+                    }
+                    Some(HostKeyStatus::Learned) => {
+                        logs.push(format!(
+                            "[{}] 🔑 Nouvel hôte SSH approuvé (TOFU) : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                            now()
+                        ));
+                    }
+                    Some(HostKeyStatus::CheckFailed(reason)) => {
+                        logs.push(format!(
+                            "[{}] ⚠️ Avertissement known_hosts : {reason}",
+                            now()
+                        ));
+                    }
+                    _ => {}
+                }
                 h
             }
             Err(e) => {
+                let recorded_status = key_status.lock().await.clone();
+                if let Some(HostKeyStatus::Changed { line }) = recorded_status {
+                    let target_spec = if config.port == 22 {
+                        config.host.clone()
+                    } else {
+                        format!("[{}]:{}", config.host, config.port)
+                    };
+                    let err_msg = format!(
+                        "ALERTE DE SÉCURITÉ MITM : La clé d'hôte SSH pour {} a CHANGÉ (ligne {} dans ~/.ssh/known_hosts) ! Connexion bloquée.",
+                        addr, line
+                    );
+                    logs.push(format!("[{}] 🚨 {}", now(), err_msg));
+                    logs.push(format!(
+                        "[{}] ⚠️ Quelqu'un pourrait tenter d'intercepter votre connexion (Man-in-the-Middle) ou la machine distante a été réinstallée.",
+                        now()
+                    ));
+                    logs.push(format!(
+                        "[{}] ℹ️ Si le serveur a légitimement été réinstallé, supprimez l'ancienne clé avec la commande : ssh-keygen -R {target_spec}",
+                        now()
+                    ));
+                    return Err((AppError::Ssh(err_msg), logs));
+                }
+
+                if let Some(HostKeyStatus::CheckFailed(reason)) = recorded_status {
+                    let err_msg = format!("Échec de vérification de la clé d'hôte SSH : {reason}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Ssh(err_msg), logs));
+                }
+
                 let err_msg = format!("Échec de connexion réseau vers {addr}: {e}");
                 logs.push(format!("[{}] ❌ {}", now(), err_msg));
                 logs.push(format!(
@@ -367,12 +662,14 @@ impl SftpProvider {
             }
         };
 
+        let final_status = key_status.lock().await.clone();
         Ok((
             Self {
                 session: sftp_session,
                 _handle: handle,
                 username: config.username,
                 identities: tokio::sync::RwLock::new(None),
+                host_key_status: final_status,
             },
             logs,
         ))
@@ -612,9 +909,44 @@ fn format_mtime(mtime: Option<u32>) -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Valide qu'un chemin distant SFTP est sécurisé (protection anti-Directory-Traversal).
+/// Rejette les octets nuls et tout composant '..' qui tenterait de s'échapper de l'arborescence autorisée.
+pub fn validate_path_safety(path: &str) -> Result<(), AppError> {
+    if path.contains('\0') {
+        return Err(AppError::InvalidPath(
+            "Chemin non sécurisé : présence d'un octet nul".to_string(),
+        ));
+    }
+
+    let normalized = path.replace('\\', "/");
+    for segment in normalized.split('/') {
+        if segment == ".." {
+            return Err(AppError::InvalidPath(format!(
+                "Chemin non sécurisé (tentative de Directory Traversal '..') : {path}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Valide qu'un chemin de fichier local ne contient aucun composant de type ParentDir ('..').
+pub fn validate_local_path_safety(path: &std::path::Path) -> Result<(), AppError> {
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(AppError::InvalidPath(format!(
+                "Chemin local non sécurisé (tentative de Directory Traversal '..') : {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl StorageProvider for SftpProvider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
+        validate_path_safety(path)?;
         let dir_path = if path.is_empty() { "/" } else { path };
         let read_dir = self
             .session
@@ -626,6 +958,16 @@ impl StorageProvider for SftpProvider {
 
         let mut entries = Vec::new();
         for entry in read_dir {
+            let name = entry.file_name();
+            // Ignorer les pseudo-répertoires '.' et '..' et séparateurs
+            if name == "." || name == ".." || name.contains('/') {
+                continue;
+            }
+            // Prévenir les attaques de Directory Traversal dans les noms retournés
+            if validate_path_safety(&name).is_err() {
+                continue;
+            }
+
             let is_dir = entry.file_type().is_dir();
             let meta = entry.metadata();
             let size = meta.size.unwrap_or(0);
@@ -646,7 +988,7 @@ impl StorageProvider for SftpProvider {
             );
 
             entries.push(FileEntry {
-                name: entry.file_name(),
+                name,
                 path: entry.path(),
                 is_dir,
                 size,
@@ -673,6 +1015,7 @@ impl StorageProvider for SftpProvider {
     }
 
     async fn create_dir(&self, path: &str) -> Result<(), AppError> {
+        validate_path_safety(path)?;
         self.session
             .create_dir(path)
             .await
@@ -681,6 +1024,7 @@ impl StorageProvider for SftpProvider {
     }
 
     async fn delete(&self, path: &str, is_dir: bool) -> Result<(), AppError> {
+        validate_path_safety(path)?;
         if is_dir {
             self.session
                 .remove_dir(path)
@@ -696,6 +1040,8 @@ impl StorageProvider for SftpProvider {
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), AppError> {
+        validate_path_safety(old_path)?;
+        validate_path_safety(new_path)?;
         self.session.rename(old_path, new_path).await.map_err(|e| {
             AppError::Sftp(format!("Failed to rename {old_path} to {new_path}: {e}"))
         })?;
@@ -703,6 +1049,7 @@ impl StorageProvider for SftpProvider {
     }
 
     async fn read_preview(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+        validate_path_safety(path)?;
         let mut file = self
             .session
             .open(path)
@@ -725,6 +1072,9 @@ impl StorageProvider for SftpProvider {
         remote_path: String,
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError> {
+        validate_local_path_safety(&local_path)?;
+        validate_path_safety(&remote_path)?;
+
         let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| {
             AppError::Io(format!(
                 "Cannot open local file {}: {e}",
@@ -812,6 +1162,9 @@ impl StorageProvider for SftpProvider {
         local_path: PathBuf,
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError> {
+        validate_path_safety(&remote_path)?;
+        validate_local_path_safety(&local_path)?;
+
         let mut remote_file =
             self.session.open(&remote_path).await.map_err(|e| {
                 AppError::Sftp(format!("Cannot open remote file {remote_path}: {e}"))
@@ -897,6 +1250,7 @@ impl StorageProvider for SftpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_parse_passwd() {
@@ -998,5 +1352,65 @@ docker:x:999:ubuntu,mathieu
             resolve_identity(Some(1000), &fallback_users, Some(1001), current_username),
             Some("1000".to_string())
         );
+    }
+
+    #[test]
+    fn test_validate_path_safety_valid_paths() {
+        assert!(validate_path_safety("/").is_ok());
+        assert!(validate_path_safety("").is_ok());
+        assert!(validate_path_safety(".").is_ok());
+        assert!(validate_path_safety("/home/ubuntu/file.txt").is_ok());
+        assert!(validate_path_safety("documents/work/invoice.pdf").is_ok());
+        assert!(validate_path_safety(".hidden").is_ok());
+        assert!(validate_path_safety("/var/www/.env").is_ok());
+        // Double dots inside a single segment name are legitimate file names
+        assert!(validate_path_safety("archive..tar.gz").is_ok());
+        assert!(validate_path_safety("/backups/file..2026.bak").is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_safety_traversal_attacks() {
+        assert!(validate_path_safety("..").is_err());
+        assert!(validate_path_safety("../etc/passwd").is_err());
+        assert!(validate_path_safety("/var/www/../../etc/shadow").is_err());
+        assert!(validate_path_safety("foo/bar/../..").is_err());
+        assert!(validate_path_safety("foo/../bar").is_err());
+        // Windows-style backslashes
+        assert!(validate_path_safety("..\\windows\\win.ini").is_err());
+        assert!(validate_path_safety("C:\\Users\\..\\secret").is_err());
+        assert!(validate_path_safety("subdir\\..\\parent").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_safety_null_bytes() {
+        assert!(validate_path_safety("file\0.txt").is_err());
+        assert!(validate_path_safety("/home/user/\0/exploit").is_err());
+    }
+
+    #[test]
+    fn test_validate_local_path_safety() {
+        assert!(validate_local_path_safety(Path::new("/home/user/downloads/file.txt")).is_ok());
+        assert!(validate_local_path_safety(Path::new("downloads/file.txt")).is_ok());
+        assert!(validate_local_path_safety(Path::new(".gitignore")).is_ok());
+        assert!(validate_local_path_safety(Path::new("archive..tar.gz")).is_ok());
+
+        assert!(validate_local_path_safety(Path::new("../file.txt")).is_err());
+        assert!(validate_local_path_safety(Path::new("/var/www/../../etc/passwd")).is_err());
+        assert!(validate_local_path_safety(Path::new("foo/../bar")).is_err());
+    }
+
+    #[test]
+    fn test_host_key_status_variants() {
+        let v = HostKeyStatus::Verified;
+        let l = HostKeyStatus::Learned;
+        let c = HostKeyStatus::Changed { line: 42 };
+        let f = HostKeyStatus::CheckFailed("error".into());
+
+        assert_eq!(v, HostKeyStatus::Verified);
+        assert_eq!(l, HostKeyStatus::Learned);
+        assert_eq!(c, HostKeyStatus::Changed { line: 42 });
+        assert_ne!(v, l);
+        assert_ne!(c, HostKeyStatus::Changed { line: 12 });
+        assert_eq!(f, HostKeyStatus::CheckFailed("error".into()));
     }
 }
