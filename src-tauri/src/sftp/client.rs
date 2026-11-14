@@ -20,6 +20,75 @@ use crate::provider::StorageProvider;
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
 static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Vérifie si un certificat OpenSSH est validé par une autorité @cert-authority déclarée dans ~/.ssh/known_hosts.
+pub fn check_cert_authority(
+    host: &str,
+    port: u16,
+    cert: &russh::keys::ssh_key::Certificate,
+) -> Result<bool, russh::keys::Error> {
+    let known_hosts_path = match dirs::home_dir() {
+        Some(h) => h.join(".ssh").join("known_hosts"),
+        None => return Ok(false),
+    };
+
+    let f = match std::fs::File::open(&known_hosts_path) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(f);
+    let ca_key_data = cert.signature_key();
+
+    let host_port = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if !trimmed.starts_with("@cert-authority") {
+            continue;
+        }
+
+        // Format OpenSSH : @cert-authority <patterns> <key-type> <base64-key> [comment]
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let patterns = parts[1];
+        let ca_base64 = parts[3];
+
+        let host_matches = patterns.split(',').any(|pattern| {
+            if pattern == "*" || pattern == host || pattern == host_port {
+                true
+            } else if let Some(suffix) = pattern.strip_prefix("*.") {
+                host.ends_with(suffix) && host.len() > suffix.len()
+            } else {
+                false
+            }
+        });
+
+        if !host_matches {
+            continue;
+        }
+
+        if let Ok(ca_pubkey) = russh::keys::parse_public_key_base64(ca_base64) {
+            if ca_pubkey.key_data() == ca_key_data {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 pub struct SshHandler {
     host: String,
     port: u16,
@@ -28,8 +97,10 @@ pub struct SshHandler {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyStatus {
-    /// Clé d'hôte trouvée et validée dans ~/.ssh/known_hosts.
+    /// Clé d'hôte trouvée et validée dans ~/.ssh/known_hosts (ou autorité CA @cert-authority).
     Verified,
+    /// Clé d'hôte en attente d'enregistrement (différé jusqu'au succès réel de la connexion).
+    PendingEnrollment(russh::keys::ssh_key::PublicKey),
     /// Nouvel hôte : clé acceptée et enregistrée dans ~/.ssh/known_hosts (TOFU).
     Learned,
     /// Clé d'hôte modifiée ! Potentielle attaque Man-in-the-Middle.
@@ -63,7 +134,7 @@ impl Handler for SshHandler {
         let port = self.port;
         let key_status = Arc::clone(&self.key_status);
 
-        // Si le serveur présente un certificat OpenSSH, valider la signature, les dates et les principaux
+        // Si le serveur présente un certificat OpenSSH, valider la signature, les dates et @cert-authority
         let pubkey = match server_public_key {
             PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             PublicKeyOrCertificate::Certificate(cert) => {
@@ -99,6 +170,20 @@ impl Handler for SshHandler {
                     return Ok(false);
                 }
 
+                // Vérifier si une autorité de certification @cert-authority valide ce certificat
+                let cert_clone = cert.clone();
+                let host_clone = host.clone();
+                let ca_check = tokio::task::spawn_blocking(move || {
+                    check_cert_authority(&host_clone, port, &cert_clone)
+                })
+                .await;
+
+                if let Ok(Ok(true)) = ca_check {
+                    let mut status = key_status.lock().await;
+                    *status = Some(HostKeyStatus::Verified);
+                    return Ok(true);
+                }
+
                 russh::keys::ssh_key::PublicKey::from(cert.public_key().clone())
             }
         };
@@ -120,35 +205,11 @@ impl Handler for SshHandler {
                 Ok(true)
             }
             Ok(Ok(false)) => {
-                // TOFU (Trust On First Use): record new host key
-                let learn_res = tokio::task::spawn_blocking({
-                    let host = host.clone();
-                    let pubkey = pubkey.clone();
-                    move || russh::keys::known_hosts::learn_known_hosts(&host, port, &pubkey)
-                })
-                .await;
-
+                // Clé inconnue : on diffère l'enregistrement sur disque au moment où
+                // la connexion réussit (évite de persister des clés sur des tests annulés/expirés).
                 let mut status = key_status.lock().await;
-                match learn_res {
-                    Ok(Ok(())) => {
-                        *status = Some(HostKeyStatus::Learned);
-                        Ok(true)
-                    }
-                    Ok(Err(e)) => {
-                        *status = Some(HostKeyStatus::CheckFailed(format!(
-                            "Échec de l'enregistrement de la clé dans ~/.ssh/known_hosts: {e}"
-                        )));
-                        // Fail-closed pour ne pas se connecter sans clé enregistrée
-                        Ok(false)
-                    }
-                    Err(e) => {
-                        *status = Some(HostKeyStatus::CheckFailed(format!(
-                            "Erreur de tâche asynchrone lors de l'enregistrement: {e}"
-                        )));
-                        // Fail-closed
-                        Ok(false)
-                    }
-                }
+                *status = Some(HostKeyStatus::PendingEnrollment(pubkey));
+                Ok(true)
             }
             Ok(Err(russh::keys::Error::KeyChanged { line })) => {
                 // CRITICAL: Server host key has changed. Abort handshake immediately!
@@ -248,6 +309,40 @@ impl SftpProvider {
                             "[{}] 🛡️ Empreinte de clé d'hôte SSH validée avec succès via ~/.ssh/known_hosts.",
                             now()
                         ));
+                    }
+                    Some(HostKeyStatus::PendingEnrollment(ref pubkey)) => {
+                        // La connexion TCP socket et la négociation KEX sont validées : on persiste maintenant la clé dans known_hosts
+                        let host = config.host.clone();
+                        let port = config.port;
+                        let pubkey_clone = pubkey.clone();
+                        let _lock = KNOWN_HOSTS_LOCK.lock().await;
+                        let learn_res = tokio::task::spawn_blocking(move || {
+                            russh::keys::known_hosts::learn_known_hosts(&host, port, &pubkey_clone)
+                        })
+                        .await;
+
+                        match learn_res {
+                            Ok(Ok(())) => {
+                                let mut status = key_status.lock().await;
+                                *status = Some(HostKeyStatus::Learned);
+                                logs.push(format!(
+                                    "[{}] 🔑 Nouvel hôte SSH approuvé (TOFU) : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                                    now()
+                                ));
+                            }
+                            Ok(Err(e)) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : impossible d'enregistrer la clé d'hôte dans known_hosts : {e}",
+                                    now()
+                                ));
+                            }
+                            Err(e) => {
+                                logs.push(format!(
+                                    "[{}] ⚠️ Avertissement : erreur de tâche asynchrone lors de l'enregistrement : {e}",
+                                    now()
+                                ));
+                            }
+                        }
                     }
                     Some(HostKeyStatus::Learned) => {
                         logs.push(format!(
