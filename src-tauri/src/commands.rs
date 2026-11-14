@@ -16,26 +16,42 @@ use crate::sftp::client::SftpProvider;
 pub async fn test_sftp_connection(
     mut config: SftpConnectConfig,
 ) -> Result<ConnectionTestResult, AppError> {
-    if config.password.is_none() && config.passphrase.is_none() {
-        if let Ok(Some(secret)) = KeyringService::get_secret(&config.profile_id) {
-            if config.key_path.is_some() {
-                config.passphrase = Some(secret);
-            } else {
-                config.password = Some(secret);
+    let test_task = async move {
+        // Run synchronous keyring lookup on a blocking thread inside the timeout
+        if config.password.is_none() && config.passphrase.is_none() {
+            let pid = config.profile_id.clone();
+            if let Ok(Ok(Some(secret))) =
+                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+            {
+                if config.key_path.is_some() {
+                    config.passphrase = Some(secret);
+                } else {
+                    config.password = Some(secret);
+                }
             }
         }
-    }
 
-    match SftpProvider::connect_with_logs(config).await {
-        Ok((_provider, logs)) => Ok(ConnectionTestResult {
+        SftpProvider::connect_with_logs(config).await
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), test_task).await {
+        Ok(Ok((_provider, logs))) => Ok(ConnectionTestResult {
             success: true,
             message: "Connexion SFTP établie avec succès ! Authentification et sous-système SFTP validés.".into(),
             logs,
         }),
-        Err((err, logs)) => Ok(ConnectionTestResult {
+        Ok(Err((err, logs))) => Ok(ConnectionTestResult {
             success: false,
             message: err.to_string(),
             logs,
+        }),
+        Err(_) => Ok(ConnectionTestResult {
+            success: false,
+            message: "Délai d'attente dépassé (8s) : le serveur SSH est injoignable ou ne répond pas.".into(),
+            logs: vec![
+                format!("[{}] ❌ Timeout : Aucune réponse du serveur après 8 secondes.", chrono::Utc::now().format("%H:%M:%S%.3f")),
+                "ℹ️ Conseil: Vérifiez l'adresse IP / domaine et le port, ou assurez-vous que le serveur SSH est bien démarré.".into(),
+            ],
         }),
     }
 }
@@ -45,9 +61,12 @@ pub async fn connect_sftp(
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
-    // If password or passphrase not provided directly, look in system keyring
+    // If password or passphrase not provided directly, look in system keyring on a blocking thread
     if config.password.is_none() && config.passphrase.is_none() {
-        if let Ok(Some(secret)) = KeyringService::get_secret(&config.profile_id) {
+        let pid = config.profile_id.clone();
+        if let Ok(Ok(Some(secret))) =
+            tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+        {
             if config.key_path.is_some() {
                 config.passphrase = Some(secret);
             } else {

@@ -99,12 +99,17 @@ export const NewConnectionModal: React.FC = () => {
       setPassphrase('');
       setPassword('');
       setTestResult(null);
+      setIsTesting(false);
+      setShowLogs(false);
     }
   }, [editingProfile, isNewConnectionModalOpen]);
 
   if (!isNewConnectionModalOpen) return null;
 
   const handleClose = () => {
+    setIsTesting(false);
+    setTestResult(null);
+    setShowLogs(false);
     setEditingProfile(null);
     setNewConnectionModalOpen(false);
   };
@@ -162,15 +167,25 @@ export const NewConnectionModal: React.FC = () => {
     setIsTesting(true);
 
     try {
-      const res = await storageApi.testSftp({
-        profile_id: `test-${Date.now()}`,
-        host: host.trim(),
-        port: Number(port) || 22,
-        username: username.trim(),
-        password: authType === 'password' ? password.trim() : undefined,
-        key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
-        passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
-      });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Délai d'attente dépassé (9s) : le serveur SSH est injoignable.")),
+          9000
+        )
+      );
+
+      const res = await Promise.race([
+        storageApi.testSftp({
+          profile_id: `test-${Date.now()}`,
+          host: host.trim(),
+          port: Number(port) || 22,
+          username: username.trim(),
+          password: authType === 'password' ? password.trim() : undefined,
+          key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
+          passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
+        }),
+        timeoutPromise,
+      ]);
 
       setTestResult({
         type: res.success ? 'success' : 'error',
@@ -744,7 +759,7 @@ export const NewConnectionModal: React.FC = () => {
               type="button"
               disabled={isTesting}
               onClick={handleTestConnection}
-              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/[0.08] hover:bg-white/[0.12] text-zinc-200 hover:text-white border border-border-subtle transition-all flex items-center gap-1.5 disabled:opacity-50"
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/[0.08] hover:bg-white/[0.12] text-zinc-200 hover:text-white border border-border-subtle transition-colors flex items-center justify-center gap-1.5 min-w-[155px] disabled:opacity-50"
             >
               {isTesting ? (
                 <>
