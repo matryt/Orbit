@@ -61,7 +61,7 @@ jobs:
 
       # Build frontend and compile Tauri native bundles
       - name: Build and Package with Tauri
-        uses: tauri-apps/tauri-action@ea1f12403fd95c98ee2fff70a34d5a818ceeb112 # v0.5.17
+        uses: tauri-apps/tauri-action@2a8db2c169af2fdc695133781e27ecba52daea75 # v0.5.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # NOTE: Pour activer la signature Apple officielle et la notarisation
