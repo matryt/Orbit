@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Loader2,
   AlertCircle,
+  FolderPlus,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -26,6 +27,7 @@ export const Header: React.FC = () => {
     isConnecting,
     connectionError,
     clearConnectionError,
+    setNewFolderModalOpen,
   } = useOrbitStore();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -108,6 +110,15 @@ export const Header: React.FC = () => {
 
       {/* Right: Actions, Filter and Dual Pane toggle */}
       <div className="flex items-center gap-2">
+        {/* New Folder button */}
+        <button
+          onClick={() => setNewFolderModalOpen(true)}
+          className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
+          title="Nouveau dossier distant"
+        >
+          <FolderPlus className="w-3.5 h-3.5 text-zinc-400 hover:text-indigo-400 transition-colors" />
+        </button>
+
         {/* Refresh button */}
         <button
           onClick={() => refreshRemote()}

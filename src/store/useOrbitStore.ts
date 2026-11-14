@@ -39,6 +39,9 @@ interface OrbitState {
   selectRemoteFile: (path: string, multi?: boolean) => void;
   clearRemoteSelection: () => void;
   refreshRemote: () => Promise<void>;
+  createRemoteFolder: (folderName: string) => Promise<void>;
+  renameRemoteItem: (oldPath: string, newName: string) => Promise<void>;
+  deleteRemoteItem: (path: string, isDir: boolean) => Promise<void>;
 
   // Local Explorer (for Dual Pane)
   localPath: string;
@@ -75,6 +78,8 @@ interface OrbitState {
   setNewConnectionModalOpen: (open: boolean) => void;
   isExportModalOpen: boolean;
   setExportModalOpen: (open: boolean) => void;
+  isNewFolderModalOpen: boolean;
+  setNewFolderModalOpen: (open: boolean) => void;
 }
 
 export const useOrbitStore = create<OrbitState>((set, get) => ({
@@ -299,10 +304,41 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                 }
                               },
 
-                                refreshRemote: async () => {
-                                  const { currentPath } = get();
-                                  await get().setCurrentPath(currentPath);
-                                },
+  refreshRemote: async () => {
+    const { currentPath } = get();
+    await get().setCurrentPath(currentPath);
+  },
+
+  createRemoteFolder: async (folderName: string) => {
+    const { activeProfileId, currentPath, refreshRemote } = get();
+    if (!folderName.trim()) return;
+    const cleanName = folderName.trim().replace(/^\/+/, '');
+    const basePath = currentPath === '/' ? '' : currentPath.replace(/\/+$/, '');
+    const newPath = `${basePath}/${cleanName}`;
+    await storageApi.createDir(activeProfileId, newPath);
+    await refreshRemote();
+  },
+
+  renameRemoteItem: async (oldPath: string, newName: string) => {
+    const { activeProfileId, refreshRemote } = get();
+    const cleanName = newName.trim().replace(/^\/+/, '');
+    if (!cleanName) return;
+    const lastSlash = oldPath.lastIndexOf('/');
+    const parentDir = lastSlash > 0 ? oldPath.substring(0, lastSlash) : (lastSlash === 0 ? '' : '');
+    const newPath = `${parentDir}/${cleanName}`;
+    if (newPath === oldPath) return;
+    await storageApi.renameFile(activeProfileId, oldPath, newPath);
+    await refreshRemote();
+  },
+
+  deleteRemoteItem: async (path: string, isDir: boolean) => {
+    const { activeProfileId, refreshRemote, selectedRemotePath } = get();
+    await storageApi.deleteFile(activeProfileId, path, isDir);
+    if (selectedRemotePath === path) {
+      set({ selectedRemotePath: null, selectedRemotePaths: [] });
+    }
+    await refreshRemote();
+  },
 
                                   getRemoteFiles: () => {
                                     const { remoteFiles, searchQuery } = get();
@@ -534,9 +570,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                                                                         }
                                                                                       },
 
-                                                                                        isNewConnectionModalOpen: false,
-                                                                                          setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),
+  isNewConnectionModalOpen: false,
+  setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),
 
-                                                                                            isExportModalOpen: false,
-                                                                                              setExportModalOpen: (open) => set({ isExportModalOpen: open }),
+  isExportModalOpen: false,
+  setExportModalOpen: (open) => set({ isExportModalOpen: open }),
+
+  isNewFolderModalOpen: false,
+  setNewFolderModalOpen: (open) => set({ isNewFolderModalOpen: open }),
 }));

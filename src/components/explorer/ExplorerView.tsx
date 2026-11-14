@@ -1,9 +1,25 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
 import { FileEntry } from '../../types';
-import { FolderUp, HardDrive, Server, Plus } from 'lucide-react';
+import {
+  FolderUp,
+  HardDrive,
+  Server,
+  Plus,
+  FolderPlus,
+  Pencil,
+  Trash2,
+  Eye,
+  Download,
+  RefreshCw,
+  AlertTriangle,
+  Loader2,
+  X,
+} from 'lucide-react';
+import { save } from '@tauri-apps/plugin-dialog';
+import { isTauri } from '../../services/storageApi';
 
 interface ExplorerViewProps {
   files: FileEntry[];
@@ -15,6 +31,12 @@ interface ExplorerViewProps {
   isLocal?: boolean;
 }
 
+interface ContextMenuState {
+  x: number;
+  y: number;
+  file: FileEntry | null;
+}
+
 export const ExplorerView: React.FC<ExplorerViewProps> = ({
   files,
   currentPath,
@@ -24,8 +46,61 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   title,
   isLocal = false,
 }) => {
-  const { setQuickLookFile, setActivePane, profiles, setNewConnectionModalOpen } = useOrbitStore();
+  const {
+    setQuickLookFile,
+    setActivePane,
+    profiles,
+    setNewConnectionModalOpen,
+    createRemoteFolder,
+    renameRemoteItem,
+    deleteRemoteItem,
+    refreshRemote,
+    downloadFile,
+    isNewFolderModalOpen,
+    setNewFolderModalOpen,
+  } = useOrbitStore();
+
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Context Menu State
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  // Action Modals State
+  const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null);
+  const [renameInput, setRenameInput] = useState('');
+
+  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+
+  const [newFolderNameInput, setNewFolderNameInput] = useState('');
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Close context menu on outside click or window blur
+  useEffect(() => {
+    const handleOutsideClick = () => setContextMenu(null);
+    window.addEventListener('click', handleOutsideClick);
+    window.addEventListener('blur', handleOutsideClick);
+    return () => {
+      window.removeEventListener('click', handleOutsideClick);
+      window.removeEventListener('blur', handleOutsideClick);
+    };
+  }, []);
+
+  // Sync rename input when target changes
+  useEffect(() => {
+    if (renameTarget) {
+      setRenameInput(renameTarget.name);
+      setModalError(null);
+    }
+  }, [renameTarget]);
+
+  // Reset new folder input when modal opens
+  useEffect(() => {
+    if (isNewFolderModalOpen) {
+      setNewFolderNameInput('');
+      setModalError(null);
+    }
+  }, [isNewFolderModalOpen]);
 
   // Navigate up one folder
   const handleGoUp = () => {
@@ -44,11 +119,15 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     }
   };
 
-  // Keyboard navigation inside list
+  // Keyboard navigation & shortcuts inside list
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // If a modal is open, let modal handle keys
+    if (isNewFolderModalOpen || renameTarget || deleteTarget) return;
+
     if (files.length === 0) return;
 
     const currentIndex = files.findIndex((f) => f.path === selectedPath);
+    const selectedFile = files.find((f) => f.path === selectedPath);
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -60,10 +139,125 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       onSelect(files[prevIndex].path);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const selected = files.find((f) => f.path === selectedPath);
-      if (selected) {
-        handleRowDoubleClick(selected);
+      if (selectedFile) {
+        handleRowDoubleClick(selectedFile);
       }
+    } else if (e.key === 'F2' && selectedFile && !isLocal) {
+      e.preventDefault();
+      setRenameTarget(selectedFile);
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedFile && !isLocal) {
+      e.preventDefault();
+      setDeleteTarget(selectedFile);
+    }
+  };
+
+  // Handle right click on table row
+  const handleRowContextMenu = (e: React.MouseEvent, file: FileEntry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isLocal) return;
+
+    onSelect(file.path, false);
+
+    const menuWidth = 200;
+    const menuHeight = 220;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
+
+    setContextMenu({ x, y, file });
+  };
+
+  // Handle right click on empty background
+  const handleBackgroundContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (isLocal) return;
+
+    const menuWidth = 200;
+    const menuHeight = 120;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
+
+    setContextMenu({ x, y, file: null });
+  };
+
+  // Trigger download with native Save dialog
+  const handleDownload = async (file: FileEntry) => {
+    setContextMenu(null);
+    if (file.is_dir) return;
+
+    try {
+      let targetPath: string | null = null;
+      if (isTauri()) {
+        targetPath = await save({ defaultPath: file.name });
+      } else {
+        targetPath = `/Downloads/${file.name}`;
+      }
+
+      if (targetPath) {
+        await downloadFile(file.path, targetPath, file.name);
+      }
+    } catch (err: any) {
+      console.error('Download prompt failed:', err);
+    }
+  };
+
+  // Submit New Folder
+  const handleCreateFolderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newFolderNameInput.trim();
+    if (!name) return;
+
+    setIsSubmitting(true);
+    setModalError(null);
+    try {
+      await createRemoteFolder(name);
+      setNewFolderModalOpen(false);
+      setNewFolderNameInput('');
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors de la création du dossier';
+      setModalError(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Submit Rename
+  const handleRenameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renameTarget) return;
+    const newName = renameInput.trim();
+    if (!newName || newName === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
+
+    setIsSubmitting(true);
+    setModalError(null);
+    try {
+      await renameRemoteItem(renameTarget.path, newName);
+      setRenameTarget(null);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors du renommage';
+      setModalError(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Submit Delete
+  const handleDeleteSubmit = async () => {
+    if (!deleteTarget) return;
+
+    setIsSubmitting(true);
+    setModalError(null);
+    try {
+      await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
+      setDeleteTarget(null);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors de la suppression';
+      setModalError(msg);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -74,7 +268,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       onFocus={() => setActivePane(isLocal ? 'local' : 'remote')}
       onClick={() => setActivePane(isLocal ? 'local' : 'remote')}
       onKeyDown={handleKeyDown}
-      className="flex-1 flex flex-col h-full bg-background overflow-hidden outline-none select-none"
+      onContextMenu={handleBackgroundContextMenu}
+      className="flex-1 flex flex-col h-full bg-background overflow-hidden outline-none select-none relative"
     >
       {/* Pane title bar if specified (e.g. for dual pane) */}
       {title && (
@@ -137,7 +332,19 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               </>
             ) : (
-              <p className="text-xs">Dossier vide ou aucun fichier trouvé</p>
+              <div className="flex flex-col items-center gap-2">
+                <p className="text-xs">Dossier vide ou aucun fichier trouvé</p>
+                {!isLocal && (
+                  <button
+                    type="button"
+                    onClick={() => setNewFolderModalOpen(true)}
+                    className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 text-zinc-300 text-xs flex items-center gap-1.5 transition-colors"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Créer un dossier</span>
+                  </button>
+                )}
+              </div>
             )}
           </div>
         ) : (
@@ -148,6 +355,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 key={file.path}
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}
+                onContextMenu={(e) => handleRowContextMenu(e, file)}
                 className={`grid grid-cols-12 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors ${
                   isSelected
                     ? 'bg-indigo-600/20 text-white border border-indigo-500/30 font-medium'
@@ -190,10 +398,332 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         <div>
           {files.length} élément{files.length > 1 ? 's' : ''}
         </div>
-        <div>
-          Espace : Aperçu rapide (Quick Look)
+        <div className="flex items-center gap-3">
+          <span>Clic droit : Menu d'actions</span>
+          <span>•</span>
+          <span>Espace : Aperçu rapide</span>
         </div>
       </div>
+
+      {/* Context Menu Dropdown */}
+      {contextMenu && (
+        <div
+          style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
+          onClick={(e) => e.stopPropagation()}
+          className="fixed z-50 w-52 bg-[#141722]/95 backdrop-blur-xl border border-white/10 rounded-lg shadow-2xl py-1 text-xs text-zinc-300 select-none animate-in fade-in duration-75"
+        >
+          {contextMenu.file ? (
+            <>
+              {/* Quick Look */}
+              {!contextMenu.file.is_dir && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const f = contextMenu.file;
+                    setContextMenu(null);
+                    if (f) setQuickLookFile(f);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Eye className="w-3.5 h-3.5 text-zinc-400" />
+                    <span>Aperçu rapide</span>
+                  </div>
+                  <kbd className="text-[10px] text-zinc-500 bg-white/5 px-1 py-0.5 rounded font-mono">Espace</kbd>
+                </button>
+              )}
+
+              {/* Download */}
+              {!contextMenu.file.is_dir && (
+                <button
+                  type="button"
+                  onClick={() => handleDownload(contextMenu.file!)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Télécharger...</span>
+                </button>
+              )}
+
+              {/* Rename */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = contextMenu.file;
+                  setContextMenu(null);
+                  if (target) setRenameTarget(target);
+                }}
+                className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Pencil className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Renommer...</span>
+                </div>
+                <kbd className="text-[10px] text-zinc-500 bg-white/5 px-1 py-0.5 rounded font-mono">F2</kbd>
+              </button>
+
+              <div className="my-1 border-t border-white/10" />
+
+              {/* New Folder inside current dir */}
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(null);
+                  setNewFolderModalOpen(true);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+              >
+                <FolderPlus className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Nouveau dossier...</span>
+              </button>
+
+              <div className="my-1 border-t border-white/10" />
+
+              {/* Delete */}
+              <button
+                type="button"
+                onClick={() => {
+                  const target = contextMenu.file;
+                  setContextMenu(null);
+                  if (target) setDeleteTarget(target);
+                }}
+                className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-red-500/10 text-red-400 hover:text-red-300 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                  <span>Supprimer</span>
+                </div>
+                <kbd className="text-[10px] text-red-400/60 bg-red-500/10 px-1 py-0.5 rounded font-mono">⌫</kbd>
+              </button>
+            </>
+          ) : (
+            <>
+              {/* Context menu on empty area */}
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(null);
+                  setNewFolderModalOpen(true);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+              >
+                <FolderPlus className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Nouveau dossier...</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(null);
+                  refreshRemote();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Actualiser</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* MODAL 1: Nouveau Dossier */}
+      {isNewFolderModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#161926] border border-white/10 rounded-xl shadow-2xl p-5 text-zinc-200"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                  <FolderPlus className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Nouveau dossier</h3>
+                  <p className="text-[11px] text-zinc-400 truncate max-w-[220px]">
+                    Dans : {currentPath}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewFolderModalOpen(false)}
+                className="p-1 rounded text-zinc-500 hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {modalError && (
+              <div className="mb-3 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreateFolderSubmit}>
+              <div className="mb-4">
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                  Nom du dossier
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={newFolderNameInput}
+                  onChange={(e) => setNewFolderNameInput(e.target.value)}
+                  placeholder="ex: assets, uploads, logs..."
+                  className="w-full px-3 py-1.5 rounded-lg bg-surface-muted border border-white/10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-mono"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNewFolderModalOpen(false)}
+                  disabled={isSubmitting}
+                  className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !newFolderNameInput.trim()}
+                  className="px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Créer</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: Renommer */}
+      {renameTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#161926] border border-white/10 rounded-xl shadow-2xl p-5 text-zinc-200"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Renommer l'élément</h3>
+                  <p className="text-[11px] text-zinc-400 truncate max-w-[220px]">
+                    Actuel : {renameTarget.name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRenameTarget(null)}
+                className="p-1 rounded text-zinc-500 hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {modalError && (
+              <div className="mb-3 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleRenameSubmit}>
+              <div className="mb-4">
+                <label className="block text-xs font-medium text-zinc-400 mb-1.5">
+                  Nouveau nom
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={renameInput}
+                  onChange={(e) => setRenameInput(e.target.value)}
+                  className="w-full px-3 py-1.5 rounded-lg bg-surface-muted border border-white/10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRenameTarget(null)}
+                  disabled={isSubmitting}
+                  className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !renameInput.trim() || renameInput.trim() === renameTarget.name}
+                  className="px-3 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Renommer</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: Confirmer Suppression */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#161926] border border-red-500/30 rounded-xl shadow-2xl p-5 text-zinc-200"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400 flex-shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-white">Supprimer {deleteTarget.is_dir ? 'le dossier' : 'le fichier'} ?</h3>
+                <p className="text-xs text-zinc-400 truncate max-w-[220px] font-mono mt-0.5">
+                  {deleteTarget.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-400 mb-4 bg-white/5 p-2.5 rounded-lg border border-white/5">
+              Cette action est <span className="text-red-400 font-medium">définitive et irréversible</span>. {deleteTarget.is_dir ? 'Tout le contenu de ce dossier sera supprimé sur le serveur.' : 'Le fichier sera effacé du serveur distant.'}
+            </p>
+
+            {modalError && (
+              <div className="mb-3 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>{modalError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={isSubmitting}
+                className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteSubmit}
+                disabled={isSubmitting}
+                className="px-3.5 py-1.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50 shadow-sm shadow-red-900/50"
+              >
+                {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Supprimer définitivement</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
