@@ -36,13 +36,14 @@ pub struct UserGroupMaps {
     pub groups: HashMap<u32, String>,
     pub current_uid: Option<u32>,
     pub current_gid: Option<u32>,
+    pub is_complete: bool,
 }
 
 pub struct SftpProvider {
     session: SftpSession,
     _handle: Handle<SshHandler>,
     username: String,
-    identities: tokio::sync::OnceCell<UserGroupMaps>,
+    identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
 }
 
 impl SftpProvider {
@@ -371,18 +372,34 @@ impl SftpProvider {
                 session: sftp_session,
                 _handle: handle,
                 username: config.username,
-                identities: tokio::sync::OnceCell::new(),
+                identities: tokio::sync::RwLock::new(None),
             },
             logs,
         ))
     }
 
-    pub async fn get_or_load_identities(&self) -> &UserGroupMaps {
-        self.identities
-            .get_or_init(|| async {
-                Self::load_system_identities(&self.session, &self.username).await
-            })
-            .await
+    pub async fn get_or_load_identities(&self) -> UserGroupMaps {
+        // Fast path: if already cached and complete, return immediately
+        {
+            let reader = self.identities.read().await;
+            if let Some(ref maps) = *reader {
+                if maps.is_complete {
+                    return maps.clone();
+                }
+            }
+        }
+
+        // Slow path: acquire write lock and reload/retry
+        let mut writer = self.identities.write().await;
+        if let Some(ref maps) = *writer {
+            if maps.is_complete {
+                return maps.clone();
+            }
+        }
+
+        let maps = Self::load_system_identities(&self.session, &self.username).await;
+        *writer = Some(maps.clone());
+        maps
     }
 
     async fn load_system_identities(
@@ -391,98 +408,115 @@ impl SftpProvider {
     ) -> UserGroupMaps {
         let mut users = HashMap::new();
         let mut groups = HashMap::new();
-        let mut current_uid = None;
-        let mut current_gid = None;
 
         // 0 is root on Unix/Linux systems
         users.insert(0, "root".to_string());
         groups.insert(0, "root".to_string());
 
-        // 1. Try to read /etc/passwd (max 256KB, 1500ms timeout)
-        let passwd_str = tokio::time::timeout(
+        // 1. Try to read /etc/passwd (up to 4MB, 1500ms timeout)
+        let passwd_res = tokio::time::timeout(
             Duration::from_millis(1500),
-            read_remote_small_file(session, "/etc/passwd", 256 * 1024),
+            read_remote_text_file(session, "/etc/passwd", 4 * 1024 * 1024),
         )
-        .await
-        .ok()
-        .flatten();
+        .await;
 
-        if let Some(content) = passwd_str {
-            let parsed = parse_passwd(&content);
-            for (uid, name) in parsed {
-                if name == current_username {
-                    current_uid = Some(uid);
-                }
-                users.insert(uid, name);
-            }
+        let (passwd_opt, passwd_ok) = match passwd_res {
+            Ok(Some(res)) if !res.truncated => (Some(res.content), true),
+            Ok(Some(res)) => (Some(res.content), false), // truncated
+            _ => (None, false),                          // timed out or error
+        };
+
+        let mut current_uid = None;
+        let mut current_gid = None;
+
+        if let Some(ref content) = passwd_opt {
+            let parsed = parse_passwd(content, current_username);
+            current_uid = parsed.current_uid;
+            current_gid = parsed.current_gid;
+            users.extend(parsed.users);
         }
 
-        // 2. Try to read /etc/group (max 256KB, 1500ms timeout)
-        let group_str = tokio::time::timeout(
+        // 2. Try to read /etc/group (up to 4MB, 1500ms timeout)
+        let group_res = tokio::time::timeout(
             Duration::from_millis(1500),
-            read_remote_small_file(session, "/etc/group", 256 * 1024),
+            read_remote_text_file(session, "/etc/group", 4 * 1024 * 1024),
         )
-        .await
-        .ok()
-        .flatten();
+        .await;
 
-        if let Some(content) = group_str {
-            let parsed = parse_group(&content);
-            for (gid, name) in parsed {
-                if name == current_username {
-                    current_gid = Some(gid);
-                }
-                groups.insert(gid, name);
-            }
+        let (group_opt, group_ok) = match group_res {
+            Ok(Some(res)) if !res.truncated => (Some(res.content), true),
+            Ok(Some(res)) => (Some(res.content), false), // truncated
+            _ => (None, false),                          // timed out or error
+        };
+
+        if let Some(ref content) = group_opt {
+            groups.extend(parse_group(content));
         }
 
-        // 3. Fallback: if current_uid is still unknown (e.g. SFTP chroot or non-standard server)
-        if current_uid.is_none() {
-            if let Ok(meta) = session.metadata(".").await {
-                if let Some(uid) = meta.uid {
-                    if uid != 0 {
-                        current_uid = Some(uid);
-                        users.entry(uid).or_insert_with(|| current_username.to_string());
-                    }
-                }
-                if let Some(gid) = meta.gid {
-                    if gid != 0 {
-                        current_gid = Some(gid);
-                        groups.entry(gid).or_insert_with(|| current_username.to_string());
-                    }
-                }
-            }
-        }
+        // Complete if both files were successfully read without truncation
+        let is_complete = passwd_ok && group_ok;
 
         UserGroupMaps {
             users,
             groups,
             current_uid,
             current_gid,
+            is_complete,
         }
     }
 }
 
-async fn read_remote_small_file(
+struct RemoteTextResult {
+    content: String,
+    truncated: bool,
+}
+
+async fn read_remote_text_file(
     session: &SftpSession,
     path: &str,
     max_bytes: usize,
-) -> Option<String> {
+) -> Option<RemoteTextResult> {
     let mut file = session.open(path).await.ok()?;
     let mut content = Vec::new();
     let mut buf = [0u8; 8192];
-    while content.len() < max_bytes {
+    let mut truncated = false;
+
+    loop {
         match file.read(&mut buf).await {
             Ok(0) => break,
-            Ok(n) => content.extend_from_slice(&buf[..n]),
-            Err(_) => break,
+            Ok(n) => {
+                if content.len() + n > max_bytes {
+                    let remaining = max_bytes.saturating_sub(content.len());
+                    content.extend_from_slice(&buf[..remaining]);
+                    truncated = true;
+                    break;
+                } else {
+                    content.extend_from_slice(&buf[..n]);
+                }
+            }
+            Err(_) => return None,
         }
     }
-    String::from_utf8(content).ok()
+
+    let text = String::from_utf8_lossy(&content).into_owned();
+    Some(RemoteTextResult {
+        content: text,
+        truncated,
+    })
 }
 
-pub fn parse_passwd(content: &str) -> HashMap<u32, String> {
-    let mut map = HashMap::new();
+#[derive(Debug, Clone, Default)]
+pub struct PasswdInfo {
+    pub users: HashMap<u32, String>,
+    pub current_uid: Option<u32>,
+    pub current_gid: Option<u32>,
+}
+
+pub fn parse_passwd(content: &str, current_username: &str) -> PasswdInfo {
+    let mut users = HashMap::new();
+    let mut current_uid = None;
+    let mut current_gid = None;
+
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -492,11 +526,24 @@ pub fn parse_passwd(content: &str) -> HashMap<u32, String> {
         if parts.len() >= 3 {
             let name = parts[0].trim();
             if let Ok(uid) = parts[2].trim().parse::<u32>() {
-                map.insert(uid, name.to_string());
+                if name == current_username {
+                    current_uid = Some(uid);
+                    if parts.len() >= 4 {
+                        if let Ok(gid) = parts[3].trim().parse::<u32>() {
+                            current_gid = Some(gid);
+                        }
+                    }
+                }
+                users.insert(uid, name.to_string());
             }
         }
     }
-    map
+
+    PasswdInfo {
+        users,
+        current_uid,
+        current_gid,
+    }
 }
 
 pub fn parse_group(content: &str) -> HashMap<u32, String> {
@@ -862,14 +909,27 @@ ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
 mathieu:x:1001:1001:Mathieu Cuvelier:/home/mathieu:/bin/zsh
 alice:x:1002:1002:Alice:/home/alice:/bin/bash
 "#;
-        let map = parse_passwd(passwd);
-        assert_eq!(map.get(&0).unwrap(), "root");
-        assert_eq!(map.get(&1).unwrap(), "daemon");
-        assert_eq!(map.get(&33).unwrap(), "www-data");
-        assert_eq!(map.get(&1000).unwrap(), "ubuntu");
-        assert_eq!(map.get(&1001).unwrap(), "mathieu");
-        assert_eq!(map.get(&1002).unwrap(), "alice");
-        assert_eq!(map.get(&9999), None);
+        let parsed = parse_passwd(passwd, "mathieu");
+        assert_eq!(parsed.users.get(&0).unwrap(), "root");
+        assert_eq!(parsed.users.get(&1).unwrap(), "daemon");
+        assert_eq!(parsed.users.get(&33).unwrap(), "www-data");
+        assert_eq!(parsed.users.get(&1000).unwrap(), "ubuntu");
+        assert_eq!(parsed.users.get(&1001).unwrap(), "mathieu");
+        assert_eq!(parsed.users.get(&1002).unwrap(), "alice");
+        assert_eq!(parsed.users.get(&9999), None);
+        assert_eq!(parsed.current_uid, Some(1001));
+        assert_eq!(parsed.current_gid, Some(1001));
+    }
+
+    #[test]
+    fn test_parse_passwd_lossy_utf8() {
+        // Simulates Latin-1 accented bytes in GECOS comment
+        let raw_bytes: &[u8] = b"mathieu:x:1001:1001:Mathieu \xe9l\xe8ve:/home/mathieu:/bin/bash\n";
+        let text = String::from_utf8_lossy(raw_bytes).into_owned();
+        let parsed = parse_passwd(&text, "mathieu");
+        assert_eq!(parsed.users.get(&1001).unwrap(), "mathieu");
+        assert_eq!(parsed.current_uid, Some(1001));
+        assert_eq!(parsed.current_gid, Some(1001));
     }
 
     #[test]
