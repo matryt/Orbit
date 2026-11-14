@@ -8,6 +8,7 @@ import { QuickLookModal } from './components/modals/QuickLookModal';
 import { TransferDrawer } from './components/transfers/TransferDrawer';
 import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
+import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
 
 export function App() {
   const {
@@ -85,6 +86,7 @@ export function App() {
       <QuickLookModal />
       {isNewConnectionModalOpen && <NewConnectionModal />}
       {isExportModalOpen && <ExportProfilesModal />}
+      <HostKeyVerificationModal />
     </div>
   );
 }

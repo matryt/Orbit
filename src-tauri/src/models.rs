@@ -59,3 +59,23 @@ pub struct ConnectionTestResult {
     pub message: String,
     pub logs: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostKeyPromptRequest {
+    pub request_id: String,
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub is_new: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub changed_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKeyDecision {
+    AcceptAndRemember,
+    AcceptOnce,
+    Reject,
+}
