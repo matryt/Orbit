@@ -135,6 +135,9 @@ export const Header: React.FC = () => {
           <input
             ref={searchInputRef}
             type="text"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Filtrer..."

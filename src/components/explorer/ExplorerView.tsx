@@ -570,6 +570,9 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 <input
                   type="text"
                   autoFocus
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={newFolderNameInput}
                   onChange={(e) => setNewFolderNameInput(e.target.value)}
                   placeholder="ex: assets, uploads, logs..."
@@ -643,6 +646,9 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 <input
                   type="text"
                   autoFocus
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={renameInput}
                   onChange={(e) => setRenameInput(e.target.value)}
                   className="w-full px-3 py-1.5 rounded-lg bg-surface-muted border border-white/10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 font-mono"

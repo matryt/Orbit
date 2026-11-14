@@ -279,7 +279,7 @@ export const NewConnectionModal: React.FC = () => {
         {/* Header */}
         <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none flex-shrink-0">
           <h2 className="text-sm font-semibold text-white">
-            {editingProfile ? 'Modifier la connexion' : 'Nouvelle Connexion'}
+            {editingProfile ? 'Modifier la connexion' : 'Nouvelle connexion'}
           </h2>
           <button
             onClick={handleClose}
@@ -299,43 +299,39 @@ export const NewConnectionModal: React.FC = () => {
                 setType('sftp');
                 setTestResult(null);
               }}
-              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
-                type === 'sftp'
-                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
+              className="flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm"
             >
               <Server className="w-4 h-4 text-sky-400" />
               <span>SFTP (SSH)</span>
             </button>
             <button
               type="button"
-              onClick={() => {
-                setType('s3');
-                setTestResult(null);
-              }}
-              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
-                type === 's3'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
+              disabled
+              title="Le support S3 (AWS, Cloudflare R2, Scaleway, MinIO) arrive dans la version v0.2"
+              className="flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all opacity-45 cursor-not-allowed text-zinc-500 select-none bg-surface/30 border border-transparent"
             >
-              <Cloud className="w-4 h-4 text-amber-400" />
+              <Cloud className="w-4 h-4 text-zinc-500" />
               <span>Amazon S3 / R2 / MinIO</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25 font-normal">
+                Bientôt
+              </span>
             </button>
           </div>
 
           {/* Profile Name */}
           <div>
-            <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
-              Nom du favori
+            <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+              Nom de la connexion
             </label>
             <input
               type="text"
               required
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={type === 's3' ? 'Cloudflare R2 Prod' : 'Mon Serveur Linux'}
+              placeholder="ex: Serveur Production, VPS Debian..."
               className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50"
             />
           </div>
@@ -343,11 +339,14 @@ export const NewConnectionModal: React.FC = () => {
           {type === 's3' ? (
             <>
               <div>
-                <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                   Endpoint URL (Optionnel pour AWS standard)
                 </label>
                 <input
                   type="text"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={endpoint}
                   onChange={(e) => setEndpoint(e.target.value)}
                   placeholder="https://<account_id>.r2.cloudflarestorage.com"
@@ -357,11 +356,14 @@ export const NewConnectionModal: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                     Bucket Name
                   </label>
                   <input
                     type="text"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={bucket}
                     onChange={(e) => setBucket(e.target.value)}
                     placeholder="my-bucket"
@@ -369,11 +371,14 @@ export const NewConnectionModal: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                     Région
                   </label>
                   <input
                     type="text"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={region}
                     onChange={(e) => setRegion(e.target.value)}
                     placeholder="auto / eu-west-3"
@@ -383,11 +388,14 @@ export const NewConnectionModal: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                   Access Key ID
                 </label>
                 <input
                   type="text"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={accessKey}
                   onChange={(e) => setAccessKey(e.target.value)}
                   placeholder="AKIAIOSFODNN7EXAMPLE"
@@ -396,8 +404,8 @@ export const NewConnectionModal: React.FC = () => {
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium text-zinc-300">
                     Secret Access Key
                   </label>
                   <span className="text-[10px] text-zinc-500 flex items-center gap-1">
@@ -406,6 +414,9 @@ export const NewConnectionModal: React.FC = () => {
                 </div>
                 <input
                   type="password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={secretKey}
                   onChange={(e) => setSecretKey(e.target.value)}
                   placeholder="••••••••••••••••••••••••••••••"
@@ -418,12 +429,15 @@ export const NewConnectionModal: React.FC = () => {
               {/* Host & Port */}
               <div className="grid grid-cols-4 gap-3">
                 <div className="col-span-3">
-                  <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
-                    Hôte (Host / IP)
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                    Hôte ou adresse IP
                   </label>
                   <input
                     type="text"
                     required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={host}
                     onChange={(e) => {
                       setHost(e.target.value);
@@ -434,7 +448,7 @@ export const NewConnectionModal: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                     Port
                   </label>
                   <input
@@ -451,12 +465,15 @@ export const NewConnectionModal: React.FC = () => {
 
               {/* Username */}
               <div>
-                <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1">
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                   Nom d'utilisateur
                 </label>
                 <input
                   type="text"
                   required
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={username}
                   onChange={(e) => {
                     setUsername(e.target.value);
@@ -469,7 +486,7 @@ export const NewConnectionModal: React.FC = () => {
 
               {/* SFTP Authentication Type Switcher */}
               <div>
-                <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wider mb-1.5">
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                   Méthode d'authentification
                 </label>
                 <div className="grid grid-cols-2 gap-2 p-1 bg-surface-muted/80 rounded-lg border border-border-subtle">
@@ -510,8 +527,8 @@ export const NewConnectionModal: React.FC = () => {
                 <>
                   {/* SSH Key File Picker */}
                   <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-medium text-zinc-300">
                         Fichier de clé privée
                       </label>
                       <div className="flex items-center gap-1 text-[10px] text-zinc-500">
@@ -544,6 +561,9 @@ export const NewConnectionModal: React.FC = () => {
                       <input
                         type="text"
                         required
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
                         value={keyPath}
                         onChange={(e) => {
                           setKeyPath(e.target.value);
@@ -566,8 +586,8 @@ export const NewConnectionModal: React.FC = () => {
 
                   {/* Key Passphrase */}
                   <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-medium text-zinc-300">
                         Passphrase de la clé (si chiffrée)
                       </label>
                       <span className="text-[10px] text-zinc-500 flex items-center gap-1">
@@ -576,6 +596,9 @@ export const NewConnectionModal: React.FC = () => {
                     </div>
                     <input
                       type="password"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       value={passphrase}
                       onChange={(e) => {
                         setPassphrase(e.target.value);
@@ -589,8 +612,8 @@ export const NewConnectionModal: React.FC = () => {
               ) : (
                 /* Password Auth */
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-medium text-zinc-300">
                       Mot de passe du compte
                     </label>
                     <span className="text-[10px] text-zinc-500 flex items-center gap-1">
@@ -601,6 +624,9 @@ export const NewConnectionModal: React.FC = () => {
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       value={password}
                       onChange={(e) => {
                         setPassword(e.target.value);
