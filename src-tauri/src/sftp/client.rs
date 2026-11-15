@@ -176,9 +176,9 @@ impl Handler for SshHandler {
 
                 let principals = cert.valid_principals();
                 if !principals.is_empty()
-                    && !principals.iter().any(|p| {
-                        p == &host || (p.starts_with("*.") && host.ends_with(&p[1..]))
-                    })
+                    && !principals
+                        .iter()
+                        .any(|p| p == &host || (p.starts_with("*.") && host.ends_with(&p[1..])))
                 {
                     let mut status = key_status.lock().await;
                     *status = Some(HostKeyStatus::CheckFailed(format!(
@@ -225,7 +225,9 @@ impl Handler for SshHandler {
             Ok(Ok(false)) => {
                 // Clé inconnue (nouvel hôte).
                 let key_type = pubkey.algorithm().to_string();
-                let fingerprint = pubkey.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string();
+                let fingerprint = pubkey
+                    .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                    .to_string();
 
                 if let Some(ref handler) = self.prompt_handler {
                     let req = HostKeyPromptRequest {
@@ -253,7 +255,8 @@ impl Handler for SshHandler {
                         HostKeyDecision::Reject => {
                             let mut status = key_status.lock().await;
                             *status = Some(HostKeyStatus::Rejected(
-                                "Connexion annulée : l'empreinte de la clé d'hôte a été refusée.".into(),
+                                "Connexion annulée : l'empreinte de la clé d'hôte a été refusée."
+                                    .into(),
                             ));
                             Ok(false)
                         }
@@ -262,7 +265,8 @@ impl Handler for SshHandler {
                     // Mode sans invite (ex: appel programmatique sans UI) : rejet strict par sécurité
                     let mut status = key_status.lock().await;
                     *status = Some(HostKeyStatus::Rejected(
-                        "Clé d'hôte SSH inconnue et aucun gestionnaire d'approbation disponible.".into(),
+                        "Clé d'hôte SSH inconnue et aucun gestionnaire d'approbation disponible."
+                            .into(),
                     ));
                     Ok(false)
                 }
@@ -270,7 +274,9 @@ impl Handler for SshHandler {
             Ok(Err(russh::keys::Error::KeyChanged { line })) => {
                 // CRITICAL: Server host key has changed.
                 let key_type = pubkey.algorithm().to_string();
-                let fingerprint = pubkey.fingerprint(russh::keys::ssh_key::HashAlg::Sha256).to_string();
+                let fingerprint = pubkey
+                    .fingerprint(russh::keys::ssh_key::HashAlg::Sha256)
+                    .to_string();
 
                 if let Some(ref handler) = self.prompt_handler {
                     let req = HostKeyPromptRequest {
@@ -786,12 +792,15 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        let err_msg = format!("Échec d'enregistrement de la clé dans ~/.ssh/known_hosts : {e}");
+                        let err_msg = format!(
+                            "Échec d'enregistrement de la clé dans ~/.ssh/known_hosts : {e}"
+                        );
                         logs.push(format!("[{}] ❌ {}", now(), err_msg));
                         return Err((AppError::Io(err_msg), logs));
                     }
                     Err(e) => {
-                        let err_msg = format!("Erreur système lors de l'enregistrement de la clé : {e}");
+                        let err_msg =
+                            format!("Erreur système lors de l'enregistrement de la clé : {e}");
                         logs.push(format!("[{}] ❌ {}", now(), err_msg));
                         return Err((AppError::Io(err_msg), logs));
                     }
@@ -817,12 +826,15 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        let err_msg = format!("Échec du remplacement de la clé dans ~/.ssh/known_hosts : {e}");
+                        let err_msg = format!(
+                            "Échec du remplacement de la clé dans ~/.ssh/known_hosts : {e}"
+                        );
                         logs.push(format!("[{}] ❌ {}", now(), err_msg));
                         return Err((AppError::Io(err_msg), logs));
                     }
                     Err(e) => {
-                        let err_msg = format!("Erreur système lors du remplacement de la clé : {e}");
+                        let err_msg =
+                            format!("Erreur système lors du remplacement de la clé : {e}");
                         logs.push(format!("[{}] ❌ {}", now(), err_msg));
                         return Err((AppError::Io(err_msg), logs));
                     }
@@ -1589,7 +1601,8 @@ docker:x:999:ubuntu,mathieu
 
     #[test]
     fn test_fingerprint() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let fp = pk.fingerprint(russh::keys::ssh_key::HashAlg::Sha256);
         assert_eq!(
@@ -1618,7 +1631,8 @@ docker:x:999:ubuntu,mathieu
 
     #[tokio::test]
     async fn test_ssh_handler_check_server_key_prompt_accept_and_remember() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let status = Arc::new(tokio::sync::Mutex::new(None));
         let mock_handler = Arc::new(MockPromptHandler {
@@ -1645,7 +1659,8 @@ docker:x:999:ubuntu,mathieu
 
     #[tokio::test]
     async fn test_ssh_handler_check_server_key_prompt_accept_once() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let status = Arc::new(tokio::sync::Mutex::new(None));
         let mock_handler = Arc::new(MockPromptHandler {
@@ -1672,7 +1687,8 @@ docker:x:999:ubuntu,mathieu
 
     #[tokio::test]
     async fn test_ssh_handler_check_server_key_prompt_reject() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let status = Arc::new(tokio::sync::Mutex::new(None));
         let mock_handler = Arc::new(MockPromptHandler {
@@ -1699,7 +1715,8 @@ docker:x:999:ubuntu,mathieu
 
     #[tokio::test]
     async fn test_ssh_handler_no_prompt_handler_rejects_unknown_host() {
-        let raw = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let pk = russh::keys::ssh_key::PublicKey::from_openssh(raw).unwrap();
         let status = Arc::new(tokio::sync::Mutex::new(None));
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::models::{HostKeyDecision, HostKeyPromptRequest};
@@ -112,7 +112,7 @@ pub fn replace_known_hosts_entry_atomic(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Répertoire personnel introuvable",
-            ))
+            ));
         }
     };
 
@@ -131,7 +131,7 @@ pub fn replace_known_hosts_entry_atomic(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Dossier parent de known_hosts introuvable",
-            ))
+            ));
         }
     };
 
@@ -412,7 +412,8 @@ mod tests {
 
     #[test]
     fn test_update_known_hosts_preserves_other_algorithms_and_ca() {
-        let raw_pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw_pub =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let new_pk = russh::keys::ssh_key::PublicKey::from_openssh(raw_pub).unwrap();
 
         let initial_content = "\
@@ -422,14 +423,9 @@ server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED old_ed_key
 ";
 
         // Replace ssh-ed25519 on server.example.com (changed_line 3)
-        let updated = update_known_hosts_content(
-            initial_content,
-            "server.example.com",
-            22,
-            &new_pk,
-            Some(3),
-        )
-        .unwrap();
+        let updated =
+            update_known_hosts_content(initial_content, "server.example.com", 22, &new_pk, Some(3))
+                .unwrap();
 
         // 1. @cert-authority is preserved
         assert!(updated.contains("@cert-authority *.example.com"));
@@ -438,6 +434,9 @@ server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED old_ed_key
         // 3. The old ed25519 key is gone
         assert!(!updated.contains("AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED"));
         // 4. The new ed25519 key is added
-        assert!(updated.contains(&format!("server.example.com {}", new_pk.to_openssh().unwrap())));
+        assert!(updated.contains(&format!(
+            "server.example.com {}",
+            new_pk.to_openssh().unwrap()
+        )));
     }
 }

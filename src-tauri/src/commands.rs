@@ -37,7 +37,10 @@ pub async fn test_sftp_connection(
     mut config: SftpConnectConfig,
 ) -> Result<ConnectionTestResult, AppError> {
     let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
-        Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
+        Arc::new(TauriHostKeyPromptHandler::new(
+            app,
+            Arc::clone(&host_key_mgr),
+        ));
 
     let test_task = async move {
         // Run synchronous keyring lookup on a blocking thread inside the timeout
@@ -87,7 +90,10 @@ pub async fn connect_sftp(
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
     let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
-        Arc::new(TauriHostKeyPromptHandler::new(app, Arc::clone(&host_key_mgr)));
+        Arc::new(TauriHostKeyPromptHandler::new(
+            app,
+            Arc::clone(&host_key_mgr),
+        ));
 
     // If password or passphrase not provided directly, look in system keyring on a blocking thread
     if config.password.is_none() && config.passphrase.is_none() {
