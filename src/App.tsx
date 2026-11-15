@@ -9,6 +9,7 @@ import { TransferDrawer } from './components/transfers/TransferDrawer';
 import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
+import { UpdateModal } from './components/modals/UpdateModal';
 
 export function App() {
   const {
@@ -17,14 +18,16 @@ export function App() {
     quickLookFile,
     setQuickLookFile,
     loadPersistedProfiles,
+    checkForUpdates,
     isNewConnectionModalOpen,
     isExportModalOpen,
   } = useOrbitStore();
 
-  // Load saved profiles from disk on startup
+  // Load saved profiles from disk on startup & check for updates silently
   useEffect(() => {
     loadPersistedProfiles();
-  }, [loadPersistedProfiles]);
+    checkForUpdates(false);
+  }, [loadPersistedProfiles, checkForUpdates]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -87,6 +90,7 @@ export function App() {
       {isNewConnectionModalOpen && <NewConnectionModal />}
       {isExportModalOpen && <ExportProfilesModal />}
       <HostKeyVerificationModal />
+      <UpdateModal />
     </div>
   );
 }

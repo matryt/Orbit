@@ -60,3 +60,15 @@ export interface HostKeyPromptRequest {
 
 export type HostKeyDecision = 'accept_and_remember' | 'accept_once' | 'reject';
 
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_name: string;
+  release_notes: string;
+  published_at: string | null;
+  release_url: string;
+  download_url: string | null;
+  asset_name: string | null;
+}
+

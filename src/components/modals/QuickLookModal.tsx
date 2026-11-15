@@ -6,7 +6,7 @@ import { storageApi } from '../../services/storageApi';
 import { X, Copy, Loader2, Folder } from 'lucide-react';
 
 export const QuickLookModal: React.FC = () => {
-  const { quickLookFile, setQuickLookFile, activeProfileId } = useOrbitStore();
+  const { quickLookFile, setQuickLookFile, activeProfileId, activePane } = useOrbitStore();
   const [content, setContent] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
@@ -35,8 +35,12 @@ export const QuickLookModal: React.FC = () => {
     let isCancelled = false;
     setIsLoading(true);
 
-    storageApi
-      .readPreview(activeProfileId, quickLookFile.path)
+    const readPromise =
+      activePane === 'local'
+        ? storageApi.readLocalPreview(quickLookFile.path)
+        : storageApi.readPreview(activeProfileId, quickLookFile.path);
+
+    readPromise
       .then((res) => {
         if (!isCancelled) {
           setContent(res);

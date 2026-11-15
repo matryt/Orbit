@@ -1,5 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, UpdateCheckResult } from '../types';
+import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
 export interface SftpConnectParams {
@@ -23,6 +24,12 @@ export interface BackendTransferProgress {
 export const isTauri = () => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 };
+
+export function isCancelledError(err: any): boolean {
+  if (err?.type === 'Cancelled') return true;
+  const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+  return msg.includes('Connexion annulée') || msg.includes('Cancelled');
+}
 
 export function formatConnectionError(err: any): string {
   const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
@@ -94,6 +101,11 @@ export const storageApi = {
     try {
       await invoke('connect_sftp', { config: params });
     } catch (err: any) {
+      if (isCancelledError(err)) {
+        const error = new Error('Connexion annulée : le profil a été déconnecté.');
+        (error as any).type = 'Cancelled';
+        throw error;
+      }
       throw new Error(formatConnectionError(err));
     }
   },
@@ -236,6 +248,59 @@ export const storageApi = {
     });
   },
 
+  async listLocalDir(path?: string): Promise<{ currentPath: string; entries: FileEntry[] }> {
+    if (!isTauri()) {
+      return {
+        currentPath: path || '/',
+        entries: [],
+      };
+    }
+    const res = await invoke<{ current_path: string; entries: FileEntry[] }>('local_list_dir', {
+      path: path || null,
+    });
+    return {
+      currentPath: res.current_path,
+      entries: res.entries,
+    };
+  },
+
+  async readLocalPreview(path: string, maxBytes = 2 * 1024 * 1024): Promise<string> {
+    if (!isTauri()) {
+      return `// Mock local aperçu pour ${path}`;
+    }
+    const bytes = await invoke<number[]>('local_read_preview', {
+      path,
+      maxBytes,
+    });
+    const uint8 = new Uint8Array(bytes);
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    return decoder.decode(uint8);
+  },
+
+  async createLocalDir(path: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] createLocalDir:', path);
+      return;
+    }
+    await invoke('local_create_dir', { path });
+  },
+
+  async deleteLocalItem(path: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] deleteLocalItem:', path);
+      return;
+    }
+    await invoke('local_delete', { path });
+  },
+
+  async renameLocalItem(oldPath: string, newPath: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] renameLocalItem:', oldPath, '->', newPath);
+      return;
+    }
+    await invoke('local_rename', { oldPath, newPath });
+  },
+
   async saveSecret(profileId: string, secret: string): Promise<void> {
     if (!isTauri()) return;
     await invoke('save_secret', { profileId, secret });
@@ -284,5 +349,22 @@ export const storageApi = {
       return;
     }
     await invoke('delete_profile', { profileId });
+  },
+
+  async checkAppUpdate(): Promise<UpdateCheckResult> {
+    if (!isTauri()) {
+      return {
+        current_version: APP_VERSION,
+        latest_version: APP_VERSION,
+        has_update: false,
+        release_name: `Orbit v${APP_VERSION}`,
+        release_notes: 'Version actuelle (Mock)',
+        published_at: new Date().toISOString(),
+        release_url: 'https://github.com/matryt/Orbit/releases',
+        download_url: null,
+        asset_name: null,
+      };
+    }
+    return await invoke<UpdateCheckResult>('check_app_update');
   },
 };

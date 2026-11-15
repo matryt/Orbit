@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("Not connected: {0}")]
     NotConnected(String),
 
+    #[error("Cancelled: {0}")]
+    Cancelled(String),
+
     #[error("File not found: {0}")]
     NotFound(String),
 

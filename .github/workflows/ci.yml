@@ -2,15 +2,34 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Fast Tier 1 (< 15s): Format check without heavy system dependencies
+  rust-fmt:
+    name: Rust Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust rustfmt
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+  # Fast Tier 1 (< 30s): TypeScript type-check and Vite bundle verification
   frontend-check:
     name: Frontend (TypeScript & Vite)
     runs-on: ubuntu-latest
@@ -27,11 +46,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run Frontend unit tests
+        run: npm test
+
       - name: TypeScript type-check and Vite build
         run: npm run build
 
+  # Tier 2: Rust Lint (Clippy) & Unit Tests on Linux
   rust-lint:
     name: Rust Lint & Tests (Linux)
+    needs: rust-fmt
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -39,8 +63,8 @@ jobs:
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -51,16 +75,12 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
-          components: clippy, rustfmt
+          components: clippy
 
       - name: Rust Cache
         uses: swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
         with:
           workspaces: src-tauri -> target
-
-      - name: Check Rust formatting
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
 
       - name: Run Clippy lints
         working-directory: src-tauri
@@ -70,9 +90,10 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  # Tier 3: Cross-platform compilation check (macOS & Windows)
   rust-cross-check:
     name: Rust Check (${{ matrix.os-name }})
-    needs: frontend-check
+    needs: [frontend-check, rust-fmt]
     strategy:
       fail-fast: false
       matrix:

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::models::{HostKeyDecision, HostKeyPromptRequest};
@@ -112,7 +112,7 @@ pub fn replace_known_hosts_entry_atomic(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Répertoire personnel introuvable",
-            ))
+            ));
         }
     };
 
@@ -131,7 +131,7 @@ pub fn replace_known_hosts_entry_atomic(
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Dossier parent de known_hosts introuvable",
-            ))
+            ));
         }
     };
 
@@ -173,25 +173,32 @@ pub trait HostKeyPromptHandler: Send + Sync {
     async fn prompt(&self, req: HostKeyPromptRequest) -> HostKeyDecision;
 }
 
+struct Listener {
+    request_id: String,
+    tx: oneshot::Sender<HostKeyDecision>,
+}
+
 struct CoalescedPrompt {
     req: HostKeyPromptRequest,
-    listeners: Vec<oneshot::Sender<HostKeyDecision>>,
+    listeners: Vec<Listener>,
+}
+
+#[derive(Default)]
+struct PromptState {
+    by_target: HashMap<(String, u16, String), CoalescedPrompt>,
+    by_request_id: HashMap<String, (String, u16, String)>,
 }
 
 /// Gestionnaire de requêtes d'approbation d'empreinte SSH en attente.
 #[derive(Default)]
 pub struct HostKeyPromptManager {
-    // Clé par (host, port, fingerprint) pour fusionner les requêtes concurrentes vers le même serveur
-    by_target: Mutex<HashMap<(String, u16, String), CoalescedPrompt>>,
-    // Index inverse par request_id pour la résolution rapide
-    by_request_id: Mutex<HashMap<String, (String, u16, String)>>,
+    state: Mutex<PromptState>,
 }
 
 impl HostKeyPromptManager {
     pub fn new() -> Self {
         Self {
-            by_target: Mutex::new(HashMap::new()),
-            by_request_id: Mutex::new(HashMap::new()),
+            state: Mutex::new(PromptState::default()),
         }
     }
 
@@ -209,23 +216,28 @@ impl HostKeyPromptManager {
     ) -> (oneshot::Receiver<HostKeyDecision>, bool) {
         let target_key = (req.host.clone(), req.port, req.fingerprint.clone());
         let (tx, rx) = oneshot::channel();
+        let req_id = req.request_id.clone();
 
-        let mut targets = self.by_target.lock().await;
-        let mut ids = self.by_request_id.lock().await;
+        let mut state = self.state.lock().await;
+        state
+            .by_request_id
+            .insert(req_id.clone(), target_key.clone());
 
-        if let Some(existing) = targets.get_mut(&target_key) {
-            // Une invite pour cet hôte et cette empreinte est DÉJÀ en cours : on s'abonne à la même décision
-            existing.listeners.push(tx);
+        if let Some(existing) = state.by_target.get_mut(&target_key) {
+            existing.listeners.push(Listener {
+                request_id: req_id,
+                tx,
+            });
             (rx, false)
         } else {
-            // Nouvelle invite
-            let req_id = req.request_id.clone();
-            ids.insert(req_id.clone(), target_key.clone());
-            targets.insert(
+            state.by_target.insert(
                 target_key,
                 CoalescedPrompt {
                     req,
-                    listeners: vec![tx],
+                    listeners: vec![Listener {
+                        request_id: req_id,
+                        tx,
+                    }],
                 },
             );
             (rx, true)
@@ -233,22 +245,26 @@ impl HostKeyPromptManager {
     }
 
     pub async fn get_pending_requests(&self) -> Vec<HostKeyPromptRequest> {
-        let targets = self.by_target.lock().await;
-        targets.values().map(|c| c.req.clone()).collect()
+        let state = self.state.lock().await;
+        state.by_target.values().map(|c| c.req.clone()).collect()
     }
 
     pub async fn resolve_prompt(&self, request_id: &str, decision: HostKeyDecision) -> bool {
-        let mut ids = self.by_request_id.lock().await;
-        let target_key = match ids.remove(request_id) {
+        let mut state = self.state.lock().await;
+        let target_key = match state.by_request_id.remove(request_id) {
             Some(k) => k,
             None => return false,
         };
 
-        let mut targets = self.by_target.lock().await;
-        if let Some(coalesced) = targets.remove(&target_key) {
+        if let Some(coalesced) = state.by_target.remove(&target_key) {
+            // Nettoyer l'ID principal affiché ainsi que tous les request_ids associés
+            state.by_request_id.remove(&coalesced.req.request_id);
+            for listener in &coalesced.listeners {
+                state.by_request_id.remove(&listener.request_id);
+            }
             let mut delivered = false;
-            for tx in coalesced.listeners {
-                if tx.send(decision).is_ok() {
+            for listener in coalesced.listeners {
+                if listener.tx.send(decision).is_ok() {
                     delivered = true;
                 }
             }
@@ -259,10 +275,37 @@ impl HostKeyPromptManager {
     }
 
     pub async fn cancel_prompt(&self, request_id: &str) {
-        let mut ids = self.by_request_id.lock().await;
-        if let Some(target_key) = ids.remove(request_id) {
-            let mut targets = self.by_target.lock().await;
-            targets.remove(&target_key);
+        let mut state = self.state.lock().await;
+        let target_key = match state.by_request_id.get(request_id).cloned() {
+            Some(k) => k,
+            None => return,
+        };
+
+        let mut remove_target = false;
+        let mut primary_id_to_remove = None;
+        let mut remove_caller_id = false;
+
+        if let Some(coalesced) = state.by_target.get_mut(&target_key) {
+            coalesced.listeners.retain(|l| l.request_id != request_id);
+
+            if coalesced.listeners.is_empty() {
+                remove_target = true;
+                primary_id_to_remove = Some(coalesced.req.request_id.clone());
+            } else if coalesced.req.request_id != request_id {
+                remove_caller_id = true;
+            }
+        } else {
+            remove_caller_id = true;
+        }
+
+        if let Some(id) = primary_id_to_remove {
+            state.by_request_id.remove(&id);
+        }
+        if remove_caller_id {
+            state.by_request_id.remove(request_id);
+        }
+        if remove_target {
+            state.by_target.remove(&target_key);
         }
     }
 }
@@ -410,9 +453,56 @@ mod tests {
         assert_eq!(manager.get_pending_requests().await.len(), 0);
     }
 
+    #[tokio::test]
+    async fn test_cancel_prompt_retains_coalesced_listeners() {
+        let manager = HostKeyPromptManager::new();
+        let req1 = HostKeyPromptRequest {
+            request_id: "cancel-test-1".to_string(),
+            host: "cancel.example.com".to_string(),
+            port: 22,
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: "SHA256:cancel_fp".to_string(),
+            is_new: true,
+            changed_line: None,
+        };
+        let req2 = HostKeyPromptRequest {
+            request_id: "cancel-test-2".to_string(),
+            host: "cancel.example.com".to_string(),
+            port: 22,
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: "SHA256:cancel_fp".to_string(),
+            is_new: true,
+            changed_line: None,
+        };
+
+        let (rx1, _) = manager.register_or_coalesce_prompt(req1).await;
+        let (rx2, _) = manager.register_or_coalesce_prompt(req2).await;
+
+        // Cancel only the first request
+        manager.cancel_prompt("cancel-test-1").await;
+
+        // rx1 was dropped by cancellation
+        assert!(rx1.await.is_err());
+
+        // The prompt is STILL pending because rx2 is waiting!
+        assert_eq!(manager.get_pending_requests().await.len(), 1);
+
+        // Crucial test: Resolving through the displayed request ID ("cancel-test-1")
+        // still succeeds and delivers to surviving listener rx2!
+        let resolved = manager
+            .resolve_prompt("cancel-test-1", HostKeyDecision::AcceptOnce)
+            .await;
+        assert!(resolved);
+        assert_eq!(rx2.await.unwrap(), HostKeyDecision::AcceptOnce);
+
+        // Now both are resolved and cleared
+        assert_eq!(manager.get_pending_requests().await.len(), 0);
+    }
+
     #[test]
     fn test_update_known_hosts_preserves_other_algorithms_and_ca() {
-        let raw_pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
+        let raw_pub =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12 test";
         let new_pk = russh::keys::ssh_key::PublicKey::from_openssh(raw_pub).unwrap();
 
         let initial_content = "\
@@ -422,14 +512,9 @@ server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED old_ed_key
 ";
 
         // Replace ssh-ed25519 on server.example.com (changed_line 3)
-        let updated = update_known_hosts_content(
-            initial_content,
-            "server.example.com",
-            22,
-            &new_pk,
-            Some(3),
-        )
-        .unwrap();
+        let updated =
+            update_known_hosts_content(initial_content, "server.example.com", 22, &new_pk, Some(3))
+                .unwrap();
 
         // 1. @cert-authority is preserved
         assert!(updated.contains("@cert-authority *.example.com"));
@@ -438,6 +523,9 @@ server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED old_ed_key
         // 3. The old ed25519 key is gone
         assert!(!updated.contains("AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED"));
         // 4. The new ed25519 key is added
-        assert!(updated.contains(&format!("server.example.com {}", new_pk.to_openssh().unwrap())));
+        assert!(updated.contains(&format!(
+            "server.example.com {}",
+            new_pk.to_openssh().unwrap()
+        )));
     }
 }

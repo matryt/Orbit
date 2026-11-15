@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
@@ -17,9 +17,18 @@ import {
   AlertTriangle,
   Loader2,
   X,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from 'lucide-react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
+import {
+  SortColumn,
+  SortDirection,
+  sortFiles,
+  getDefaultDirection,
+} from '../../lib/fileSort';
 
 interface ExplorerViewProps {
   files: FileEntry[];
@@ -48,6 +57,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 }) => {
   const {
     setQuickLookFile,
+    activePane,
     setActivePane,
     profiles,
     setNewConnectionModalOpen,
@@ -55,12 +65,38 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     renameRemoteItem,
     deleteRemoteItem,
     refreshRemote,
+    createLocalFolder,
+    renameLocalItem,
+    deleteLocalItem,
+    refreshLocal,
     downloadFile,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
+    searchQuery,
   } = useOrbitStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Sorting State
+  const [sortColumn, setSortColumn] = useState<SortColumn>('name');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortColumn(column);
+      setSortDirection(getDefaultDirection(column));
+    }
+  };
+
+  const sortedFiles = useMemo(() => {
+    return sortFiles(files, {
+      column: sortColumn,
+      direction: sortDirection,
+      foldersFirst: true,
+    });
+  }, [files, sortColumn, sortDirection]);
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -94,21 +130,46 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     }
   }, [renameTarget]);
 
+  const isModalActive = isNewFolderModalOpen && activePane === (isLocal ? 'local' : 'remote');
+
   // Reset new folder input when modal opens
   useEffect(() => {
-    if (isNewFolderModalOpen) {
+    if (isModalActive) {
       setNewFolderNameInput('');
       setModalError(null);
     }
-  }, [isNewFolderModalOpen]);
+  }, [isModalActive]);
 
   // Navigate up one folder
   const handleGoUp = () => {
-    if (currentPath === '/' || currentPath === '') return;
-    const parts = currentPath.split('/').filter(Boolean);
+    if (currentPath === '/' || currentPath === '' || currentPath === '\\') return;
+    const isWindows = currentPath.includes('\\');
+    const parts = currentPath.split(/[/\\]/).filter(Boolean);
     parts.pop();
-    const parent = parts.length === 0 ? '/' : '/' + parts.join('/');
-    onNavigate(parent);
+    if (parts.length === 0) {
+      onNavigate(isWindows ? currentPath.substring(0, 3) : '/');
+    } else {
+      const parent = isWindows
+        ? parts.join('\\')
+        : '/' + parts.join('/');
+      onNavigate(parent);
+    }
+  };
+
+  const isWindows = currentPath.includes('\\');
+  const paneSegments = currentPath.split(/[/\\]/).filter(Boolean);
+  const rootPrefix = isWindows ? currentPath.substring(0, 3) : '/';
+
+  const handlePaneBreadcrumbClick = (index: number) => {
+    if (index === -1) {
+      onNavigate(rootPrefix);
+    } else {
+      const separator = isWindows ? '\\' : '/';
+      const newPath = isWindows
+        ? rootPrefix + paneSegments.slice(0, index + 1).join(separator)
+        : '/' + paneSegments.slice(0, index + 1).join('/');
+      onNavigate(newPath);
+    }
   };
 
   const handleRowDoubleClick = (file: FileEntry) => {
@@ -124,28 +185,28 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     // If a modal is open, let modal handle keys
     if (isNewFolderModalOpen || renameTarget || deleteTarget) return;
 
-    if (files.length === 0) return;
+    if (sortedFiles.length === 0) return;
 
-    const currentIndex = files.findIndex((f) => f.path === selectedPath);
-    const selectedFile = files.find((f) => f.path === selectedPath);
+    const currentIndex = sortedFiles.findIndex((f) => f.path === selectedPath);
+    const selectedFile = sortedFiles.find((f) => f.path === selectedPath);
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const nextIndex = currentIndex < files.length - 1 ? currentIndex + 1 : 0;
-      onSelect(files[nextIndex].path);
+      const nextIndex = currentIndex < sortedFiles.length - 1 ? currentIndex + 1 : 0;
+      onSelect(sortedFiles[nextIndex].path);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const prevIndex = currentIndex > 0 ? currentIndex - 1 : files.length - 1;
-      onSelect(files[prevIndex].path);
+      const prevIndex = currentIndex > 0 ? currentIndex - 1 : sortedFiles.length - 1;
+      onSelect(sortedFiles[prevIndex].path);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (selectedFile) {
         handleRowDoubleClick(selectedFile);
       }
-    } else if (e.key === 'F2' && selectedFile && !isLocal) {
+    } else if (e.key === 'F2' && selectedFile) {
       e.preventDefault();
       setRenameTarget(selectedFile);
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedFile && !isLocal) {
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedFile) {
       e.preventDefault();
       setDeleteTarget(selectedFile);
     }
@@ -155,12 +216,12 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleRowContextMenu = (e: React.MouseEvent, file: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isLocal) return;
+    setActivePane(isLocal ? 'local' : 'remote');
 
     onSelect(file.path, false);
 
     const menuWidth = 200;
-    const menuHeight = 220;
+    const menuHeight = isLocal ? 180 : 220;
     const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
 
@@ -170,7 +231,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Handle right click on empty background
   const handleBackgroundContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    if (isLocal) return;
+    setActivePane(isLocal ? 'local' : 'remote');
 
     const menuWidth = 200;
     const menuHeight = 120;
@@ -210,7 +271,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await createRemoteFolder(name);
+      if (isLocal) {
+        await createLocalFolder(name);
+      } else {
+        await createRemoteFolder(name);
+      }
       setNewFolderModalOpen(false);
       setNewFolderNameInput('');
     } catch (err: any) {
@@ -234,7 +299,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await renameRemoteItem(renameTarget.path, newName);
+      if (isLocal) {
+        await renameLocalItem(renameTarget.path, newName);
+      } else {
+        await renameRemoteItem(renameTarget.path, newName);
+      }
       setRenameTarget(null);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors du renommage';
@@ -251,7 +320,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
+      if (isLocal) {
+        await deleteLocalItem(deleteTarget.path);
+      } else {
+        await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
+      }
       setDeleteTarget(null);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors de la suppression';
@@ -273,23 +346,149 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     >
       {/* Pane title bar if specified (e.g. for dual pane) */}
       {title && (
-        <div className="h-8 px-4 flex items-center justify-between bg-surface-muted/60 border-b border-border-subtle text-xs text-zinc-400 font-mono">
-          <div className="flex items-center gap-1.5">
-            <HardDrive className="w-3.5 h-3.5 text-zinc-500" />
-            <span className="font-semibold text-zinc-300">{title}</span>
-            <span className="text-zinc-600 truncate max-w-[200px]">{currentPath}</span>
+        <div className="h-8 px-3 flex items-center justify-between bg-surface-muted/60 border-b border-border-subtle text-xs text-zinc-400 font-mono">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={handleGoUp}
+              disabled={currentPath === '/' || currentPath === '' || currentPath === '\\'}
+              className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent transition-colors flex-shrink-0"
+              title="Dossier parent (..)"
+            >
+              <FolderUp className="w-3.5 h-3.5" />
+            </button>
+            <div className="flex items-center gap-1 font-semibold text-zinc-300 flex-shrink-0">
+              <HardDrive className="w-3.5 h-3.5 text-zinc-400" />
+              <span>{title}</span>
+            </div>
+            <span className="text-zinc-600 flex-shrink-0">/</span>
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar text-[11px] min-w-0">
+              <button
+                type="button"
+                onClick={() => handlePaneBreadcrumbClick(-1)}
+                className="hover:text-white text-zinc-400 transition-colors flex-shrink-0"
+                title="Racine"
+              >
+                {rootPrefix}
+              </button>
+              {paneSegments.map((segment, idx) => (
+                <React.Fragment key={idx}>
+                  <span className="text-zinc-600 flex-shrink-0">/</span>
+                  <button
+                    type="button"
+                    onClick={() => handlePaneBreadcrumbClick(idx)}
+                    className={`hover:text-white transition-colors truncate max-w-[100px] flex-shrink-0 ${
+                      idx === paneSegments.length - 1 ? 'text-zinc-200 font-semibold' : 'text-zinc-400'
+                    }`}
+                    title={segment}
+                  >
+                    {segment}
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
           </div>
-          <span className="text-[11px] text-zinc-500">{files.length} éléments</span>
+          <span className="text-[11px] text-zinc-500 flex-shrink-0 ml-2">
+            {files.length} élément{files.length > 1 ? 's' : ''}
+            {searchQuery.trim() ? ' (filtré)' : ''}
+          </span>
         </div>
       )}
 
-      {/* Table Header */}
-      <div className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30">
-        <div className="col-span-5 flex items-center gap-2">Nom</div>
-        <div className="col-span-2 text-right">Taille</div>
-        <div className="col-span-2 text-right">Propriétaire</div>
-        <div className="col-span-2 text-right">Modifié</div>
-        <div className="col-span-1 text-right font-mono">Attr</div>
+      {/* Table Header with interactive column sorting */}
+      <div
+        onKeyDown={(e) => e.stopPropagation()}
+        className="grid grid-cols-12 gap-x-3 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30 select-none"
+      >
+        <button
+          type="button"
+          onClick={() => handleSort('name')}
+          className="col-span-5 flex items-center gap-1.5 hover:text-zinc-200 transition-colors text-left group"
+          title="Trier par nom"
+        >
+          <span className={sortColumn === 'name' ? 'text-zinc-200 font-semibold' : ''}>Nom</span>
+          {sortColumn === 'name' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('size')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par taille"
+        >
+          {sortColumn === 'size' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'size' ? 'text-zinc-200 font-semibold' : ''}>Taille</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('owner')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par propriétaire"
+        >
+          {sortColumn === 'owner' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'owner' ? 'text-zinc-200 font-semibold' : ''}>Propriétaire</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('mtime')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par date de modification"
+        >
+          {sortColumn === 'mtime' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'mtime' ? 'text-zinc-200 font-semibold' : ''}>Modifié</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('permissions')}
+          className="col-span-1 flex items-center justify-end gap-1 hover:text-zinc-200 transition-colors group text-right font-mono"
+          title="Trier par permissions"
+        >
+          {sortColumn === 'permissions' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'permissions' ? 'text-zinc-200 font-semibold' : ''}>Attr</span>
+        </button>
       </div>
 
       {/* Files List */}
@@ -298,7 +497,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         {currentPath !== '/' && currentPath !== '' && (
           <div
             onDoubleClick={handleGoUp}
-            className="grid grid-cols-12 px-3 py-1.5 rounded text-xs text-zinc-400 hover:bg-surface-hover hover:text-white cursor-pointer items-center transition-colors"
+            className="grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs text-zinc-400 hover:bg-surface-hover hover:text-white cursor-pointer items-center transition-colors"
           >
             <div className="col-span-5 flex items-center gap-2.5">
               <FolderUp className="w-4 h-4 text-zinc-500" />
@@ -311,7 +510,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           </div>
         )}
 
-        {files.length === 0 ? (
+        {sortedFiles.length === 0 ? (
           <div className="h-64 flex flex-col items-center justify-center text-center p-6 text-zinc-500">
             {!isLocal && profiles.length === 0 ? (
               <>
@@ -333,11 +532,18 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               </>
             ) : (
               <div className="flex flex-col items-center gap-2">
-                <p className="text-xs">Dossier vide ou aucun fichier trouvé</p>
-                {!isLocal && (
+                <p className="text-xs">
+                  {searchQuery.trim()
+                    ? `Aucun fichier ne correspond à "${searchQuery}"`
+                    : 'Dossier vide ou aucun fichier trouvé'}
+                </p>
+                {!searchQuery.trim() && (
                   <button
                     type="button"
-                    onClick={() => setNewFolderModalOpen(true)}
+                    onClick={() => {
+                      setActivePane(isLocal ? 'local' : 'remote');
+                      setNewFolderModalOpen(true);
+                    }}
                     className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 text-zinc-300 text-xs flex items-center gap-1.5 transition-colors"
                   >
                     <FolderPlus className="w-3.5 h-3.5 text-indigo-400" />
@@ -348,7 +554,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             )}
           </div>
         ) : (
-          files.map((file) => {
+          sortedFiles.map((file) => {
             const isSelected = file.path === selectedPath;
             return (
               <div
@@ -356,7 +562,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}
                 onContextMenu={(e) => handleRowContextMenu(e, file)}
-                className={`grid grid-cols-12 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors ${
+                className={`grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors ${
                   isSelected
                     ? 'bg-indigo-600/20 text-white border border-indigo-500/30 font-medium'
                     : 'text-zinc-300 hover:bg-surface-hover hover:text-white'
@@ -374,7 +580,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </div>
 
                 {/* Owner / Group */}
-                <div className="col-span-2 text-right font-mono text-[11px] text-zinc-400 truncate">
+                <div
+                  className="col-span-2 text-right font-mono text-[11px] text-zinc-400 truncate"
+                  title={file.owner ? `${file.owner}${file.group ? `:${file.group}` : ''}` : undefined}
+                >
                   {file.owner ? `${file.owner}${file.group ? `:${file.group}` : ''}` : '--'}
                 </div>
 
@@ -395,13 +604,20 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
       {/* Bottom status bar for the pane */}
       <div className="h-6 px-3 bg-surface-muted/40 border-t border-border-subtle flex items-center justify-between text-[11px] text-zinc-500 font-mono">
-        <div>
-          {files.length} élément{files.length > 1 ? 's' : ''}
+        <div className="flex items-center gap-2">
+          <span>
+            {files.length} élément{files.length > 1 ? 's' : ''}
+            {searchQuery.trim() ? ' (filtré)' : ''}
+          </span>
+          <span className="text-zinc-600">·</span>
+          <span className="text-zinc-400">
+            Tri : {sortColumn === 'name' ? 'Nom' : sortColumn === 'size' ? 'Taille' : sortColumn === 'owner' ? 'Propriétaire' : sortColumn === 'mtime' ? 'Date' : 'Attr'} ({sortDirection === 'asc' ? 'croissant' : 'décroissant'})
+          </span>
         </div>
         <div className="flex items-center gap-3">
-          <span>Clic droit : Menu d'actions</span>
+          <span>Clic droit : Menu</span>
           <span>•</span>
-          <span>Espace : Aperçu rapide</span>
+          <span>Espace : Aperçu</span>
         </div>
       </div>
 
@@ -433,8 +649,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {/* Download */}
-              {!contextMenu.file.is_dir && (
+              {/* Download (Remote only) */}
+              {!contextMenu.file.is_dir && !isLocal && (
                 <button
                   type="button"
                   onClick={() => handleDownload(contextMenu.file!)}
@@ -468,6 +684,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  setActivePane(isLocal ? 'local' : 'remote');
                   setContextMenu(null);
                   setNewFolderModalOpen(true);
                 }}
@@ -502,6 +719,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  setActivePane(isLocal ? 'local' : 'remote');
                   setContextMenu(null);
                   setNewFolderModalOpen(true);
                 }}
@@ -515,7 +733,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 type="button"
                 onClick={() => {
                   setContextMenu(null);
-                  refreshRemote();
+                  if (isLocal) {
+                    refreshLocal();
+                  } else {
+                    refreshRemote();
+                  }
                 }}
                 className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
               >
@@ -528,7 +750,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       )}
 
       {/* MODAL 1: Nouveau Dossier */}
-      {isNewFolderModalOpen && (
+      {isModalActive && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
           <div
             onClick={(e) => e.stopPropagation()}

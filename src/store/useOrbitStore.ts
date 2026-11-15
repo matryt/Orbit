@@ -1,7 +1,8 @@
 import { create } from 'zustand';
-import { ConnectionProfile, FileEntry, TransferItem } from '../types';
-import { MOCK_REMOTE_FILES, MOCK_LOCAL_FILES, MOCK_TRANSFERS } from '../data/mockData';
-import { storageApi, BackendTransferProgress } from '../services/storageApi';
+import { ConnectionProfile, FileEntry, TransferItem, UpdateCheckResult } from '../types';
+import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
+import { storageApi, BackendTransferProgress, isCancelledError } from '../services/storageApi';
+import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
 
 interface OrbitState {
   // Profiles
@@ -45,10 +46,18 @@ interface OrbitState {
 
   // Local Explorer (for Dual Pane)
   localPath: string;
-  setLocalPath: (path: string) => void;
+  setLocalPath: (path: string) => Promise<void>;
   localFiles: FileEntry[];
+  isLoadingLocalFiles: boolean;
+  getLocalFiles: () => FileEntry[];
   selectedLocalPath: string | null;
-  selectLocalFile: (path: string) => void;
+  selectedLocalPaths: string[];
+  selectLocalFile: (path: string, multi?: boolean) => void;
+  clearLocalSelection: () => void;
+  refreshLocal: () => Promise<void>;
+  createLocalFolder: (folderName: string) => Promise<void>;
+  renameLocalItem: (oldPath: string, newName: string) => Promise<void>;
+  deleteLocalItem: (path: string, isDir?: boolean) => Promise<void>;
 
   // View state
   isDualPane: boolean;
@@ -80,6 +89,16 @@ interface OrbitState {
   setExportModalOpen: (open: boolean) => void;
   isNewFolderModalOpen: boolean;
   setNewFolderModalOpen: (open: boolean) => void;
+
+  // Updates
+  availableUpdate: UpdateCheckResult | null;
+  isCheckingUpdate: boolean;
+  isUpdateModalOpen: boolean;
+  updateCheckError: string | null;
+  lastUpdateCheckTime: number;
+  checkForUpdates: (notifyIfUpToDate?: boolean) => Promise<void>;
+  setUpdateModalOpen: (open: boolean) => void;
+  dismissUpdate: () => void;
 }
 
 export const useOrbitStore = create<OrbitState>((set, get) => ({
@@ -251,6 +270,17 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                     // Fetch root directory
                     await get().setCurrentPath('/');
                   } catch (err: any) {
+                    if (isCancelledError(err)) {
+                      // Disconnect or cancellation was requested: maintain or restore profile to idle and suppress error message
+                      set((state) => ({
+                        profiles: state.profiles.map((p) =>
+                          p.id === profileId ? { ...p, status: 'idle' } : p
+                        ),
+                        isConnecting: false,
+                        connectionError: null,
+                      }));
+                      return;
+                    }
                     const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
                     set((state) => ({
                       profiles: state.profiles.map((p) =>
@@ -373,14 +403,91 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                             set({ selectedRemotePaths: [], selectedRemotePath: null });
                                           },
 
-                                            localPath: '/Users/mac',
-                                              setLocalPath: (path) => set({ localPath: path }),
-                                                localFiles: MOCK_LOCAL_FILES,
+                                            localPath: '',
+                                            localFiles: [],
+                                            isLoadingLocalFiles: false,
+                                            setLocalPath: async (path: string) => {
+                                              set({ isLoadingLocalFiles: true });
+                                              try {
+                                                const res = await storageApi.listLocalDir(path);
+                                                set({
+                                                  localPath: res.currentPath,
+                                                  localFiles: res.entries,
                                                   selectedLocalPath: null,
-                                                    selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
+                                                  selectedLocalPaths: [],
+                                                  isLoadingLocalFiles: false,
+                                                });
+                                              } catch (err) {
+                                                console.error('Failed to list local directory:', err);
+                                                set({ isLoadingLocalFiles: false });
+                                              }
+                                            },
+                                            getLocalFiles: () => {
+                                              const { localFiles, searchQuery } = get();
+                                              if (!searchQuery.trim()) return localFiles;
+                                              const lower = searchQuery.toLowerCase();
+                                              return localFiles.filter((f) => f.name.toLowerCase().includes(lower));
+                                            },
+                                            selectedLocalPath: null,
+                                            selectedLocalPaths: [],
+                                            selectLocalFile: (path, multi = false) => {
+                                              const { selectedLocalPaths } = get();
+                                              if (multi) {
+                                                const exists = selectedLocalPaths.includes(path);
+                                                const newPaths = exists
+                                                  ? selectedLocalPaths.filter((p) => p !== path)
+                                                  : [...selectedLocalPaths, path];
+                                                set({
+                                                  selectedLocalPaths: newPaths,
+                                                  selectedLocalPath: newPaths.length > 0 ? newPaths[newPaths.length - 1] : null,
+                                                  activePane: 'local',
+                                                });
+                                              } else {
+                                                set({
+                                                  selectedLocalPath: path,
+                                                  selectedLocalPaths: [path],
+                                                  activePane: 'local',
+                                                });
+                                              }
+                                            },
+                                            clearLocalSelection: () => {
+                                              set({ selectedLocalPaths: [], selectedLocalPath: null });
+                                            },
+                                            refreshLocal: async () => {
+                                              const { localPath, setLocalPath } = get();
+                                              await setLocalPath(localPath || '');
+                                            },
+                                            createLocalFolder: async (folderName: string) => {
+                                              const { localPath, refreshLocal } = get();
+                                              const newDir = buildNewFolderPath(localPath, folderName);
+                                              if (!newDir) return;
+                                              await storageApi.createLocalDir(newDir);
+                                              await refreshLocal();
+                                            },
+                                            renameLocalItem: async (oldPath: string, newName: string) => {
+                                              const { refreshLocal } = get();
+                                              const newPath = buildRenamePath(oldPath, newName);
+                                              if (!newPath) return;
+                                              await storageApi.renameLocalItem(oldPath, newPath);
+                                              await refreshLocal();
+                                            },
+                                            deleteLocalItem: async (path: string) => {
+                                              const { refreshLocal, selectedLocalPath } = get();
+                                              await storageApi.deleteLocalItem(path);
+                                              if (selectedLocalPath === path) {
+                                                set({ selectedLocalPath: null, selectedLocalPaths: [] });
+                                              }
+                                              await refreshLocal();
+                                            },
 
-                                                      isDualPane: false,
-                                                        toggleDualPane: () => set((state) => ({ isDualPane: !state.isDualPane })),
+                                            isDualPane: false,
+                                            toggleDualPane: () => {
+                                              const next = !get().isDualPane;
+                                              set({ isDualPane: next });
+                                              if (next && get().localFiles.length === 0) {
+                                                get().refreshLocal();
+                                              }
+                                            },
 
                                                           searchQuery: '',
                                                             setSearchQuery: (query) => set({ searchQuery: query }),
@@ -392,9 +499,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                                                       quickLookFile,
                                                                       selectedRemotePath,
                                                                       getRemoteFiles,
+                                                                      getLocalFiles,
                                                                       activePane,
                                                                       selectedLocalPath,
-                                                                      localFiles,
                                                                     } = get();
 
                                                                     if (quickLookFile) {
@@ -403,23 +510,22 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                                                     }
 
                                                                     if (activePane === 'local') {
-                                                                      const targetPath = selectedLocalPath || (localFiles.length > 0 ? localFiles[0].path : null);
-                                                                      if (targetPath) {
-                                                                        const file = localFiles.find((f) => f.path === targetPath);
-                                                                        if (file) {
-                                                                          set({ quickLookFile: file, selectedLocalPath: file.path });
-                                                                          return;
-                                                                        }
+                                                                      const localFiles = getLocalFiles();
+                                                                      const file =
+                                                                        (selectedLocalPath ? localFiles.find((f) => f.path === selectedLocalPath) : null) ||
+                                                                        (localFiles.length > 0 ? localFiles[0] : null);
+                                                                      if (file) {
+                                                                        set({ quickLookFile: file, selectedLocalPath: file.path });
                                                                       }
+                                                                      return;
                                                                     }
 
                                                                     const remoteFiles = getRemoteFiles();
-                                                                    const targetPath = selectedRemotePath || (remoteFiles.length > 0 ? remoteFiles[0].path : null);
-                                                                    if (targetPath) {
-                                                                      const file = remoteFiles.find((f) => f.path === targetPath);
-                                                                      if (file) {
-                                                                        set({ quickLookFile: file, selectedRemotePath: file.path });
-                                                                      }
+                                                                    const file =
+                                                                      (selectedRemotePath ? remoteFiles.find((f) => f.path === selectedRemotePath) : null) ||
+                                                                      (remoteFiles.length > 0 ? remoteFiles[0] : null);
+                                                                    if (file) {
+                                                                      set({ quickLookFile: file, selectedRemotePath: file.path });
                                                                     }
                                                                   },
 
@@ -578,4 +684,45 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   isNewFolderModalOpen: false,
   setNewFolderModalOpen: (open) => set({ isNewFolderModalOpen: open }),
+
+  // Updates
+  availableUpdate: null,
+  isCheckingUpdate: false,
+  isUpdateModalOpen: false,
+  updateCheckError: null,
+  lastUpdateCheckTime: 0,
+
+  checkForUpdates: async (notifyIfUpToDate = false) => {
+    // 1. Prevent duplicate in-flight checks
+    if (get().isCheckingUpdate) return;
+
+    // 2. Cache successful checks for 15 minutes unless manually requested
+    const now = Date.now();
+    const { availableUpdate, lastUpdateCheckTime } = get();
+    if (!notifyIfUpToDate && availableUpdate && now - lastUpdateCheckTime < 15 * 60 * 1000) {
+      if (availableUpdate.has_update) {
+        set({ isUpdateModalOpen: true });
+      }
+      return;
+    }
+
+    set({ isCheckingUpdate: true, updateCheckError: null });
+    try {
+      const result = await storageApi.checkAppUpdate();
+      set({ availableUpdate: result, isCheckingUpdate: false, lastUpdateCheckTime: Date.now() });
+      if (result.has_update || notifyIfUpToDate) {
+        set({ isUpdateModalOpen: true });
+      }
+    } catch (err: any) {
+      console.warn('Erreur vérification mise à jour:', err);
+      const msg = typeof err === 'string' ? err : err?.message || 'Impossible de vérifier les mises à jour';
+      set({ isCheckingUpdate: false, updateCheckError: msg });
+      if (notifyIfUpToDate) {
+        set({ isUpdateModalOpen: true });
+      }
+    }
+  },
+
+  setUpdateModalOpen: (open) => set({ isUpdateModalOpen: open }),
+  dismissUpdate: () => set({ isUpdateModalOpen: false }),
 }));
