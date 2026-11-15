@@ -310,3 +310,8 @@ pub async fn local_rename(old_path: String, new_path: String) -> Result<(), AppE
         .await
         .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
 }
+
+#[tauri::command]
+pub async fn check_app_update() -> Result<crate::updater::UpdateCheckResult, AppError> {
+    crate::updater::check_for_updates().await
+}

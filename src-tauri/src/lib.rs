@@ -9,6 +9,7 @@ pub mod models;
 pub mod provider;
 pub mod session;
 pub mod sftp;
+pub mod updater;
 
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ pub fn run() {
             commands::local_create_dir,
             commands::local_delete,
             commands::local_rename,
+            commands::check_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

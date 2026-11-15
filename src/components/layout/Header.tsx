@@ -11,6 +11,7 @@ import {
   AlertCircle,
   FolderPlus,
   X,
+  Sparkles,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -34,6 +35,8 @@ export const Header: React.FC = () => {
     connectionError,
     clearConnectionError,
     setNewFolderModalOpen,
+    availableUpdate,
+    setUpdateModalOpen,
   } = useOrbitStore();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -145,6 +148,19 @@ export const Header: React.FC = () => {
 
       {/* Right: Actions, Filter and Dual Pane toggle */}
       <div className="flex items-center gap-2">
+        {/* Available update pill */}
+        {availableUpdate?.has_update && (
+          <button
+            type="button"
+            onClick={() => setUpdateModalOpen(true)}
+            className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/15 to-orange-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-medium hover:bg-amber-500/25 transition-all shadow-sm"
+            title={`Mise à jour ${availableUpdate.latest_version} disponible !`}
+          >
+            <Sparkles className="w-3 h-3 text-amber-400" />
+            <span className="font-mono">{availableUpdate.latest_version}</span>
+          </button>
+        )}
+
         {/* New Folder button */}
         <button
           onClick={() => setNewFolderModalOpen(true)}

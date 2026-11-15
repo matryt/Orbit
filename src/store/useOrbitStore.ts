@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ConnectionProfile, FileEntry, TransferItem } from '../types';
+import { ConnectionProfile, FileEntry, TransferItem, UpdateCheckResult } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
@@ -89,6 +89,15 @@ interface OrbitState {
   setExportModalOpen: (open: boolean) => void;
   isNewFolderModalOpen: boolean;
   setNewFolderModalOpen: (open: boolean) => void;
+
+  // Updates
+  availableUpdate: UpdateCheckResult | null;
+  isCheckingUpdate: boolean;
+  isUpdateModalOpen: boolean;
+  updateCheckError: string | null;
+  checkForUpdates: (notifyIfUpToDate?: boolean) => Promise<void>;
+  setUpdateModalOpen: (open: boolean) => void;
+  dismissUpdate: () => void;
 }
 
 export const useOrbitStore = create<OrbitState>((set, get) => ({
@@ -674,4 +683,31 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   isNewFolderModalOpen: false,
   setNewFolderModalOpen: (open) => set({ isNewFolderModalOpen: open }),
+
+  // Updates
+  availableUpdate: null,
+  isCheckingUpdate: false,
+  isUpdateModalOpen: false,
+  updateCheckError: null,
+
+  checkForUpdates: async (notifyIfUpToDate = false) => {
+    set({ isCheckingUpdate: true, updateCheckError: null });
+    try {
+      const result = await storageApi.checkAppUpdate();
+      set({ availableUpdate: result, isCheckingUpdate: false });
+      if (result.has_update || notifyIfUpToDate) {
+        set({ isUpdateModalOpen: true });
+      }
+    } catch (err: any) {
+      console.warn('Erreur vérification mise à jour:', err);
+      const msg = typeof err === 'string' ? err : err?.message || 'Impossible de vérifier les mises à jour';
+      set({ isCheckingUpdate: false, updateCheckError: msg });
+      if (notifyIfUpToDate) {
+        set({ isUpdateModalOpen: true });
+      }
+    }
+  },
+
+  setUpdateModalOpen: (open) => set({ isUpdateModalOpen: open }),
+  dismissUpdate: () => set({ isUpdateModalOpen: false }),
 }));
