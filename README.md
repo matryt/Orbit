@@ -44,6 +44,14 @@ Download the latest release for your platform from the [GitHub Releases](https:/
 xattr -cr /Applications/Orbit.app
 ```
 
+> [!NOTE]
+> **Intel Mac (`x86_64`)** : Les paquets précompilés officiels ciblent nativement Apple Silicon (ARM64). Si vous utilisez un Mac Intel, vous pouvez facilement compiler Orbit depuis les sources :
+> ```bash
+> git clone https://github.com/matryt/Orbit.git && cd Orbit
+> npm install && npm run tauri build
+> ```
+> L'application compilée sera disponible dans `src-tauri/target/release/bundle/dmg/`.
+
 ### Windows (10 / 11)
 
 1. Download the Windows installer (`Orbit_x.x.x_x64-setup.exe` or `.msi`).

@@ -86,14 +86,36 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     false
 }
 
-/// Selects the best download asset for the current operating system.
+/// Selects the best download asset for the current operating system and architecture.
 pub fn find_os_asset(assets: &[GitHubAsset]) -> Option<(String, String)> {
-    let target_os = std::env::consts::OS;
+    find_os_asset_for(assets, std::env::consts::OS, std::env::consts::ARCH)
+}
 
+/// Helper selecting download asset for specific target OS and architecture.
+pub fn find_os_asset_for(
+    assets: &[GitHubAsset],
+    target_os: &str,
+    target_arch: &str,
+) -> Option<(String, String)> {
     for asset in assets {
         let name_lower = asset.name.to_lowercase();
         let matches = match target_os {
-            "macos" => name_lower.ends_with(".dmg"),
+            "macos" => {
+                if !name_lower.ends_with(".dmg") {
+                    false
+                } else if target_arch == "x86_64" {
+                    // Intel Mac: only accept x86_64 or universal DMG
+                    name_lower.contains("universal")
+                        || name_lower.contains("x86_64")
+                        || name_lower.contains("intel")
+                } else {
+                    // Apple Silicon (aarch64): accept aarch64, arm64, universal, or generic .dmg
+                    name_lower.contains("aarch64")
+                        || name_lower.contains("arm64")
+                        || name_lower.contains("universal")
+                        || (!name_lower.contains("x86_64") && !name_lower.contains("intel"))
+                }
+            }
             "windows" => name_lower.ends_with(".exe") || name_lower.ends_with(".msi"),
             "linux" => name_lower.ends_with(".appimage") || name_lower.ends_with(".deb"),
             _ => false,
@@ -259,5 +281,32 @@ mod tests {
             assert!(name.ends_with(".AppImage"));
             assert_eq!(url, "https://example.com/Orbit.AppImage");
         }
+    }
+
+    #[test]
+    fn test_find_os_asset_arch_separation() {
+        let arm_only_assets = vec![GitHubAsset {
+            name: "Orbit_0.1.3_aarch64.dmg".to_string(),
+            browser_download_url: "https://example.com/Orbit_aarch64.dmg".to_string(),
+            size: 1000,
+        }];
+
+        // Apple Silicon Mac should select aarch64 dmg
+        let arm_found = find_os_asset_for(&arm_only_assets, "macos", "aarch64");
+        assert!(arm_found.is_some());
+        assert_eq!(arm_found.unwrap().1, "Orbit_0.1.3_aarch64.dmg");
+
+        // Intel Mac should reject aarch64-only dmg
+        let intel_found = find_os_asset_for(&arm_only_assets, "macos", "x86_64");
+        assert!(intel_found.is_none());
+
+        // Universal dmg accepted by both
+        let universal_assets = vec![GitHubAsset {
+            name: "Orbit_0.1.3_universal.dmg".to_string(),
+            browser_download_url: "https://example.com/Orbit_universal.dmg".to_string(),
+            size: 1000,
+        }];
+        assert!(find_os_asset_for(&universal_assets, "macos", "x86_64").is_some());
+        assert!(find_os_asset_for(&universal_assets, "macos", "aarch64").is_some());
     }
 }
