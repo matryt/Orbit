@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
+import { APP_VERSION } from '../../version';
 import {
   Plus,
   Download,
@@ -12,6 +13,7 @@ import {
   Power,
   Play,
   Pencil,
+  Rocket,
 } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
@@ -26,6 +28,8 @@ export const Sidebar: React.FC = () => {
     setNewConnectionModalOpen,
     setExportModalOpen,
     isConnecting,
+    checkForUpdates,
+    availableUpdate,
   } = useOrbitStore();
 
   const [menuOpenProfileId, setMenuOpenProfileId] = useState<string | null>(null);
@@ -267,6 +271,19 @@ export const Sidebar: React.FC = () => {
           <div className="flex items-center text-[10px] text-zinc-600 px-1" title="Trousseau OS activé">
             <ShieldCheck className="w-3.5 h-3.5 text-zinc-500" />
           </div>
+        </div>
+
+        <div className="pt-1.5 mt-0.5 border-t border-white/5 flex items-center justify-between text-[11px] text-zinc-500">
+          <button
+            type="button"
+            onClick={() => checkForUpdates(true)}
+            className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors group"
+            title="Vérifier les mises à jour"
+          >
+            <Rocket className="w-3 h-3 text-zinc-500 group-hover:text-indigo-400 transition-colors" />
+            <span className="font-mono">v{availableUpdate?.current_version || APP_VERSION}</span>
+          </button>
+          <span className="text-[10px] text-zinc-600 font-mono">Orbit</span>
         </div>
       </div>
     </aside>

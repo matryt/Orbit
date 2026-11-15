@@ -1,5 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, UpdateCheckResult } from '../types';
+import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
 export interface SftpConnectParams {
@@ -348,5 +349,22 @@ export const storageApi = {
       return;
     }
     await invoke('delete_profile', { profileId });
+  },
+
+  async checkAppUpdate(): Promise<UpdateCheckResult> {
+    if (!isTauri()) {
+      return {
+        current_version: APP_VERSION,
+        latest_version: APP_VERSION,
+        has_update: false,
+        release_name: `Orbit v${APP_VERSION}`,
+        release_notes: 'Version actuelle (Mock)',
+        published_at: new Date().toISOString(),
+        release_url: 'https://github.com/matryt/Orbit/releases',
+        download_url: null,
+        asset_name: null,
+      };
+    }
+    return await invoke<UpdateCheckResult>('check_app_update');
   },
 };
