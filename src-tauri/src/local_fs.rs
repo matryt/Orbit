@@ -55,6 +55,62 @@ pub fn format_unix_mode(mode: u32, is_dir: bool) -> String {
     )
 }
 
+#[cfg(unix)]
+fn resolve_uid(uid: u32, cache: &mut std::collections::HashMap<u32, String>) -> String {
+    if let Some(name) = cache.get(&uid) {
+        return name.clone();
+    }
+    let name = unsafe {
+        let mut pwd = std::mem::zeroed::<libc::passwd>();
+        let mut result = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        let res = libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        );
+        if res == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+            std::ffi::CStr::from_ptr(pwd.pw_name)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            uid.to_string()
+        }
+    };
+    cache.insert(uid, name.clone());
+    name
+}
+
+#[cfg(unix)]
+fn resolve_gid(gid: u32, cache: &mut std::collections::HashMap<u32, String>) -> String {
+    if let Some(name) = cache.get(&gid) {
+        return name.clone();
+    }
+    let name = unsafe {
+        let mut grp = std::mem::zeroed::<libc::group>();
+        let mut result = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        let res = libc::getgrgid_r(
+            gid,
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        );
+        if res == 0 && !result.is_null() && !grp.gr_name.is_null() {
+            std::ffi::CStr::from_ptr(grp.gr_name)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            gid.to_string()
+        }
+    };
+    cache.insert(gid, name.clone());
+    name
+}
+
 pub fn list_local_directory(
     input_path: Option<&str>,
 ) -> Result<(String, Vec<FileEntry>), AppError> {
@@ -68,6 +124,11 @@ pub fn list_local_directory(
 
     let read_dir = std::fs::read_dir(&target).map_err(AppError::from)?;
     let mut entries = Vec::new();
+
+    #[cfg(unix)]
+    let mut uid_cache = std::collections::HashMap::<u32, String>::new();
+    #[cfg(unix)]
+    let mut gid_cache = std::collections::HashMap::<u32, String>::new();
 
     for item in read_dir {
         let entry = match item {
@@ -112,9 +173,11 @@ pub fn list_local_directory(
             use std::os::unix::fs::PermissionsExt;
             let mode = symlink_meta.permissions().mode();
             let perm_str = format_unix_mode(mode, is_dir);
-            let uid = symlink_meta.uid().to_string();
-            let gid = symlink_meta.gid().to_string();
-            (Some(perm_str), Some(uid), Some(gid))
+            let uid = symlink_meta.uid();
+            let gid = symlink_meta.gid();
+            let owner_name = resolve_uid(uid, &mut uid_cache);
+            let group_name = resolve_gid(gid, &mut gid_cache);
+            (Some(perm_str), Some(owner_name), Some(group_name))
         };
 
         #[cfg(not(unix))]
@@ -252,6 +315,15 @@ mod tests {
         let file1 = user_entries.iter().find(|e| e.name == "file1.txt").unwrap();
         assert!(!file1.is_dir);
         assert_eq!(file1.size, 11);
+        #[cfg(unix)]
+        {
+            assert!(file1.owner.is_some());
+            assert!(file1.group.is_some());
+            let owner = file1.owner.as_deref().unwrap();
+            let group = file1.group.as_deref().unwrap();
+            assert!(!owner.is_empty());
+            assert!(!group.is_empty());
+        }
 
         let subdir = user_entries.iter().find(|e| e.name == "subdir").unwrap();
         assert!(subdir.is_dir);

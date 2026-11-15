@@ -3256,6 +3256,7 @@ dependencies = [
  "chrono",
  "dirs",
  "keyring",
+ "libc",
  "russh",
  "russh-sftp",
  "serde",
