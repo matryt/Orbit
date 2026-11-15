@@ -45,12 +45,12 @@ xattr -cr /Applications/Orbit.app
 ```
 
 > [!NOTE]
-> **Intel Mac (`x86_64`)** : Les paquets précompilés officiels ciblent nativement Apple Silicon (ARM64). Si vous utilisez un Mac Intel, vous pouvez facilement compiler Orbit depuis les sources :
+> **Intel Mac (`x86_64`)**: Official prebuilt packages target Apple Silicon (ARM64) natively. If you are using an Intel Mac, you can easily build Orbit from source:
 > ```bash
 > git clone https://github.com/matryt/Orbit.git && cd Orbit
 > npm install && npm run tauri build
 > ```
-> L'application compilée sera disponible dans `src-tauri/target/release/bundle/dmg/`.
+> The compiled application will be generated in `src-tauri/target/release/bundle/dmg/`.
 
 ### Windows (10 / 11)
 
