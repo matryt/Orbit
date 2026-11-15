@@ -10,6 +10,7 @@ use crate::models::{
     ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, SftpConnectConfig,
     TransferProgress,
 };
+use crate::provider::StorageProvider;
 use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 use crate::sftp::host_key::{HostKeyPromptManager, TauriHostKeyPromptHandler};
@@ -88,7 +89,7 @@ pub async fn connect_sftp(
     host_key_mgr: State<'_, Arc<HostKeyPromptManager>>,
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,
-) -> Result<(), AppError> {
+) -> Result<crate::models::SftpSessionInfo, AppError> {
     let profile_id = config.profile_id.clone();
     // Démarre le suivi et le canal d'annulation AVANT toute opération (y compris le trousseau)
     let (generation, mut cancel_rx) = state.start_connecting(&profile_id).await;
@@ -125,6 +126,8 @@ pub async fn connect_sftp(
         }
         res = connect_task => {
             let provider = res?;
+            let is_elevated = provider.is_elevated();
+            let sudo_capability = provider.sudo_capability();
             if !state
                 .complete_connecting(&profile_id, generation, Arc::new(provider))
                 .await
@@ -133,9 +136,27 @@ pub async fn connect_sftp(
                     "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
                 ));
             }
-            Ok(())
+            Ok(crate::models::SftpSessionInfo {
+                profile_id,
+                is_elevated,
+                sudo_capability,
+            })
         }
     }
+}
+
+#[tauri::command]
+pub async fn get_session_info(
+    profile_id: Option<String>,
+    state: State<'_, SessionManager>,
+) -> Result<crate::models::SftpSessionInfo, AppError> {
+    let provider = state.get_provider(profile_id.as_deref()).await?;
+    let active_id = profile_id.unwrap_or_default();
+    Ok(crate::models::SftpSessionInfo {
+        profile_id: active_id,
+        is_elevated: provider.is_elevated(),
+        sudo_capability: provider.sudo_capability(),
+    })
 }
 
 #[tauri::command]

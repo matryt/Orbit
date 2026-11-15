@@ -18,6 +18,8 @@ pub struct ConnectionProfile {
     pub key_path: Option<String>,
     #[serde(rename = "isFavorite", default)]
     pub is_favorite: bool,
+    #[serde(rename = "useSudo", default)]
+    pub use_sudo: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,24 @@ pub struct SftpConnectConfig {
     pub password: Option<String>,
     pub key_path: Option<String>,
     pub passphrase: Option<String>,
+    #[serde(default)]
+    pub use_sudo: bool,
+    pub sudo_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SudoCapability {
+    None,
+    Passwordless,
+    PasswordRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpSessionInfo {
+    pub profile_id: String,
+    pub is_elevated: bool,
+    pub sudo_capability: SudoCapability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,4 +98,38 @@ pub enum HostKeyDecision {
     AcceptAndRemember,
     AcceptOnce,
     Reject,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_profile_use_sudo_serde() {
+        let json = r#"{
+            "id": "prof-1",
+            "name": "Production Server",
+            "type": "sftp",
+            "host": "example.com",
+            "port": 22,
+            "username": "admin",
+            "isFavorite": true,
+            "useSudo": true
+        }"#;
+
+        let profile: ConnectionProfile = serde_json::from_str(json).unwrap();
+        assert!(profile.use_sudo);
+
+        let serialized = serde_json::to_string(&profile).unwrap();
+        assert!(serialized.contains(r#""useSudo":true"#));
+
+        // Default to false when omitted
+        let json_omitted = r#"{
+            "id": "prof-2",
+            "name": "Local Server",
+            "type": "sftp"
+        }"#;
+        let profile_omitted: ConnectionProfile = serde_json::from_str(json_omitted).unwrap();
+        assert!(!profile_omitted.use_sudo);
+    }
 }
