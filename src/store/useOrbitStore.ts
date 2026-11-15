@@ -95,6 +95,7 @@ interface OrbitState {
   isCheckingUpdate: boolean;
   isUpdateModalOpen: boolean;
   updateCheckError: string | null;
+  lastUpdateCheckTime: number;
   checkForUpdates: (notifyIfUpToDate?: boolean) => Promise<void>;
   setUpdateModalOpen: (open: boolean) => void;
   dismissUpdate: () => void;
@@ -689,12 +690,26 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   isCheckingUpdate: false,
   isUpdateModalOpen: false,
   updateCheckError: null,
+  lastUpdateCheckTime: 0,
 
   checkForUpdates: async (notifyIfUpToDate = false) => {
+    // 1. Prevent duplicate in-flight checks
+    if (get().isCheckingUpdate) return;
+
+    // 2. Cache successful checks for 15 minutes unless manually requested
+    const now = Date.now();
+    const { availableUpdate, lastUpdateCheckTime } = get();
+    if (!notifyIfUpToDate && availableUpdate && now - lastUpdateCheckTime < 15 * 60 * 1000) {
+      if (availableUpdate.has_update) {
+        set({ isUpdateModalOpen: true });
+      }
+      return;
+    }
+
     set({ isCheckingUpdate: true, updateCheckError: null });
     try {
       const result = await storageApi.checkAppUpdate();
-      set({ availableUpdate: result, isCheckingUpdate: false });
+      set({ availableUpdate: result, isCheckingUpdate: false, lastUpdateCheckTime: Date.now() });
       if (result.has_update || notifyIfUpToDate) {
         set({ isUpdateModalOpen: true });
       }

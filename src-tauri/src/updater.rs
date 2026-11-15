@@ -34,11 +34,19 @@ pub struct UpdateCheckResult {
     pub asset_name: Option<String>,
 }
 
-/// Parses a SemVer-like version string into (major, minor, patch).
-/// Strips leading 'v' / 'V' and ignores prerelease tags for comparison.
-pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedVersion {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    pub is_prerelease: bool,
+}
+
+/// Parses a SemVer-like version string into (major, minor, patch, is_prerelease).
+/// Strips leading 'v' / 'V' and identifies prerelease tags for SemVer comparison.
+pub fn parse_version(v: &str) -> Option<ParsedVersion> {
     let cleaned = v.trim().trim_start_matches(['v', 'V']);
-    // Strip prerelease suffix (e.g. "-beta.1")
+    let is_prerelease = cleaned.contains('-') || cleaned.contains('+');
     let core = cleaned.split(['-', '+']).next()?;
     let mut parts = core.split('.');
 
@@ -46,21 +54,36 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let minor = parts.next().unwrap_or("0").parse().ok()?;
     let patch = parts.next().unwrap_or("0").parse().ok()?;
 
-    Some((major, minor, patch))
+    Some(ParsedVersion {
+        major,
+        minor,
+        patch,
+        is_prerelease,
+    })
 }
 
 /// Returns true if `latest` is strictly greater than `current`.
+/// Follows SemVer precedence: higher (major, minor, patch) wins;
+/// when equal, stable releases have higher precedence than prereleases.
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
-    let (c_maj, c_min, c_patch) = match parse_version(current) {
+    let c = match parse_version(current) {
         Some(v) => v,
         None => return false,
     };
-    let (l_maj, l_min, l_patch) = match parse_version(latest) {
+    let l = match parse_version(latest) {
         Some(v) => v,
         None => return false,
     };
 
-    (l_maj, l_min, l_patch) > (c_maj, c_min, c_patch)
+    if (l.major, l.minor, l.patch) > (c.major, c.minor, c.patch) {
+        return true;
+    }
+
+    if (l.major, l.minor, l.patch) == (c.major, c.minor, c.patch) {
+        return c.is_prerelease && !l.is_prerelease;
+    }
+
+    false
 }
 
 /// Selects the best download asset for the current operating system.
@@ -138,10 +161,42 @@ mod tests {
 
     #[test]
     fn test_parse_version() {
-        assert_eq!(parse_version("0.1.2"), Some((0, 1, 2)));
-        assert_eq!(parse_version("v0.1.2"), Some((0, 1, 2)));
-        assert_eq!(parse_version("V1.0.0"), Some((1, 0, 0)));
-        assert_eq!(parse_version("v0.2.0-beta.1"), Some((0, 2, 0)));
+        assert_eq!(
+            parse_version("0.1.2"),
+            Some(ParsedVersion {
+                major: 0,
+                minor: 1,
+                patch: 2,
+                is_prerelease: false,
+            })
+        );
+        assert_eq!(
+            parse_version("v0.1.2"),
+            Some(ParsedVersion {
+                major: 0,
+                minor: 1,
+                patch: 2,
+                is_prerelease: false,
+            })
+        );
+        assert_eq!(
+            parse_version("V1.0.0"),
+            Some(ParsedVersion {
+                major: 1,
+                minor: 0,
+                patch: 0,
+                is_prerelease: false,
+            })
+        );
+        assert_eq!(
+            parse_version("v0.2.0-beta.1"),
+            Some(ParsedVersion {
+                major: 0,
+                minor: 2,
+                patch: 0,
+                is_prerelease: true,
+            })
+        );
         assert_eq!(parse_version("invalid"), None);
     }
 
@@ -153,11 +208,16 @@ mod tests {
         assert!(is_newer_version("0.1.2", "1.0.0"));
         assert!(is_newer_version("v0.1.2", "v0.2.0"));
 
+        // Prerelease -> Stable upgrade
+        assert!(is_newer_version("0.2.0-beta.1", "0.2.0"));
+        assert!(is_newer_version("v0.2.0-rc1", "v0.2.0"));
+
         // Equal or older
         assert!(!is_newer_version("0.1.2", "0.1.2"));
         assert!(!is_newer_version("v0.1.2", "0.1.2"));
         assert!(!is_newer_version("0.2.0", "0.1.2"));
         assert!(!is_newer_version("1.0.0", "0.9.9"));
+        assert!(!is_newer_version("0.2.0", "0.2.0-beta.1"));
         assert!(!is_newer_version("0.1.2", "invalid"));
     }
 
@@ -174,6 +234,11 @@ mod tests {
                 browser_download_url: "https://example.com/Orbit.exe".to_string(),
                 size: 2000,
             },
+            GitHubAsset {
+                name: "Orbit_0.2.0_amd64.AppImage".to_string(),
+                browser_download_url: "https://example.com/Orbit.AppImage".to_string(),
+                size: 3000,
+            },
         ];
 
         let found = find_os_asset(&assets);
@@ -188,6 +253,11 @@ mod tests {
         {
             assert!(name.ends_with(".exe"));
             assert_eq!(url, "https://example.com/Orbit.exe");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(name.ends_with(".AppImage"));
+            assert_eq!(url, "https://example.com/Orbit.AppImage");
         }
     }
 }

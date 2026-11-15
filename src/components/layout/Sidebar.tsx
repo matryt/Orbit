@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
+import { APP_VERSION } from '../../version';
 import {
   Plus,
   Download,
@@ -280,7 +281,7 @@ export const Sidebar: React.FC = () => {
             title="Vérifier les mises à jour"
           >
             <Rocket className="w-3 h-3 text-zinc-500 group-hover:text-indigo-400 transition-colors" />
-            <span className="font-mono">v{availableUpdate?.current_version || '0.1.2'}</span>
+            <span className="font-mono">v{availableUpdate?.current_version || APP_VERSION}</span>
           </button>
           <span className="text-[10px] text-zinc-600 font-mono">Orbit</span>
         </div>

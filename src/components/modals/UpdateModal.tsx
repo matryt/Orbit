@@ -1,5 +1,6 @@
 import React from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
+import { APP_VERSION } from '../../version';
 import {
   Rocket,
   CheckCircle,
@@ -157,7 +158,7 @@ export const UpdateModal: React.FC = () => {
               <p className="text-xs text-zinc-400">
                 Vous utilisez actuellement la version la plus récente ({' '}
                 <span className="font-mono text-emerald-400 font-medium">
-                  v{availableUpdate?.current_version || '0.1.2'}
+                  v{availableUpdate?.current_version || APP_VERSION}
                 </span>{' '}
                 ).
               </p>
