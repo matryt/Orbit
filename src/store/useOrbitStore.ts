@@ -306,13 +306,19 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           p.id === profileId ? { ...p, status: 'connected' } : p
         ),
         isConnecting: false,
-        isElevated: sessionInfo?.is_elevated ?? false,
-        sudoCapability: sessionInfo?.sudo_capability ?? 'none',
-        remoteNavigationError: null,
+        ...(state.activeProfileId === profileId
+          ? {
+              isElevated: sessionInfo?.is_elevated ?? false,
+              sudoCapability: sessionInfo?.sudo_capability ?? 'none',
+              remoteNavigationError: null,
+            }
+          : {}),
       }));
 
-      // Fetch root directory
-      await get().setCurrentPath('/');
+      // Fetch root directory only if still the active profile
+      if (get().activeProfileId === profileId) {
+        await get().setCurrentPath('/');
+      }
     } catch (err: any) {
       if (isCancelledError(err)) {
         // Disconnect or cancellation was requested: maintain or restore profile to idle and suppress error message
@@ -321,7 +327,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
             p.id === profileId ? { ...p, status: 'idle' } : p
           ),
           isConnecting: false,
-          connectionError: null,
+          ...(state.activeProfileId === profileId ? { connectionError: null } : {}),
         }));
         return;
       }
@@ -331,7 +337,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           p.id === profileId ? { ...p, status: 'error' } : p
         ),
         isConnecting: false,
-        connectionError: errMsg,
+        ...(state.activeProfileId === profileId ? { connectionError: errMsg } : {}),
       }));
     }
   },
