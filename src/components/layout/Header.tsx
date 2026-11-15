@@ -17,6 +17,9 @@ export const Header: React.FC = () => {
   const {
     currentPath,
     setCurrentPath,
+    localPath,
+    setLocalPath,
+    activePane,
     searchQuery,
     setSearchQuery,
     isDualPane,
@@ -24,7 +27,9 @@ export const Header: React.FC = () => {
     transfers,
     toggleTransferDrawer,
     refreshRemote,
+    refreshLocal,
     isLoadingFiles,
+    isLoadingLocalFiles,
     isConnecting,
     connectionError,
     clearConnectionError,
@@ -45,14 +50,30 @@ export const Header: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const pathSegments = currentPath.split('/').filter(Boolean);
+  const isLocalActive = isDualPane && activePane === 'local';
+  const activePath = isLocalActive ? localPath || '/' : currentPath;
+  const isWindows = activePath.includes('\\');
+  const pathSegments = activePath.split(/[/\\]/).filter(Boolean);
+  const rootPrefix = isWindows ? activePath.substring(0, 3) : '/';
 
   const handleBreadcrumbClick = (index: number) => {
-    if (index === -1) {
-      setCurrentPath('/');
+    if (isLocalActive) {
+      if (index === -1) {
+        setLocalPath(rootPrefix);
+      } else {
+        const separator = isWindows ? '\\' : '/';
+        const newPath = isWindows
+          ? rootPrefix + pathSegments.slice(0, index + 1).join(separator)
+          : '/' + pathSegments.slice(0, index + 1).join('/');
+        setLocalPath(newPath);
+      }
     } else {
-      const newPath = '/' + pathSegments.slice(0, index + 1).join('/');
-      setCurrentPath(newPath);
+      if (index === -1) {
+        setCurrentPath('/');
+      } else {
+        const newPath = '/' + pathSegments.slice(0, index + 1).join('/');
+        setCurrentPath(newPath);
+      }
     }
   };
 
@@ -67,13 +88,25 @@ export const Header: React.FC = () => {
     >
       {/* Left: Breadcrumbs navigation */}
       <div className="flex items-center gap-1.5 text-xs text-zinc-400 overflow-x-auto no-scrollbar">
+        {isDualPane && (
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-mono border font-medium ${
+              isLocalActive
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+            }`}
+          >
+            {isLocalActive ? 'Local' : 'Distant'}
+          </span>
+        )}
+
         <button
           onClick={() => handleBreadcrumbClick(-1)}
           className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-white/10 hover:text-white transition-colors"
           title="Racine"
         >
           <Folder className="w-3.5 h-3.5 text-zinc-400" />
-          <span className="font-mono text-zinc-300">/</span>
+          <span className="font-mono text-zinc-300">{rootPrefix}</span>
         </button>
 
         {pathSegments.map((segment, index) => (
@@ -81,10 +114,11 @@ export const Header: React.FC = () => {
             <ChevronRight className="w-3 h-3 text-zinc-600 flex-shrink-0" />
             <button
               onClick={() => handleBreadcrumbClick(index)}
-              className={`px-1.5 py-0.5 rounded transition-colors truncate max-w-[120px] font-mono ${index === pathSegments.length - 1
+              className={`px-1.5 py-0.5 rounded transition-colors truncate max-w-[120px] font-mono ${
+                index === pathSegments.length - 1
                   ? 'text-white font-medium bg-white/[0.08]'
                   : 'hover:bg-white/10 hover:text-white text-zinc-300'
-                }`}
+              }`}
             >
               {segment}
             </button>
@@ -92,7 +126,7 @@ export const Header: React.FC = () => {
         ))}
 
         {/* Loading spinner */}
-        {(isLoadingFiles || isConnecting) && (
+        {(isLoadingFiles || (isLocalActive && isLoadingLocalFiles) || isConnecting) && (
           <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-1.5 flex-shrink-0" />
         )}
 
@@ -115,19 +149,21 @@ export const Header: React.FC = () => {
         <button
           onClick={() => setNewFolderModalOpen(true)}
           className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
-          title="Nouveau dossier distant"
+          title={isLocalActive ? 'Nouveau dossier local' : 'Nouveau dossier distant'}
         >
           <FolderPlus className="w-3.5 h-3.5 text-zinc-400 hover:text-indigo-400 transition-colors" />
         </button>
 
         {/* Refresh button */}
         <button
-          onClick={() => refreshRemote()}
-          disabled={isLoadingFiles}
+          onClick={() => (isLocalActive ? refreshLocal() : refreshRemote())}
+          disabled={isLocalActive ? isLoadingLocalFiles : isLoadingFiles}
           className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
-          title="Rafraîchir le dossier distant"
+          title={isLocalActive ? 'Rafraîchir le dossier local' : 'Rafraîchir le dossier distant'}
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoadingFiles ? 'animate-spin' : ''}`} />
+          <RefreshCw
+            className={`w-3.5 h-3.5 ${(isLocalActive ? isLoadingLocalFiles : isLoadingFiles) ? 'animate-spin' : ''}`}
+          />
         </button>
 
         {/* Instant filter input */}
