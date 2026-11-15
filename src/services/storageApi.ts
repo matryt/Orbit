@@ -24,6 +24,12 @@ export const isTauri = () => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 };
 
+export function isCancelledError(err: any): boolean {
+  if (err?.type === 'Cancelled') return true;
+  const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+  return msg.includes('Connexion annulée') || msg.includes('Cancelled');
+}
+
 export function formatConnectionError(err: any): string {
   const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
 
@@ -94,6 +100,11 @@ export const storageApi = {
     try {
       await invoke('connect_sftp', { config: params });
     } catch (err: any) {
+      if (isCancelledError(err)) {
+        const error = new Error('Connexion annulée : le profil a été déconnecté.');
+        (error as any).type = 'Cancelled';
+        throw error;
+      }
       throw new Error(formatConnectionError(err));
     }
   },

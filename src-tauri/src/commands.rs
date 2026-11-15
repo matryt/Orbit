@@ -89,40 +89,53 @@ pub async fn connect_sftp(
     mut config: SftpConnectConfig,
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
-    let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
-        Arc::new(TauriHostKeyPromptHandler::new(
-            app,
-            Arc::clone(&host_key_mgr),
-        ));
+    let profile_id = config.profile_id.clone();
+    // Démarre le suivi et le canal d'annulation AVANT toute opération (y compris le trousseau)
+    let (generation, mut cancel_rx) = state.start_connecting(&profile_id).await;
 
-    // If password or passphrase not provided directly, look in system keyring on a blocking thread
-    if config.password.is_none() && config.passphrase.is_none() {
-        let pid = config.profile_id.clone();
-        if let Ok(Ok(Some(secret))) =
-            tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
-        {
-            if config.key_path.is_some() {
-                config.passphrase = Some(secret);
-            } else {
-                config.password = Some(secret);
+    let connect_task = async move {
+        let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
+            Arc::new(TauriHostKeyPromptHandler::new(
+                app,
+                Arc::clone(&host_key_mgr),
+            ));
+
+        // If password or passphrase not provided directly, look in system keyring on a blocking thread
+        if config.password.is_none() && config.passphrase.is_none() {
+            let pid = config.profile_id.clone();
+            if let Ok(Ok(Some(secret))) =
+                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+            {
+                if config.key_path.is_some() {
+                    config.passphrase = Some(secret);
+                } else {
+                    config.password = Some(secret);
+                }
             }
         }
+
+        SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await
+    };
+
+    tokio::select! {
+        _ = cancel_rx.changed() => {
+            Err(AppError::Cancelled(
+                "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
+            ))
+        }
+        res = connect_task => {
+            let provider = res?;
+            if !state
+                .complete_connecting(&profile_id, generation, Arc::new(provider))
+                .await
+            {
+                return Err(AppError::Cancelled(
+                    "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
+                ));
+            }
+            Ok(())
+        }
     }
-
-    let profile_id = config.profile_id.clone();
-    let generation = state.start_connecting(&profile_id).await;
-
-    let provider = SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await?;
-
-    if !state
-        .complete_connecting(&profile_id, generation, Arc::new(provider))
-        .await
-    {
-        return Err(AppError::NotConnected(
-            "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[tauri::command]
