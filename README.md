@@ -34,15 +34,23 @@
 
 Download the latest release for your platform from the [GitHub Releases](https://github.com/matryt/Orbit/releases) page.
 
-### macOS (Apple Silicon & Intel)
+### macOS (Apple Silicon ARM64)
 
-1. Download `Orbit_x.x.x_universal.dmg`.
+1. Download `Orbit_x.x.x_aarch64.dmg`.
 2. Open the DMG and drag **Orbit** to your `/Applications` folder.
 3. **First launch (Gatekeeper)**: Because Orbit is currently built without a paid Apple Developer certificate, macOS may show an *"unidentified developer"* prompt. Run the following command once in your terminal to allow it:
 
 ```bash
 xattr -cr /Applications/Orbit.app
 ```
+
+> [!NOTE]
+> **Intel Mac (`x86_64`)**: Official prebuilt packages target Apple Silicon (ARM64) natively. If you are using an Intel Mac, you can easily build Orbit from source:
+> ```bash
+> git clone https://github.com/matryt/Orbit.git && cd Orbit
+> npm install && npm run tauri build
+> ```
+> The compiled application will be generated in `src-tauri/target/release/bundle/dmg/`.
 
 ### Windows (10 / 11)
 

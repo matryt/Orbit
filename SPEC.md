@@ -4,7 +4,7 @@
 Orbit est une application desktop légère, rapide et esthétique (inspirée de *Transmit*, *Linear* et *Raycast*) destinée à remplacer Cyberduck et FileZilla pour la gestion de fichiers **S3** (AWS, Cloudflare R2, Scaleway, MinIO) et **SFTP**.
 
 * **Environnement de développement principal :** macOS (développement et tests locaux avec rendu natif Apple).
-* **Plateformes de distribution :** macOS (`.dmg` Universal/Apple Silicon) et Windows 10/11 (`.msi` / `.exe`) compilés automatiquement via **GitHub Actions**.
+* **Plateformes de distribution :** macOS (`.dmg` Apple Silicon ARM64) et Windows 10/11 (`.msi` / `.exe`) compilés automatiquement via **GitHub Actions**.
 * **Philosophie Open Source (Dépôt Public MIT) :** Outil développé pour répondre à un besoin personnel et partagé avec la communauté. Le périmètre reste volontairement minimaliste (pas de *feature creep*). Le `README.md` précisera que les suggestions sont ouvertes mais que seules les fonctionnalités alignées avec la vision simple et rapide du projet seront retenues (PR bienvenues).
 
 ---
