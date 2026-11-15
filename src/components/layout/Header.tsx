@@ -138,6 +138,8 @@ export const Header: React.FC = () => {
         {/* Elevated Sudo Root badge */}
         {isElevated && !isLocalActive && (
           <div
+            role="status"
+            aria-label="Mode Superutilisateur Root actif"
             className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-medium tracking-wide shadow-sm ml-1.5 flex-shrink-0"
             title="Session SFTP exécutée avec les privilèges root (sudo)"
           >

@@ -28,13 +28,18 @@ pub fn resolve_local_path(input_path: Option<&str>) -> Result<PathBuf, AppError>
         PathBuf::from(raw)
     };
 
-    if path_buf.exists() {
-        path_buf.canonicalize().map_err(AppError::from)
-    } else {
-        Err(AppError::NotFound(format!(
+    match std::fs::metadata(&path_buf) {
+        Ok(_) => path_buf.canonicalize().map_err(AppError::from),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(AppError::PermissionDenied(format!(
+                "Permission denied: cannot access '{}'",
+                path_buf.display()
+            )))
+        }
+        Err(_) => Err(AppError::NotFound(format!(
             "Le dossier local '{}' n'existe pas",
             path_buf.display()
-        )))
+        ))),
     }
 }
 

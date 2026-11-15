@@ -26,8 +26,9 @@ interface OrbitState {
   clearConnectionError: () => void;
   isElevated: boolean;
   sudoCapability: SudoCapability;
-  navigationError: NavigationError | null;
-  clearNavigationError: () => void;
+  remoteNavigationError: NavigationError | null;
+  localNavigationError: NavigationError | null;
+  clearNavigationError: (pane: 'remote' | 'local') => void;
   elevateActiveSession: (targetPath?: string) => Promise<void>;
 
   // Active Pane (for keyboard shortcuts and Quick Look)
@@ -106,6 +107,9 @@ interface OrbitState {
   dismissUpdate: () => void;
 }
 
+let remoteNavGen = 0;
+let localNavGen = 0;
+
 export const useOrbitStore = create<OrbitState>((set, get) => ({
   profiles: [],
   activeProfileId: '',
@@ -114,8 +118,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   clearConnectionError: () => set({ connectionError: null }),
   isElevated: false,
   sudoCapability: 'none',
-  navigationError: null,
-  clearNavigationError: () => set({ navigationError: null }),
+  remoteNavigationError: null,
+  localNavigationError: null,
+  clearNavigationError: (pane) => {
+    if (pane === 'remote') set({ remoteNavigationError: null });
+    else set({ localNavigationError: null });
+  },
 
   loadPersistedProfiles: async () => {
     try {
@@ -143,6 +151,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       selectedRemotePath: null,
       selectedRemotePaths: [],
       connectionError: null,
+      isElevated: false,
+      sudoCapability: 'none',
+      remoteNavigationError: null,
     });
 
     if (profile && profile.type === 'sftp') {
@@ -222,7 +233,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           selectedRemotePaths: [],
           isElevated: false,
           sudoCapability: 'none' as const,
-          navigationError: null,
+          remoteNavigationError: null,
         }
         : {}),
     }));
@@ -247,7 +258,15 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     if (nextActive) {
       await get().setActiveProfile(nextActive);
     } else {
-      set({ remoteFiles: [], currentPath: '/', selectedRemotePath: null, selectedRemotePaths: [] });
+      set({
+        remoteFiles: [],
+        currentPath: '/',
+        selectedRemotePath: null,
+        selectedRemotePaths: [],
+        isElevated: false,
+        sudoCapability: 'none',
+        remoteNavigationError: null,
+      });
     }
   },
 
@@ -289,7 +308,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
         isConnecting: false,
         isElevated: sessionInfo?.is_elevated ?? false,
         sudoCapability: sessionInfo?.sudo_capability ?? 'none',
-        navigationError: null,
+        remoteNavigationError: null,
       }));
 
       // Fetch root directory
@@ -327,37 +346,41 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   setCurrentPath: async (path) => {
     const { activeProfileId, profiles } = get();
     const profile = profiles.find((p) => p.id === activeProfileId);
+    const reqGen = ++remoteNavGen;
 
     set({
       selectedRemotePath: null,
       selectedRemotePaths: [],
       isLoadingFiles: true,
-      navigationError: null,
+      remoteNavigationError: null,
     });
 
     try {
       if (profile && profile.type === 'sftp' && profile.status === 'connected') {
         const liveFiles = await storageApi.listDir(activeProfileId, path);
+        if (remoteNavGen !== reqGen) return;
         set({
           currentPath: path,
           remoteFiles: liveFiles,
           isLoadingFiles: false,
           selectedRemotePath: liveFiles.length > 0 ? liveFiles[0].path : null,
           selectedRemotePaths: liveFiles.length > 0 ? [liveFiles[0].path] : [],
-          navigationError: null,
+          remoteNavigationError: null,
         });
       } else {
         const mockList = MOCK_REMOTE_FILES[path] || [];
+        if (remoteNavGen !== reqGen) return;
         set({
           currentPath: path,
           remoteFiles: mockList,
           isLoadingFiles: false,
           selectedRemotePath: mockList.length > 0 ? mockList[0].path : null,
           selectedRemotePaths: mockList.length > 0 ? [mockList[0].path] : [],
-          navigationError: null,
+          remoteNavigationError: null,
         });
       }
     } catch (err: any) {
+      if (remoteNavGen !== reqGen) return;
       console.error('Error listing dir:', err);
       const isPerm = isPermissionDeniedError(err);
       const message = isPerm
@@ -366,7 +389,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
       set({
         isLoadingFiles: false,
-        navigationError: {
+        remoteNavigationError: {
           pane: 'remote',
           path,
           message,
@@ -382,18 +405,17 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   elevateActiveSession: async (targetPath?: string) => {
-    const { activeProfileId, profiles, navigationError, setCurrentPath } = get();
+    const { activeProfileId, profiles, remoteNavigationError, setCurrentPath } = get();
     const profile = profiles.find((p) => p.id === activeProfileId);
     if (!profile || profile.type !== 'sftp') return;
 
-    const destination = targetPath || (navigationError?.pane === 'remote' ? navigationError.path : '/');
+    const initiatingProfileId = activeProfileId;
+    const destination = targetPath || (remoteNavigationError?.path ? remoteNavigationError.path : '/');
 
-    set({ isConnecting: true, navigationError: null });
+    set({ isConnecting: true, remoteNavigationError: null });
 
     try {
-      await storageApi.disconnect(activeProfileId);
-
-      const secret = (await storageApi.getSecret(activeProfileId)) || undefined;
+      const secret = (await storageApi.getSecret(initiatingProfileId)) || undefined;
       const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
 
       const elevateParams: SftpConnectParams = {
@@ -412,26 +434,27 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
       const sessionInfo = await storageApi.connectSftp(elevateParams);
 
+      if (get().activeProfileId !== initiatingProfileId) return;
+
       set((state) => ({
         profiles: state.profiles.map((p) =>
-          p.id === activeProfileId ? { ...p, status: 'connected', useSudo: true } : p
+          p.id === initiatingProfileId ? { ...p, status: 'connected', useSudo: true } : p
         ),
         isConnecting: false,
         isElevated: sessionInfo.is_elevated,
         sudoCapability: sessionInfo.sudo_capability,
-        navigationError: null,
+        remoteNavigationError: null,
       }));
 
       await setCurrentPath(destination);
     } catch (err: any) {
+      if (get().activeProfileId !== initiatingProfileId) return;
       const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
-      set((state) => ({
-        profiles: state.profiles.map((p) =>
-          p.id === activeProfileId ? { ...p, status: 'error' } : p
-        ),
+      // Retain existing connected status on profile rather than destroying the session
+      set({
         isConnecting: false,
         connectionError: `Échec de l'élévation Sudo : ${errMsg}`,
-      }));
+      });
     }
   },
 
@@ -503,18 +526,21 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   localFiles: [],
   isLoadingLocalFiles: false,
   setLocalPath: async (path: string) => {
-    set({ isLoadingLocalFiles: true, navigationError: null });
+    const reqGen = ++localNavGen;
+    set({ isLoadingLocalFiles: true, localNavigationError: null });
     try {
       const res = await storageApi.listLocalDir(path);
+      if (localNavGen !== reqGen) return;
       set({
         localPath: res.currentPath,
         localFiles: res.entries,
         selectedLocalPath: null,
         selectedLocalPaths: [],
         isLoadingLocalFiles: false,
-        navigationError: null,
+        localNavigationError: null,
       });
     } catch (err: any) {
+      if (localNavGen !== reqGen) return;
       console.error('Failed to list local directory:', err);
       const isPerm = isPermissionDeniedError(err);
       const message = isPerm
@@ -523,7 +549,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
       set({
         isLoadingLocalFiles: false,
-        navigationError: {
+        localNavigationError: {
           pane: 'local',
           path,
           message,

@@ -399,8 +399,10 @@ impl SftpProvider {
             while let Some(msg) = channel.wait().await {
                 if let russh::ChannelMsg::Data { ref data } = msg {
                     output.extend_from_slice(data);
-                    if output.windows(11).any(|w| w == b"ORBIT_SUDO:") && output.contains(&b'\n') {
-                        break;
+                    if let Some(pos) = output.windows(11).position(|w| w == b"ORBIT_SUDO:") {
+                        if output[pos..].contains(&b'\n') {
+                            break;
+                        }
                     }
                 }
             }
