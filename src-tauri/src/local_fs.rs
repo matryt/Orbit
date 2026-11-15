@@ -83,18 +83,21 @@ pub fn list_local_directory(
         let full_path = entry.path();
         let path_str = full_path.to_string_lossy().to_string();
 
-        let meta = match entry.metadata() {
+        let symlink_meta = match std::fs::symlink_metadata(&full_path) {
             Ok(m) => m,
-            Err(_) => match std::fs::symlink_metadata(&full_path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            },
+            Err(_) => continue,
         };
+        let is_symlink = symlink_meta.file_type().is_symlink();
+        let is_dir = if is_symlink {
+            std::fs::metadata(&full_path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        } else {
+            symlink_meta.is_dir()
+        };
+        let size = if is_dir { 0 } else { symlink_meta.len() };
 
-        let is_dir = meta.is_dir();
-        let size = if is_dir { 0 } else { meta.len() };
-
-        let modified_at = meta
+        let modified_at = symlink_meta
             .modified()
             .ok()
             .map(|t| {
@@ -107,16 +110,16 @@ pub fn list_local_directory(
         let (permissions, owner, group) = {
             use std::os::unix::fs::MetadataExt;
             use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode();
+            let mode = symlink_meta.permissions().mode();
             let perm_str = format_unix_mode(mode, is_dir);
-            let uid = meta.uid().to_string();
-            let gid = meta.gid().to_string();
+            let uid = symlink_meta.uid().to_string();
+            let gid = symlink_meta.gid().to_string();
             (Some(perm_str), Some(uid), Some(gid))
         };
 
         #[cfg(not(unix))]
         let (permissions, owner, group) = {
-            let perm_str = if meta.permissions().readonly() {
+            let perm_str = if symlink_meta.permissions().readonly() {
                 if is_dir { "dr-xr-xr-x" } else { "-r--r--r--" }
             } else {
                 if is_dir { "drwxr-xr-x" } else { "-rw-rw-rw-" }
@@ -166,12 +169,17 @@ pub fn create_local_directory(path: &str) -> Result<(), AppError> {
     std::fs::create_dir_all(p).map_err(AppError::from)
 }
 
-pub fn delete_local_item(path: &str, is_dir: bool) -> Result<(), AppError> {
+pub fn delete_local_item(path: &str) -> Result<(), AppError> {
     let p = Path::new(path);
-    if !p.exists() {
-        return Err(AppError::NotFound(format!("Fichier introuvable: {path}")));
-    }
-    if is_dir {
+    let meta = std::fs::symlink_metadata(p).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound(format!("Fichier introuvable: {path}"))
+        } else {
+            AppError::from(e)
+        }
+    })?;
+
+    if meta.is_dir() {
         std::fs::remove_dir_all(p).map_err(AppError::from)
     } else {
         std::fs::remove_file(p).map_err(AppError::from)
@@ -181,11 +189,20 @@ pub fn delete_local_item(path: &str, is_dir: bool) -> Result<(), AppError> {
 pub fn rename_local_item(old_path: &str, new_path: &str) -> Result<(), AppError> {
     let old_p = Path::new(old_path);
     let new_p = Path::new(new_path);
-    if !old_p.exists() {
+
+    if std::fs::symlink_metadata(old_p).is_err() {
         return Err(AppError::NotFound(format!(
             "Fichier source introuvable: {old_path}"
         )));
     }
+
+    if std::fs::symlink_metadata(new_p).is_ok() {
+        return Err(AppError::InvalidPath(format!(
+            "Un élément portant le nom '{}' existe déjà",
+            new_p.display()
+        )));
+    }
+
     std::fs::rename(old_p, new_p).map_err(AppError::from)
 }
 
@@ -274,8 +291,40 @@ mod tests {
         assert!(renamed.exists());
 
         // Delete
-        delete_local_item(&renamed.to_string_lossy(), true).unwrap();
+        delete_local_item(&renamed.to_string_lossy()).unwrap();
         assert!(!renamed.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_rename_rejects_existing_destination() {
+        let temp_dir = create_test_dir();
+        let file_a = temp_dir.join("file_a.txt");
+        let file_b = temp_dir.join("file_b.txt");
+        std::fs::write(&file_a, "A").unwrap();
+        std::fs::write(&file_b, "B").unwrap();
+
+        let res = rename_local_item(&file_a.to_string_lossy(), &file_b.to_string_lossy());
+        assert!(res.is_err());
+        assert_eq!(std::fs::read_to_string(&file_b).unwrap(), "B");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_delete() {
+        let temp_dir = create_test_dir();
+        let target = temp_dir.join("target.txt");
+        let link = temp_dir.join("link.txt");
+        std::fs::write(&target, "target content").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Deleting symlink should remove the link, not the target
+        delete_local_item(&link.to_string_lossy()).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(target.exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

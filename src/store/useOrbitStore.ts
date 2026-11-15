@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, TransferItem } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError } from '../services/storageApi';
+import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
 
 interface OrbitState {
   // Profiles
@@ -56,7 +57,7 @@ interface OrbitState {
   refreshLocal: () => Promise<void>;
   createLocalFolder: (folderName: string) => Promise<void>;
   renameLocalItem: (oldPath: string, newName: string) => Promise<void>;
-  deleteLocalItem: (path: string, isDir: boolean) => Promise<void>;
+  deleteLocalItem: (path: string, isDir?: boolean) => Promise<void>;
 
   // View state
   isDualPane: boolean;
@@ -448,31 +449,21 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                             },
                                             createLocalFolder: async (folderName: string) => {
                                               const { localPath, refreshLocal } = get();
-                                              const cleanName = folderName.trim();
-                                              if (!cleanName || !localPath) return;
-                                              const separator = localPath.includes('\\') ? '\\' : '/';
-                                              const newDir = localPath.endsWith(separator)
-                                                ? `${localPath}${cleanName}`
-                                                : `${localPath}${separator}${cleanName}`;
+                                              const newDir = buildNewFolderPath(localPath, folderName);
+                                              if (!newDir) return;
                                               await storageApi.createLocalDir(newDir);
                                               await refreshLocal();
                                             },
                                             renameLocalItem: async (oldPath: string, newName: string) => {
                                               const { refreshLocal } = get();
-                                              const cleanName = newName.trim();
-                                              if (!cleanName) return;
-                                              const isWindows = oldPath.includes('\\');
-                                              const separator = isWindows ? '\\' : '/';
-                                              const lastIdx = Math.max(oldPath.lastIndexOf('/'), oldPath.lastIndexOf('\\'));
-                                              const parentDir = lastIdx >= 0 ? oldPath.substring(0, lastIdx) : '';
-                                              const newPath = parentDir ? `${parentDir}${separator}${cleanName}` : cleanName;
-                                              if (newPath === oldPath) return;
+                                              const newPath = buildRenamePath(oldPath, newName);
+                                              if (!newPath) return;
                                               await storageApi.renameLocalItem(oldPath, newPath);
                                               await refreshLocal();
                                             },
-                                            deleteLocalItem: async (path: string, isDir: boolean) => {
+                                            deleteLocalItem: async (path: string) => {
                                               const { refreshLocal, selectedLocalPath } = get();
-                                              await storageApi.deleteLocalItem(path, isDir);
+                                              await storageApi.deleteLocalItem(path);
                                               if (selectedLocalPath === path) {
                                                 set({ selectedLocalPath: null, selectedLocalPaths: [] });
                                               }

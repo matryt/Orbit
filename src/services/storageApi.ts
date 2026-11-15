@@ -284,12 +284,12 @@ export const storageApi = {
     await invoke('local_create_dir', { path });
   },
 
-  async deleteLocalItem(path: string, isDir: boolean): Promise<void> {
+  async deleteLocalItem(path: string): Promise<void> {
     if (!isTauri()) {
-      console.log('[Mock] deleteLocalItem:', path, isDir);
+      console.log('[Mock] deleteLocalItem:', path);
       return;
     }
-    await invoke('local_delete', { path, isDir });
+    await invoke('local_delete', { path });
   },
 
   async renameLocalItem(oldPath: string, newPath: string): Promise<void> {

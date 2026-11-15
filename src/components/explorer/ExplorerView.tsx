@@ -57,6 +57,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 }) => {
   const {
     setQuickLookFile,
+    activePane,
     setActivePane,
     profiles,
     setNewConnectionModalOpen,
@@ -67,6 +68,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     createLocalFolder,
     renameLocalItem,
     deleteLocalItem,
+    refreshLocal,
     downloadFile,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
@@ -128,13 +130,15 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     }
   }, [renameTarget]);
 
+  const isModalActive = isNewFolderModalOpen && activePane === (isLocal ? 'local' : 'remote');
+
   // Reset new folder input when modal opens
   useEffect(() => {
-    if (isNewFolderModalOpen) {
+    if (isModalActive) {
       setNewFolderNameInput('');
       setModalError(null);
     }
-  }, [isNewFolderModalOpen]);
+  }, [isModalActive]);
 
   // Navigate up one folder
   const handleGoUp = () => {
@@ -196,6 +200,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleRowContextMenu = (e: React.MouseEvent, file: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
+    setActivePane(isLocal ? 'local' : 'remote');
 
     onSelect(file.path, false);
 
@@ -210,6 +215,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Handle right click on empty background
   const handleBackgroundContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    setActivePane(isLocal ? 'local' : 'remote');
 
     const menuWidth = 200;
     const menuHeight = 120;
@@ -299,7 +305,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setModalError(null);
     try {
       if (isLocal) {
-        await deleteLocalItem(deleteTarget.path, deleteTarget.is_dir);
+        await deleteLocalItem(deleteTarget.path);
       } else {
         await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
       }
@@ -482,7 +488,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 {!searchQuery.trim() && (
                   <button
                     type="button"
-                    onClick={() => setNewFolderModalOpen(true)}
+                    onClick={() => {
+                      setActivePane(isLocal ? 'local' : 'remote');
+                      setNewFolderModalOpen(true);
+                    }}
                     className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 text-zinc-300 text-xs flex items-center gap-1.5 transition-colors"
                   >
                     <FolderPlus className="w-3.5 h-3.5 text-indigo-400" />
@@ -620,6 +629,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  setActivePane(isLocal ? 'local' : 'remote');
                   setContextMenu(null);
                   setNewFolderModalOpen(true);
                 }}
@@ -654,6 +664,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  setActivePane(isLocal ? 'local' : 'remote');
                   setContextMenu(null);
                   setNewFolderModalOpen(true);
                 }}
@@ -667,7 +678,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 type="button"
                 onClick={() => {
                   setContextMenu(null);
-                  refreshRemote();
+                  if (isLocal) {
+                    refreshLocal();
+                  } else {
+                    refreshRemote();
+                  }
                 }}
                 className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
               >
@@ -680,7 +695,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       )}
 
       {/* MODAL 1: Nouveau Dossier */}
-      {isNewFolderModalOpen && (
+      {isModalActive && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
           <div
             onClick={(e) => e.stopPropagation()}

@@ -298,8 +298,8 @@ pub async fn local_create_dir(path: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub async fn local_delete(path: String, is_dir: bool) -> Result<(), AppError> {
-    tokio::task::spawn_blocking(move || crate::local_fs::delete_local_item(&path, is_dir))
+pub async fn local_delete(path: String) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || crate::local_fs::delete_local_item(&path))
         .await
         .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
 }
