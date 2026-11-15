@@ -257,7 +257,8 @@ impl HostKeyPromptManager {
         };
 
         if let Some(coalesced) = state.by_target.remove(&target_key) {
-            // Nettoyer tous les autres request_ids associés à cette invite coalescée
+            // Nettoyer l'ID principal affiché ainsi que tous les request_ids associés
+            state.by_request_id.remove(&coalesced.req.request_id);
             for listener in &coalesced.listeners {
                 state.by_request_id.remove(&listener.request_id);
             }
@@ -275,13 +276,36 @@ impl HostKeyPromptManager {
 
     pub async fn cancel_prompt(&self, request_id: &str) {
         let mut state = self.state.lock().await;
-        if let Some(target_key) = state.by_request_id.remove(request_id) {
-            if let Some(coalesced) = state.by_target.get_mut(&target_key) {
-                coalesced.listeners.retain(|l| l.request_id != request_id);
-                if coalesced.listeners.is_empty() {
-                    state.by_target.remove(&target_key);
-                }
+        let target_key = match state.by_request_id.get(request_id).cloned() {
+            Some(k) => k,
+            None => return,
+        };
+
+        let mut remove_target = false;
+        let mut primary_id_to_remove = None;
+        let mut remove_caller_id = false;
+
+        if let Some(coalesced) = state.by_target.get_mut(&target_key) {
+            coalesced.listeners.retain(|l| l.request_id != request_id);
+
+            if coalesced.listeners.is_empty() {
+                remove_target = true;
+                primary_id_to_remove = Some(coalesced.req.request_id.clone());
+            } else if coalesced.req.request_id != request_id {
+                remove_caller_id = true;
             }
+        } else {
+            remove_caller_id = true;
+        }
+
+        if let Some(id) = primary_id_to_remove {
+            state.by_request_id.remove(&id);
+        }
+        if remove_caller_id {
+            state.by_request_id.remove(request_id);
+        }
+        if remove_target {
+            state.by_target.remove(&target_key);
         }
     }
 }
@@ -463,9 +487,10 @@ mod tests {
         // The prompt is STILL pending because rx2 is waiting!
         assert_eq!(manager.get_pending_requests().await.len(), 1);
 
-        // Resolving through request 2 succeeds and delivers to rx2
+        // Crucial test: Resolving through the displayed request ID ("cancel-test-1")
+        // still succeeds and delivers to surviving listener rx2!
         let resolved = manager
-            .resolve_prompt("cancel-test-2", HostKeyDecision::AcceptOnce)
+            .resolve_prompt("cancel-test-1", HostKeyDecision::AcceptOnce)
             .await;
         assert!(resolved);
         assert_eq!(rx2.await.unwrap(), HostKeyDecision::AcceptOnce);

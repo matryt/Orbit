@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, TransferItem } from '../types';
 import { MOCK_REMOTE_FILES, MOCK_LOCAL_FILES, MOCK_TRANSFERS } from '../data/mockData';
-import { storageApi, BackendTransferProgress } from '../services/storageApi';
+import { storageApi, BackendTransferProgress, isCancelledError } from '../services/storageApi';
 
 interface OrbitState {
   // Profiles
@@ -251,6 +251,17 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                     // Fetch root directory
                     await get().setCurrentPath('/');
                   } catch (err: any) {
+                    if (isCancelledError(err)) {
+                      // Disconnect or cancellation was requested: maintain or restore profile to idle and suppress error message
+                      set((state) => ({
+                        profiles: state.profiles.map((p) =>
+                          p.id === profileId ? { ...p, status: 'idle' } : p
+                        ),
+                        isConnecting: false,
+                        connectionError: null,
+                      }));
+                      return;
+                    }
                     const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
                     set((state) => ({
                       profiles: state.profiles.map((p) =>

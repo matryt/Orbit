@@ -119,7 +119,7 @@ pub async fn connect_sftp(
 
     tokio::select! {
         _ = cancel_rx.changed() => {
-            Err(AppError::NotConnected(
+            Err(AppError::Cancelled(
                 "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
             ))
         }
@@ -129,7 +129,7 @@ pub async fn connect_sftp(
                 .complete_connecting(&profile_id, generation, Arc::new(provider))
                 .await
             {
-                return Err(AppError::NotConnected(
+                return Err(AppError::Cancelled(
                     "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
                 ));
             }
