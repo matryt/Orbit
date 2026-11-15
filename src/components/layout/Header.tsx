@@ -12,6 +12,7 @@ import {
   FolderPlus,
   X,
   Sparkles,
+  ShieldAlert,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -32,6 +33,7 @@ export const Header: React.FC = () => {
     isLoadingFiles,
     isLoadingLocalFiles,
     isConnecting,
+    isElevated,
     connectionError,
     clearConnectionError,
     setNewFolderModalOpen,
@@ -131,6 +133,17 @@ export const Header: React.FC = () => {
         {/* Loading spinner */}
         {(isLoadingFiles || (isLocalActive && isLoadingLocalFiles) || isConnecting) && (
           <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-1.5 flex-shrink-0" />
+        )}
+
+        {/* Elevated Sudo Root badge */}
+        {isElevated && !isLocalActive && (
+          <div
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-medium tracking-wide shadow-sm ml-1.5 flex-shrink-0"
+            title="Session SFTP exécutée avec les privilèges root (sudo)"
+          >
+            <ShieldAlert className="w-3 h-3 text-amber-400" />
+            <span>ROOT</span>
+          </div>
         )}
 
         {/* Connection error banner */}

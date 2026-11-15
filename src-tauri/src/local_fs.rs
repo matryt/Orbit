@@ -122,7 +122,16 @@ pub fn list_local_directory(
         )));
     }
 
-    let read_dir = std::fs::read_dir(&target).map_err(AppError::from)?;
+    let read_dir = std::fs::read_dir(&target).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            AppError::PermissionDenied(format!(
+                "Permission denied: cannot access '{}'",
+                target.display()
+            ))
+        } else {
+            AppError::from(e)
+        }
+    })?;
     let mut entries = Vec::new();
 
     #[cfg(unix)]

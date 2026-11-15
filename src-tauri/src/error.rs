@@ -4,6 +4,9 @@ use thiserror::Error;
 #[derive(Error, Debug, Serialize)]
 #[serde(tag = "type", content = "message")]
 pub enum AppError {
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("I/O error: {0}")]
     Io(String),
 

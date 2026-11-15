@@ -49,6 +49,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::test_sftp_connection,
             commands::connect_sftp,
+            commands::get_session_info,
             commands::respond_host_key_prompt,
             commands::get_pending_host_key_prompts,
             commands::disconnect,

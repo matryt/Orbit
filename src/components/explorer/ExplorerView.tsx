@@ -20,6 +20,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  ShieldAlert,
 } from 'lucide-react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
@@ -73,6 +74,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     isNewFolderModalOpen,
     setNewFolderModalOpen,
     searchQuery,
+    navigationError,
+    clearNavigationError,
+    elevateActiveSession,
+    sudoCapability,
   } = useOrbitStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -490,6 +495,40 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           <span className={sortColumn === 'permissions' ? 'text-zinc-200 font-semibold' : ''}>Attr</span>
         </button>
       </div>
+
+      {/* Navigation / Permission Error Banner */}
+      {navigationError && navigationError.pane === (isLocal ? 'local' : 'remote') && (
+        <div className="mx-2 my-1.5 p-2.5 rounded-lg bg-red-500/10 border border-red-500/25 flex items-start justify-between gap-2.5 text-xs animate-in fade-in duration-150">
+          <div className="flex items-start gap-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1.5 min-w-0">
+              <div className="text-red-300 font-medium">
+                {navigationError.message}
+              </div>
+              {navigationError.isPermissionDenied && !isLocal && sudoCapability !== 'none' && (
+                <div className="pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => elevateActiveSession(navigationError.path)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-[11px] font-medium transition-all shadow-sm"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Ouvrir avec les privilèges Sudo</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={clearNavigationError}
+            className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0"
+            title="Masquer l'alerte"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Files List */}
       <div className="flex-1 overflow-y-auto px-1 py-1 divide-y divide-transparent">

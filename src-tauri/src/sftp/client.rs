@@ -14,7 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
-    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, TransferProgress,
+    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, SudoCapability,
+    TransferProgress,
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
@@ -345,6 +346,18 @@ pub struct SftpProvider {
     username: String,
     identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
     pub host_key_status: Option<HostKeyStatus>,
+    pub is_elevated: bool,
+    pub sudo_capability: SudoCapability,
+}
+
+pub fn parse_sudo_probe_output(text: &str) -> SudoCapability {
+    if text.contains("ORBIT_SUDO:NOPASSWD") {
+        SudoCapability::Passwordless
+    } else if text.contains("ORBIT_SUDO:PASSWD") {
+        SudoCapability::PasswordRequired
+    } else {
+        SudoCapability::None
+    }
 }
 
 impl SftpProvider {
@@ -363,6 +376,40 @@ impl SftpProvider {
             eprintln!("{line}");
         }
         Ok(provider)
+    }
+
+    async fn probe_sudo_capability(handle: &Handle<SshHandler>) -> SudoCapability {
+        let channel_fut = handle.channel_open_session();
+        let mut channel = match tokio::time::timeout(Duration::from_secs(3), channel_fut).await {
+            Ok(Ok(c)) => c,
+            _ => return SudoCapability::None,
+        };
+
+        let probe_cmd = "if sudo -n true 2>/dev/null; then echo ORBIT_SUDO:NOPASSWD; elif [ -x \"$(command -v sudo)\" ]; then if id -Gn 2>/dev/null | grep -Eq '\\b(sudo|wheel|admin)\\b'; then echo ORBIT_SUDO:PASSWD; else echo ORBIT_SUDO:NONE; fi; else echo ORBIT_SUDO:NONE; fi";
+
+        if tokio::time::timeout(Duration::from_secs(3), channel.exec(true, probe_cmd))
+            .await
+            .map_or(true, |r| r.is_err())
+        {
+            return SudoCapability::None;
+        }
+
+        let mut output = Vec::new();
+        let read_fut = async {
+            while let Some(msg) = channel.wait().await {
+                if let russh::ChannelMsg::Data { ref data } = msg {
+                    output.extend_from_slice(data);
+                    if output.windows(11).any(|w| w == b"ORBIT_SUDO:") && output.contains(&b'\n') {
+                        break;
+                    }
+                }
+            }
+        };
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), read_fut).await;
+
+        let text = String::from_utf8_lossy(&output);
+        parse_sudo_probe_output(&text)
     }
 
     pub async fn connect_with_logs(
@@ -739,33 +786,72 @@ impl SftpProvider {
             }
         };
 
-        match channel.request_subsystem(true, "sftp").await {
-            Ok(_) => {
-                logs.push(format!(
-                    "[{}] Sous-système SFTP accepté par le serveur.",
-                    now()
-                ));
+        let sftp_session = if config.use_sudo {
+            logs.push(format!(
+                "[{}] 🛡️ Mode Privilèges Élevés (Sudo) activé : lancement du serveur SFTP sous sudo...",
+                now()
+            ));
+            let sudo_cmd = "sudo -n sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server; do [ -x \"$p\" ] && exec \"$p\"; done; exec sftp-server'";
+            match channel.exec(true, sudo_cmd).await {
+                Ok(_) => {
+                    logs.push(format!(
+                        "[{}] Commande sudo sftp-server lancée avec succès.",
+                        now()
+                    ));
+                }
+                Err(e) => {
+                    let err_msg =
+                        format!("Le serveur SSH a refusé l'exécution de sudo sftp-server: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
-            Err(e) => {
-                let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                logs.push(format!(
-                    "[{}] ℹ️ Conseil: Assurez-vous que la ligne 'Subsystem sftp' est activée dans /etc/ssh/sshd_config sur le serveur distant.",
-                    now()
-                ));
-                return Err((AppError::Sftp(err_msg), logs));
-            }
-        }
 
-        let sftp_session = match SftpSession::new(channel.into_stream()).await {
-            Ok(s) => {
-                logs.push(format!("[{}] ✅ Session SFTP initialisée avec succès ! Prêt pour la navigation et les transferts.", now()));
-                s
+            match SftpSession::new(channel.into_stream()).await {
+                Ok(s) => {
+                    logs.push(format!(
+                        "[{}] ✅ Session SFTP Root initialisée avec succès ! Privilèges administrateur actifs.",
+                        now()
+                    ));
+                    s
+                }
+                Err(e) => {
+                    let err_msg = format!(
+                        "Échec d'initialisation SFTP sous sudo (vérifiez vos droits sudo / NOPASSWD): {e}"
+                    );
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
-            Err(e) => {
-                let err_msg = format!("Échec d'initialisation du protocole SFTP: {e}");
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                return Err((AppError::Sftp(err_msg), logs));
+        } else {
+            match channel.request_subsystem(true, "sftp").await {
+                Ok(_) => {
+                    logs.push(format!(
+                        "[{}] Sous-système SFTP accepté par le serveur.",
+                        now()
+                    ));
+                }
+                Err(e) => {
+                    let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    logs.push(format!(
+                        "[{}] ℹ️ Conseil: Assurez-vous que la ligne 'Subsystem sftp' est activée dans /etc/ssh/sshd_config sur le serveur distant.",
+                        now()
+                    ));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
+            }
+
+            match SftpSession::new(channel.into_stream()).await {
+                Ok(s) => {
+                    logs.push(format!("[{}] ✅ Session SFTP initialisée avec succès ! Prêt pour la navigation et les transferts.", now()));
+                    s
+                }
+                Err(e) => {
+                    let err_msg = format!("Échec d'initialisation du protocole SFTP: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
         };
 
@@ -843,6 +929,12 @@ impl SftpProvider {
             _ => {}
         }
 
+        let sudo_capability = if config.use_sudo {
+            SudoCapability::Passwordless
+        } else {
+            Self::probe_sudo_capability(&handle).await
+        };
+
         let final_status = key_status.lock().await.clone();
         Ok((
             Self {
@@ -851,6 +943,8 @@ impl SftpProvider {
                 username: config.username,
                 identities: tokio::sync::RwLock::new(None),
                 host_key_status: final_status,
+                is_elevated: config.use_sudo,
+                sudo_capability,
             },
             logs,
         ))
@@ -1129,11 +1223,14 @@ impl StorageProvider for SftpProvider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
         validate_path_safety(path)?;
         let dir_path = if path.is_empty() { "/" } else { path };
-        let read_dir = self
-            .session
-            .read_dir(dir_path)
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to list directory {dir_path}: {e}")))?;
+        let read_dir = self.session.read_dir(dir_path).await.map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.to_lowercase().contains("permission denied") {
+                AppError::PermissionDenied(format!("Permission denied: cannot access '{dir_path}'"))
+            } else {
+                AppError::Sftp(format!("Failed to list directory {dir_path}: {e}"))
+            }
+        })?;
 
         let identities = self.get_or_load_identities().await;
 
@@ -1425,6 +1522,14 @@ impl StorageProvider for SftpProvider {
         });
 
         Ok(())
+    }
+
+    fn is_elevated(&self) -> bool {
+        self.is_elevated
+    }
+
+    fn sudo_capability(&self) -> SudoCapability {
+        self.sudo_capability
     }
 }
 
@@ -1737,5 +1842,25 @@ docker:x:999:ubuntu,mathieu
         assert!(!res);
         let current_status = status.lock().await.clone();
         assert!(matches!(current_status, Some(HostKeyStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn test_parse_sudo_probe_output() {
+        assert_eq!(
+            parse_sudo_probe_output("prefix\nORBIT_SUDO:NOPASSWD\n"),
+            SudoCapability::Passwordless
+        );
+        assert_eq!(
+            parse_sudo_probe_output("ORBIT_SUDO:PASSWD\n"),
+            SudoCapability::PasswordRequired
+        );
+        assert_eq!(
+            parse_sudo_probe_output("ORBIT_SUDO:NONE\n"),
+            SudoCapability::None
+        );
+        assert_eq!(
+            parse_sudo_probe_output("sudo: a password is required"),
+            SudoCapability::None
+        );
     }
 }

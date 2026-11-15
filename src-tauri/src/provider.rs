@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{FileEntry, TransferProgress};
+use crate::models::{FileEntry, SudoCapability, TransferProgress};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
@@ -23,4 +23,12 @@ pub trait StorageProvider: Send + Sync {
         local_path: PathBuf,
         progress_tx: Channel<TransferProgress>,
     ) -> Result<(), AppError>;
+
+    fn is_elevated(&self) -> bool {
+        false
+    }
+
+    fn sudo_capability(&self) -> SudoCapability {
+        SudoCapability::None
+    }
 }

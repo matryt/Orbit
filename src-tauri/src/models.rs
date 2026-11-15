@@ -51,6 +51,24 @@ pub struct SftpConnectConfig {
     pub password: Option<String>,
     pub key_path: Option<String>,
     pub passphrase: Option<String>,
+    #[serde(default)]
+    pub use_sudo: bool,
+    pub sudo_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SudoCapability {
+    None,
+    Passwordless,
+    PasswordRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SftpSessionInfo {
+    pub profile_id: String,
+    pub is_elevated: bool,
+    pub sudo_capability: SudoCapability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
