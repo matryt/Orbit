@@ -6,11 +6,11 @@ export const DualPaneView: React.FC = () => {
   const {
     isDualPane,
     getRemoteFiles,
+    getLocalFiles,
     currentPath,
     setCurrentPath,
     selectedRemotePath,
     selectRemoteFile,
-    localFiles,
     localPath,
     setLocalPath,
     selectedLocalPath,
@@ -18,6 +18,7 @@ export const DualPaneView: React.FC = () => {
   } = useOrbitStore();
 
   const remoteFiles = getRemoteFiles();
+  const localFiles = getLocalFiles();
 
   if (!isDualPane) {
     return (

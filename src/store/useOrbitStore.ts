@@ -47,6 +47,7 @@ interface OrbitState {
   localPath: string;
   setLocalPath: (path: string) => void;
   localFiles: FileEntry[];
+  getLocalFiles: () => FileEntry[];
   selectedLocalPath: string | null;
   selectLocalFile: (path: string) => void;
 
@@ -387,6 +388,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                             localPath: '/Users/mac',
                                               setLocalPath: (path) => set({ localPath: path }),
                                                 localFiles: MOCK_LOCAL_FILES,
+                                                getLocalFiles: () => {
+                                                  const { localFiles, searchQuery } = get();
+                                                  if (!searchQuery.trim()) return localFiles;
+                                                  const lower = searchQuery.toLowerCase();
+                                                  return localFiles.filter((f) => f.name.toLowerCase().includes(lower));
+                                                },
                                                   selectedLocalPath: null,
                                                     selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
 
@@ -403,9 +410,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                                                       quickLookFile,
                                                                       selectedRemotePath,
                                                                       getRemoteFiles,
+                                                                      getLocalFiles,
                                                                       activePane,
                                                                       selectedLocalPath,
-                                                                      localFiles,
                                                                     } = get();
 
                                                                     if (quickLookFile) {
@@ -414,23 +421,22 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                                                     }
 
                                                                     if (activePane === 'local') {
-                                                                      const targetPath = selectedLocalPath || (localFiles.length > 0 ? localFiles[0].path : null);
-                                                                      if (targetPath) {
-                                                                        const file = localFiles.find((f) => f.path === targetPath);
-                                                                        if (file) {
-                                                                          set({ quickLookFile: file, selectedLocalPath: file.path });
-                                                                          return;
-                                                                        }
+                                                                      const localFiles = getLocalFiles();
+                                                                      const file =
+                                                                        (selectedLocalPath ? localFiles.find((f) => f.path === selectedLocalPath) : null) ||
+                                                                        (localFiles.length > 0 ? localFiles[0] : null);
+                                                                      if (file) {
+                                                                        set({ quickLookFile: file, selectedLocalPath: file.path });
                                                                       }
+                                                                      return;
                                                                     }
 
                                                                     const remoteFiles = getRemoteFiles();
-                                                                    const targetPath = selectedRemotePath || (remoteFiles.length > 0 ? remoteFiles[0].path : null);
-                                                                    if (targetPath) {
-                                                                      const file = remoteFiles.find((f) => f.path === targetPath);
-                                                                      if (file) {
-                                                                        set({ quickLookFile: file, selectedRemotePath: file.path });
-                                                                      }
+                                                                    const file =
+                                                                      (selectedRemotePath ? remoteFiles.find((f) => f.path === selectedRemotePath) : null) ||
+                                                                      (remoteFiles.length > 0 ? remoteFiles[0] : null);
+                                                                    if (file) {
+                                                                      set({ quickLookFile: file, selectedRemotePath: file.path });
                                                                     }
                                                                   },
 

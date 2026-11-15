@@ -10,6 +10,7 @@ import {
   Loader2,
   AlertCircle,
   FolderPlus,
+  X,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -140,12 +141,32 @@ export const Header: React.FC = () => {
             spellCheck={false}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setSearchQuery('');
+                searchInputRef.current?.blur();
+              }
+            }}
             placeholder="Filtrer..."
             className="w-36 focus:w-48 transition-all bg-surface-muted border border-border-subtle rounded-md pl-7 pr-12 py-1 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-white/20 focus:ring-1 focus:ring-white/20 font-mono"
           />
-          <kbd className="absolute right-1.5 text-[9px] bg-white/5 border border-border-subtle text-zinc-500 px-1 py-0.5 rounded pointer-events-none">
-            ⌘F
-          </kbd>
+          {searchQuery ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                searchInputRef.current?.focus();
+              }}
+              className="absolute right-1.5 p-0.5 rounded text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+              title="Effacer le filtre (Échap)"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          ) : (
+            <kbd className="absolute right-1.5 text-[9px] bg-white/5 border border-border-subtle text-zinc-500 px-1 py-0.5 rounded pointer-events-none">
+              ⌘F
+            </kbd>
+          )}
         </div>
 
         {/* Dual Pane toggle button */}

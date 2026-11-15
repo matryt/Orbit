@@ -46,6 +46,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run Frontend unit tests
+        run: npm test
+
       - name: TypeScript type-check and Vite build
         run: npm run build
 
