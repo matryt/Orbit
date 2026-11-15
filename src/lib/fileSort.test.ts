@@ -120,10 +120,45 @@ describe('sortFiles', () => {
     assert.strictEqual(sorted[1].name, 'beta-folder');
   });
 
-  it('sorts by permissions', () => {
-    const sorted = sortFiles(mockFiles, { column: 'permissions', direction: 'asc', foldersFirst: true });
+  it('sorts by permissions ascending and respects fallback permissions', () => {
+    const filesWithMissingPerms: FileEntry[] = [
+      ...mockFiles,
+      {
+        name: 'no-perms.txt',
+        path: '/no-perms.txt',
+        is_dir: false,
+        size: 200,
+        modified_at: '2026-01-01T00:00:00Z',
+        // permissions omitted -> fallback is '-rw-r--r--'
+      },
+    ];
+
+    const sorted = sortFiles(filesWithMissingPerms, {
+      column: 'permissions',
+      direction: 'asc',
+      foldersFirst: true,
+    });
+
+    // Folders first
     assert.ok(sorted[0].is_dir);
     assert.ok(sorted[1].is_dir);
+
+    // Files: '-rw-r--r--' (no-perms.txt, zeta.txt tied, tie-breaker name) -> '-rw-rw-r--' (file-10.txt) -> '-rwxr-xr-x' (file-2.txt)
+    assert.strictEqual(sorted[2].name, 'no-perms.txt');
+    assert.strictEqual(sorted[3].name, 'zeta.txt');
+    assert.strictEqual(sorted[4].name, 'file-10.txt');
+    assert.strictEqual(sorted[5].name, 'file-2.txt');
+  });
+
+  it('sorts by permissions descending', () => {
+    const sorted = sortFiles(mockFiles, { column: 'permissions', direction: 'desc', foldersFirst: true });
+    assert.ok(sorted[0].is_dir);
+    assert.ok(sorted[1].is_dir);
+
+    // Files descending: '-rwxr-xr-x' (file-2.txt) -> '-rw-rw-r--' (file-10.txt) -> '-rw-r--r--' (zeta.txt)
+    assert.strictEqual(sorted[2].name, 'file-2.txt');
+    assert.strictEqual(sorted[3].name, 'file-10.txt');
+    assert.strictEqual(sorted[4].name, 'zeta.txt');
   });
 });
 

@@ -51,9 +51,12 @@ export function sortFiles(files: FileEntry[], options: SortOptions): FileEntry[]
         break;
       }
 
-      case 'permissions':
-        comparison = collator.compare(a.permissions || '', b.permissions || '');
+      case 'permissions': {
+        const permA = a.permissions || (a.is_dir ? 'drwxr-xr-x' : '-rw-r--r--');
+        const permB = b.permissions || (b.is_dir ? 'drwxr-xr-x' : '-rw-r--r--');
+        comparison = collator.compare(permA, permB);
         break;
+      }
     }
 
     if (comparison !== 0) {

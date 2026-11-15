@@ -318,7 +318,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       )}
 
       {/* Table Header with interactive column sorting */}
-      <div className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30 select-none">
+      <div
+        onKeyDown={(e) => e.stopPropagation()}
+        className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30 select-none"
+      >
         <button
           type="button"
           onClick={() => handleSort('name')}
