@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
@@ -17,9 +17,18 @@ import {
   AlertTriangle,
   Loader2,
   X,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from 'lucide-react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
+import {
+  SortColumn,
+  SortDirection,
+  sortFiles,
+  getDefaultDirection,
+} from '../../lib/fileSort';
 
 interface ExplorerViewProps {
   files: FileEntry[];
@@ -58,9 +67,31 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     downloadFile,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
+    searchQuery,
   } = useOrbitStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Sorting State
+  const [sortColumn, setSortColumn] = useState<SortColumn>('name');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortColumn(column);
+      setSortDirection(getDefaultDirection(column));
+    }
+  };
+
+  const sortedFiles = useMemo(() => {
+    return sortFiles(files, {
+      column: sortColumn,
+      direction: sortDirection,
+      foldersFirst: true,
+    });
+  }, [files, sortColumn, sortDirection]);
 
   // Context Menu State
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -124,19 +155,19 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     // If a modal is open, let modal handle keys
     if (isNewFolderModalOpen || renameTarget || deleteTarget) return;
 
-    if (files.length === 0) return;
+    if (sortedFiles.length === 0) return;
 
-    const currentIndex = files.findIndex((f) => f.path === selectedPath);
-    const selectedFile = files.find((f) => f.path === selectedPath);
+    const currentIndex = sortedFiles.findIndex((f) => f.path === selectedPath);
+    const selectedFile = sortedFiles.find((f) => f.path === selectedPath);
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const nextIndex = currentIndex < files.length - 1 ? currentIndex + 1 : 0;
-      onSelect(files[nextIndex].path);
+      const nextIndex = currentIndex < sortedFiles.length - 1 ? currentIndex + 1 : 0;
+      onSelect(sortedFiles[nextIndex].path);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const prevIndex = currentIndex > 0 ? currentIndex - 1 : files.length - 1;
-      onSelect(files[prevIndex].path);
+      const prevIndex = currentIndex > 0 ? currentIndex - 1 : sortedFiles.length - 1;
+      onSelect(sortedFiles[prevIndex].path);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (selectedFile) {
@@ -279,17 +310,104 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             <span className="font-semibold text-zinc-300">{title}</span>
             <span className="text-zinc-600 truncate max-w-[200px]">{currentPath}</span>
           </div>
-          <span className="text-[11px] text-zinc-500">{files.length} éléments</span>
+          <span className="text-[11px] text-zinc-500">
+            {files.length} élément{files.length > 1 ? 's' : ''}
+            {searchQuery.trim() ? ' (filtré)' : ''}
+          </span>
         </div>
       )}
 
-      {/* Table Header */}
-      <div className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30">
-        <div className="col-span-5 flex items-center gap-2">Nom</div>
-        <div className="col-span-2 text-right">Taille</div>
-        <div className="col-span-2 text-right">Propriétaire</div>
-        <div className="col-span-2 text-right">Modifié</div>
-        <div className="col-span-1 text-right font-mono">Attr</div>
+      {/* Table Header with interactive column sorting */}
+      <div className="grid grid-cols-12 px-4 py-2 text-[11px] font-medium text-zinc-500 uppercase tracking-wider border-b border-border-subtle bg-surface/30 select-none">
+        <button
+          type="button"
+          onClick={() => handleSort('name')}
+          className="col-span-5 flex items-center gap-1.5 hover:text-zinc-200 transition-colors text-left group"
+          title="Trier par nom"
+        >
+          <span className={sortColumn === 'name' ? 'text-zinc-200 font-semibold' : ''}>Nom</span>
+          {sortColumn === 'name' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('size')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par taille"
+        >
+          {sortColumn === 'size' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'size' ? 'text-zinc-200 font-semibold' : ''}>Taille</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('owner')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par propriétaire"
+        >
+          {sortColumn === 'owner' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'owner' ? 'text-zinc-200 font-semibold' : ''}>Propriétaire</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('mtime')}
+          className="col-span-2 flex items-center justify-end gap-1.5 hover:text-zinc-200 transition-colors group text-right"
+          title="Trier par date de modification"
+        >
+          {sortColumn === 'mtime' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'mtime' ? 'text-zinc-200 font-semibold' : ''}>Modifié</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSort('permissions')}
+          className="col-span-1 flex items-center justify-end gap-1 hover:text-zinc-200 transition-colors group text-right font-mono"
+          title="Trier par permissions"
+        >
+          {sortColumn === 'permissions' ? (
+            sortDirection === 'asc' ? (
+              <ArrowUp className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-sky-400 flex-shrink-0" />
+            )
+          ) : (
+            <ArrowUpDown className="w-3 h-3 text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          )}
+          <span className={sortColumn === 'permissions' ? 'text-zinc-200 font-semibold' : ''}>Attr</span>
+        </button>
       </div>
 
       {/* Files List */}
@@ -311,7 +429,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           </div>
         )}
 
-        {files.length === 0 ? (
+        {sortedFiles.length === 0 ? (
           <div className="h-64 flex flex-col items-center justify-center text-center p-6 text-zinc-500">
             {!isLocal && profiles.length === 0 ? (
               <>
@@ -333,8 +451,12 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               </>
             ) : (
               <div className="flex flex-col items-center gap-2">
-                <p className="text-xs">Dossier vide ou aucun fichier trouvé</p>
-                {!isLocal && (
+                <p className="text-xs">
+                  {searchQuery.trim()
+                    ? `Aucun fichier ne correspond à "${searchQuery}"`
+                    : 'Dossier vide ou aucun fichier trouvé'}
+                </p>
+                {!isLocal && !searchQuery.trim() && (
                   <button
                     type="button"
                     onClick={() => setNewFolderModalOpen(true)}
@@ -348,7 +470,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             )}
           </div>
         ) : (
-          files.map((file) => {
+          sortedFiles.map((file) => {
             const isSelected = file.path === selectedPath;
             return (
               <div
@@ -395,13 +517,20 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
       {/* Bottom status bar for the pane */}
       <div className="h-6 px-3 bg-surface-muted/40 border-t border-border-subtle flex items-center justify-between text-[11px] text-zinc-500 font-mono">
-        <div>
-          {files.length} élément{files.length > 1 ? 's' : ''}
+        <div className="flex items-center gap-2">
+          <span>
+            {files.length} élément{files.length > 1 ? 's' : ''}
+            {searchQuery.trim() ? ' (filtré)' : ''}
+          </span>
+          <span className="text-zinc-600">·</span>
+          <span className="text-zinc-400">
+            Tri : {sortColumn === 'name' ? 'Nom' : sortColumn === 'size' ? 'Taille' : sortColumn === 'owner' ? 'Propriétaire' : sortColumn === 'mtime' ? 'Date' : 'Attr'} ({sortDirection === 'asc' ? 'croissant' : 'décroissant'})
+          </span>
         </div>
         <div className="flex items-center gap-3">
-          <span>Clic droit : Menu d'actions</span>
+          <span>Clic droit : Menu</span>
           <span>•</span>
-          <span>Espace : Aperçu rapide</span>
+          <span>Espace : Aperçu</span>
         </div>
       </div>
 

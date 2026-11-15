@@ -47,6 +47,7 @@ interface OrbitState {
   localPath: string;
   setLocalPath: (path: string) => void;
   localFiles: FileEntry[];
+  getLocalFiles: () => FileEntry[];
   selectedLocalPath: string | null;
   selectLocalFile: (path: string) => void;
 
@@ -387,6 +388,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                             localPath: '/Users/mac',
                                               setLocalPath: (path) => set({ localPath: path }),
                                                 localFiles: MOCK_LOCAL_FILES,
+                                                getLocalFiles: () => {
+                                                  const { localFiles, searchQuery } = get();
+                                                  if (!searchQuery.trim()) return localFiles;
+                                                  const lower = searchQuery.toLowerCase();
+                                                  return localFiles.filter((f) => f.name.toLowerCase().includes(lower));
+                                                },
                                                   selectedLocalPath: null,
                                                     selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
 
