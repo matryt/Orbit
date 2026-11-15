@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, TransferItem } from '../types';
-import { MOCK_REMOTE_FILES, MOCK_LOCAL_FILES, MOCK_TRANSFERS } from '../data/mockData';
+import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError } from '../services/storageApi';
 
 interface OrbitState {
@@ -45,11 +45,18 @@ interface OrbitState {
 
   // Local Explorer (for Dual Pane)
   localPath: string;
-  setLocalPath: (path: string) => void;
+  setLocalPath: (path: string) => Promise<void>;
   localFiles: FileEntry[];
+  isLoadingLocalFiles: boolean;
   getLocalFiles: () => FileEntry[];
   selectedLocalPath: string | null;
-  selectLocalFile: (path: string) => void;
+  selectedLocalPaths: string[];
+  selectLocalFile: (path: string, multi?: boolean) => void;
+  clearLocalSelection: () => void;
+  refreshLocal: () => Promise<void>;
+  createLocalFolder: (folderName: string) => Promise<void>;
+  renameLocalItem: (oldPath: string, newName: string) => Promise<void>;
+  deleteLocalItem: (path: string, isDir: boolean) => Promise<void>;
 
   // View state
   isDualPane: boolean;
@@ -385,20 +392,101 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
                                             set({ selectedRemotePaths: [], selectedRemotePath: null });
                                           },
 
-                                            localPath: '/Users/mac',
-                                              setLocalPath: (path) => set({ localPath: path }),
-                                                localFiles: MOCK_LOCAL_FILES,
-                                                getLocalFiles: () => {
-                                                  const { localFiles, searchQuery } = get();
-                                                  if (!searchQuery.trim()) return localFiles;
-                                                  const lower = searchQuery.toLowerCase();
-                                                  return localFiles.filter((f) => f.name.toLowerCase().includes(lower));
-                                                },
+                                            localPath: '',
+                                            localFiles: [],
+                                            isLoadingLocalFiles: false,
+                                            setLocalPath: async (path: string) => {
+                                              set({ isLoadingLocalFiles: true });
+                                              try {
+                                                const res = await storageApi.listLocalDir(path);
+                                                set({
+                                                  localPath: res.currentPath,
+                                                  localFiles: res.entries,
                                                   selectedLocalPath: null,
-                                                    selectLocalFile: (path) => set({ selectedLocalPath: path, activePane: 'local' }),
+                                                  selectedLocalPaths: [],
+                                                  isLoadingLocalFiles: false,
+                                                });
+                                              } catch (err) {
+                                                console.error('Failed to list local directory:', err);
+                                                set({ isLoadingLocalFiles: false });
+                                              }
+                                            },
+                                            getLocalFiles: () => {
+                                              const { localFiles, searchQuery } = get();
+                                              if (!searchQuery.trim()) return localFiles;
+                                              const lower = searchQuery.toLowerCase();
+                                              return localFiles.filter((f) => f.name.toLowerCase().includes(lower));
+                                            },
+                                            selectedLocalPath: null,
+                                            selectedLocalPaths: [],
+                                            selectLocalFile: (path, multi = false) => {
+                                              const { selectedLocalPaths } = get();
+                                              if (multi) {
+                                                const exists = selectedLocalPaths.includes(path);
+                                                const newPaths = exists
+                                                  ? selectedLocalPaths.filter((p) => p !== path)
+                                                  : [...selectedLocalPaths, path];
+                                                set({
+                                                  selectedLocalPaths: newPaths,
+                                                  selectedLocalPath: newPaths.length > 0 ? newPaths[newPaths.length - 1] : null,
+                                                  activePane: 'local',
+                                                });
+                                              } else {
+                                                set({
+                                                  selectedLocalPath: path,
+                                                  selectedLocalPaths: [path],
+                                                  activePane: 'local',
+                                                });
+                                              }
+                                            },
+                                            clearLocalSelection: () => {
+                                              set({ selectedLocalPaths: [], selectedLocalPath: null });
+                                            },
+                                            refreshLocal: async () => {
+                                              const { localPath, setLocalPath } = get();
+                                              await setLocalPath(localPath || '');
+                                            },
+                                            createLocalFolder: async (folderName: string) => {
+                                              const { localPath, refreshLocal } = get();
+                                              const cleanName = folderName.trim();
+                                              if (!cleanName || !localPath) return;
+                                              const separator = localPath.includes('\\') ? '\\' : '/';
+                                              const newDir = localPath.endsWith(separator)
+                                                ? `${localPath}${cleanName}`
+                                                : `${localPath}${separator}${cleanName}`;
+                                              await storageApi.createLocalDir(newDir);
+                                              await refreshLocal();
+                                            },
+                                            renameLocalItem: async (oldPath: string, newName: string) => {
+                                              const { refreshLocal } = get();
+                                              const cleanName = newName.trim();
+                                              if (!cleanName) return;
+                                              const isWindows = oldPath.includes('\\');
+                                              const separator = isWindows ? '\\' : '/';
+                                              const lastIdx = Math.max(oldPath.lastIndexOf('/'), oldPath.lastIndexOf('\\'));
+                                              const parentDir = lastIdx >= 0 ? oldPath.substring(0, lastIdx) : '';
+                                              const newPath = parentDir ? `${parentDir}${separator}${cleanName}` : cleanName;
+                                              if (newPath === oldPath) return;
+                                              await storageApi.renameLocalItem(oldPath, newPath);
+                                              await refreshLocal();
+                                            },
+                                            deleteLocalItem: async (path: string, isDir: boolean) => {
+                                              const { refreshLocal, selectedLocalPath } = get();
+                                              await storageApi.deleteLocalItem(path, isDir);
+                                              if (selectedLocalPath === path) {
+                                                set({ selectedLocalPath: null, selectedLocalPaths: [] });
+                                              }
+                                              await refreshLocal();
+                                            },
 
-                                                      isDualPane: false,
-                                                        toggleDualPane: () => set((state) => ({ isDualPane: !state.isDualPane })),
+                                            isDualPane: false,
+                                            toggleDualPane: () => {
+                                              const next = !get().isDualPane;
+                                              set({ isDualPane: next });
+                                              if (next && get().localFiles.length === 0) {
+                                                get().refreshLocal();
+                                              }
+                                            },
 
                                                           searchQuery: '',
                                                             setSearchQuery: (query) => set({ searchQuery: query }),

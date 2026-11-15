@@ -64,6 +64,9 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     renameRemoteItem,
     deleteRemoteItem,
     refreshRemote,
+    createLocalFolder,
+    renameLocalItem,
+    deleteLocalItem,
     downloadFile,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
@@ -135,11 +138,18 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
   // Navigate up one folder
   const handleGoUp = () => {
-    if (currentPath === '/' || currentPath === '') return;
-    const parts = currentPath.split('/').filter(Boolean);
+    if (currentPath === '/' || currentPath === '' || currentPath === '\\') return;
+    const isWindows = currentPath.includes('\\');
+    const parts = currentPath.split(/[/\\]/).filter(Boolean);
     parts.pop();
-    const parent = parts.length === 0 ? '/' : '/' + parts.join('/');
-    onNavigate(parent);
+    if (parts.length === 0) {
+      onNavigate(isWindows ? currentPath.substring(0, 3) : '/');
+    } else {
+      const parent = isWindows
+        ? parts.join('\\')
+        : '/' + parts.join('/');
+      onNavigate(parent);
+    }
   };
 
   const handleRowDoubleClick = (file: FileEntry) => {
@@ -173,10 +183,10 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       if (selectedFile) {
         handleRowDoubleClick(selectedFile);
       }
-    } else if (e.key === 'F2' && selectedFile && !isLocal) {
+    } else if (e.key === 'F2' && selectedFile) {
       e.preventDefault();
       setRenameTarget(selectedFile);
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedFile && !isLocal) {
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedFile) {
       e.preventDefault();
       setDeleteTarget(selectedFile);
     }
@@ -186,12 +196,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleRowContextMenu = (e: React.MouseEvent, file: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isLocal) return;
 
     onSelect(file.path, false);
 
     const menuWidth = 200;
-    const menuHeight = 220;
+    const menuHeight = isLocal ? 180 : 220;
     const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
 
@@ -201,7 +210,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Handle right click on empty background
   const handleBackgroundContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    if (isLocal) return;
 
     const menuWidth = 200;
     const menuHeight = 120;
@@ -241,7 +249,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await createRemoteFolder(name);
+      if (isLocal) {
+        await createLocalFolder(name);
+      } else {
+        await createRemoteFolder(name);
+      }
       setNewFolderModalOpen(false);
       setNewFolderNameInput('');
     } catch (err: any) {
@@ -265,7 +277,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await renameRemoteItem(renameTarget.path, newName);
+      if (isLocal) {
+        await renameLocalItem(renameTarget.path, newName);
+      } else {
+        await renameRemoteItem(renameTarget.path, newName);
+      }
       setRenameTarget(null);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors du renommage';
@@ -282,7 +298,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
+      if (isLocal) {
+        await deleteLocalItem(deleteTarget.path, deleteTarget.is_dir);
+      } else {
+        await deleteRemoteItem(deleteTarget.path, deleteTarget.is_dir);
+      }
       setDeleteTarget(null);
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || 'Erreur lors de la suppression';
@@ -459,7 +479,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                     ? `Aucun fichier ne correspond à "${searchQuery}"`
                     : 'Dossier vide ou aucun fichier trouvé'}
                 </p>
-                {!isLocal && !searchQuery.trim() && (
+                {!searchQuery.trim() && (
                   <button
                     type="button"
                     onClick={() => setNewFolderModalOpen(true)}
@@ -565,8 +585,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {/* Download */}
-              {!contextMenu.file.is_dir && (
+              {/* Download (Remote only) */}
+              {!contextMenu.file.is_dir && !isLocal && (
                 <button
                   type="button"
                   onClick={() => handleDownload(contextMenu.file!)}

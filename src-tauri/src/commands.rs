@@ -263,3 +263,50 @@ pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result
     let _ = KeyringService::delete_secret(&profile_id);
     ConfigService::delete_profile(&app, &profile_id)
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalDirResult {
+    pub current_path: String,
+    pub entries: Vec<FileEntry>,
+}
+
+#[tauri::command]
+pub async fn local_list_dir(path: Option<String>) -> Result<LocalDirResult, AppError> {
+    tokio::task::spawn_blocking(move || {
+        let (current_path, entries) = crate::local_fs::list_local_directory(path.as_deref())?;
+        Ok(LocalDirResult {
+            current_path,
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn local_read_preview(path: String, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+    tokio::task::spawn_blocking(move || crate::local_fs::read_local_preview(&path, max_bytes))
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn local_create_dir(path: String) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || crate::local_fs::create_local_directory(&path))
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn local_delete(path: String, is_dir: bool) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || crate::local_fs::delete_local_item(&path, is_dir))
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn local_rename(old_path: String, new_path: String) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || crate::local_fs::rename_local_item(&old_path, &new_path))
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { ExplorerView } from './ExplorerView';
 
@@ -15,10 +15,18 @@ export const DualPaneView: React.FC = () => {
     setLocalPath,
     selectedLocalPath,
     selectLocalFile,
+    refreshLocal,
+    isLoadingLocalFiles,
   } = useOrbitStore();
 
   const remoteFiles = getRemoteFiles();
   const localFiles = getLocalFiles();
+
+  useEffect(() => {
+    if (isDualPane && !localPath && !isLoadingLocalFiles) {
+      refreshLocal();
+    }
+  }, [isDualPane, localPath, isLoadingLocalFiles, refreshLocal]);
 
   if (!isDualPane) {
     return (

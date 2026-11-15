@@ -247,6 +247,59 @@ export const storageApi = {
     });
   },
 
+  async listLocalDir(path?: string): Promise<{ currentPath: string; entries: FileEntry[] }> {
+    if (!isTauri()) {
+      return {
+        currentPath: path || '/',
+        entries: [],
+      };
+    }
+    const res = await invoke<{ current_path: string; entries: FileEntry[] }>('local_list_dir', {
+      path: path || null,
+    });
+    return {
+      currentPath: res.current_path,
+      entries: res.entries,
+    };
+  },
+
+  async readLocalPreview(path: string, maxBytes = 2 * 1024 * 1024): Promise<string> {
+    if (!isTauri()) {
+      return `// Mock local aperçu pour ${path}`;
+    }
+    const bytes = await invoke<number[]>('local_read_preview', {
+      path,
+      maxBytes,
+    });
+    const uint8 = new Uint8Array(bytes);
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    return decoder.decode(uint8);
+  },
+
+  async createLocalDir(path: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] createLocalDir:', path);
+      return;
+    }
+    await invoke('local_create_dir', { path });
+  },
+
+  async deleteLocalItem(path: string, isDir: boolean): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] deleteLocalItem:', path, isDir);
+      return;
+    }
+    await invoke('local_delete', { path, isDir });
+  },
+
+  async renameLocalItem(oldPath: string, newPath: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] renameLocalItem:', oldPath, '->', newPath);
+      return;
+    }
+    await invoke('local_rename', { oldPath, newPath });
+  },
+
   async saveSecret(profileId: string, secret: string): Promise<void> {
     if (!isTauri()) return;
     await invoke('save_secret', { profileId, secret });
