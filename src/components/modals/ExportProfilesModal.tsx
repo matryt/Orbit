@@ -37,9 +37,9 @@ export const ExportProfilesModal: React.FC = () => {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
-      <div className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col">
+      <div className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none">
+        <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none flex-shrink-0">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-white">Exporter les Profils</h2>
             <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium">
@@ -55,7 +55,7 @@ export const ExportProfilesModal: React.FC = () => {
         </div>
 
         {/* Content */}
-        <div className="p-4 space-y-3">
+        <div className="p-4 space-y-3 overflow-y-auto flex-1">
           <p className="text-xs text-zinc-400">
             Ce fichier JSON contient les métadonnées de vos favoris serveurs. Conformément à la spécification, les clés secrètes et mots de passe sont exclus pour permettre un partage sécurisé.
           </p>
@@ -67,7 +67,7 @@ export const ExportProfilesModal: React.FC = () => {
         </div>
 
         {/* Footer Actions */}
-        <div className="p-4 border-t border-border-subtle bg-surface-muted/40 flex items-center justify-end gap-2">
+        <div className="p-4 border-t border-border-subtle bg-surface-muted/40 flex items-center justify-end gap-2 flex-shrink-0">
           <button
             onClick={handleCopy}
             className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-border-subtle transition-all flex items-center gap-1.5"

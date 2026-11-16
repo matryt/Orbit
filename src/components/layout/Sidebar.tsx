@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { APP_VERSION } from '../../version';
 import { ConnectionProfile } from '../../types';
@@ -289,8 +290,13 @@ export const Sidebar: React.FC = () => {
       </div>
 
       {/* Modal Confirmation Suppression Profil */}
-      {profileToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
+      {profileToDelete && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-profile-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+        >
           <div
             onClick={(e) => e.stopPropagation()}
             className="w-full max-w-sm bg-[#161926] border border-red-500/30 rounded-xl shadow-2xl p-5 text-zinc-200"
@@ -300,7 +306,9 @@ export const Sidebar: React.FC = () => {
                 <Trash2 className="w-5 h-5" />
               </div>
               <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-white">Supprimer la connexion ?</h3>
+                <h3 id="delete-profile-dialog-title" className="text-sm font-semibold text-white">
+                  Supprimer la connexion ?
+                </h3>
                 <p className="text-xs text-zinc-400 truncate max-w-[220px] font-mono mt-0.5">
                   {profileToDelete.name}
                 </p>
@@ -314,6 +322,7 @@ export const Sidebar: React.FC = () => {
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
+                autoFocus
                 onClick={() => setProfileToDelete(null)}
                 className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors"
               >
@@ -333,7 +342,8 @@ export const Sidebar: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </aside>
   );
