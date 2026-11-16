@@ -444,7 +444,10 @@ impl SftpProvider {
         ));
 
         let ssh_config = Arc::new(client::Config {
+            inactivity_timeout: None,
             keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            nodelay: true,
             ..Default::default()
         });
 
