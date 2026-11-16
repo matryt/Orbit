@@ -184,15 +184,10 @@ impl S3Provider {
 impl StorageProvider for S3Provider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
         let prefix = Self::normalize_prefix(path);
-        eprintln!(
-            "[Orbit S3] 🔍 list_dir called: path='{}' -> prefix='{}' in bucket='{}'",
-            path, prefix, self.bucket
-        );
 
         let mut entries = Vec::new();
         let mut seen_dirs = HashSet::new();
         let mut continuation_token = None;
-        let mut page_num = 1;
 
         loop {
             let mut req = self
@@ -207,21 +202,11 @@ impl StorageProvider for S3Provider {
             }
 
             let resp = req.send().await.map_err(|e| {
-                let err_msg = format!(
+                AppError::S3(format!(
                     "Erreur lors du listage du bucket '{}' (prefix: '{}'): {}",
                     self.bucket, prefix, e
-                );
-                eprintln!("[Orbit S3] ❌ list_objects_v2 failed: {}", err_msg);
-                AppError::S3(err_msg)
+                ))
             })?;
-
-            let cp_count = resp.common_prefixes().len();
-            let contents_count = resp.contents().len();
-            let is_truncated = resp.is_truncated().unwrap_or(false);
-            eprintln!(
-                "[Orbit S3] 🔍 list_dir page {}: {} common prefixes, {} contents (truncated={})",
-                page_num, cp_count, contents_count, is_truncated
-            );
 
             // 1. Common prefixes (folders)
             for cp in resp.common_prefixes() {
@@ -231,10 +216,6 @@ impl StorageProvider for S3Provider {
                     let full_path = format!("/{}", clean);
 
                     if seen_dirs.insert(full_path.clone()) {
-                        eprintln!(
-                            "[Orbit S3]   📂 Folder from CommonPrefix: '{}' -> name='{}', path='{}'",
-                            prefix_str, name, full_path
-                        );
                         entries.push(FileEntry {
                             name,
                             path: full_path,
@@ -255,10 +236,6 @@ impl StorageProvider for S3Provider {
                 if let Some(key) = obj.key() {
                     // Ignore folder placeholder objects matching the current prefix itself
                     if key == prefix {
-                        eprintln!(
-                            "[Orbit S3]   ℹ️ Skipping current directory placeholder key='{}'",
-                            key
-                        );
                         continue;
                     }
 
@@ -268,10 +245,6 @@ impl StorageProvider for S3Provider {
                         let full_path = format!("/{}", clean);
 
                         if seen_dirs.insert(full_path.clone()) {
-                            eprintln!(
-                                "[Orbit S3]   📂 Folder from Object Key ending with '/': '{}' -> name='{}', path='{}'",
-                                key, name, full_path
-                            );
                             let modified_at = obj
                                 .last_modified()
                                 .and_then(|dt| dt.to_millis().ok())
@@ -321,37 +294,23 @@ impl StorageProvider for S3Provider {
                 }
             }
 
-            if is_truncated && resp.next_continuation_token().is_some() {
+            if resp.is_truncated().unwrap_or(false) && resp.next_continuation_token().is_some() {
                 continuation_token = resp.next_continuation_token().map(String::from);
-                page_num += 1;
             } else {
                 break;
             }
         }
-
-        eprintln!(
-            "[Orbit S3] 🔍 list_dir finished: returning {} items ({} folders, {} files)",
-            entries.len(),
-            entries.iter().filter(|e| e.is_dir).count(),
-            entries.iter().filter(|e| !e.is_dir).count()
-        );
 
         Ok(entries)
     }
 
     async fn create_dir(&self, path: &str) -> Result<(), AppError> {
         let key = Self::normalize_prefix(path);
-        eprintln!(
-            "[Orbit S3] 📁 create_dir called: path='{}' -> key='{}' in bucket='{}'",
-            path, key, self.bucket
-        );
         if key.is_empty() {
-            eprintln!("[Orbit S3] 📁 create_dir: key is empty, skipping");
             return Ok(());
         }
 
-        match self
-            .client
+        self.client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
@@ -359,20 +318,14 @@ impl StorageProvider for S3Provider {
             .body(ByteStream::from(Vec::new()))
             .send()
             .await
-        {
-            Ok(_) => {
-                eprintln!(
-                    "[Orbit S3] ✅ create_dir succeeded for key='{}' in bucket='{}'",
-                    key, self.bucket
-                );
-                Ok(())
-            }
-            Err(e) => {
-                let err_msg = format!("Impossible de créer le dossier S3 '{}' : {}", key, e);
-                eprintln!("[Orbit S3] ❌ create_dir failed: {}", err_msg);
-                Err(AppError::S3(err_msg))
-            }
-        }
+            .map_err(|e| {
+                AppError::S3(format!(
+                    "Impossible de créer le dossier S3 '{}' : {}",
+                    key, e
+                ))
+            })?;
+
+        Ok(())
     }
 
     async fn delete(&self, path: &str, is_dir: bool) -> Result<(), AppError> {

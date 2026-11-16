@@ -478,25 +478,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   createRemoteFolder: async (folderName: string) => {
     const { activeProfileId, currentPath, refreshRemote } = get();
-    console.log('[OrbitStore] 📁 createRemoteFolder called:', {
-      folderName,
-      currentPath,
-      activeProfileId,
-    });
     if (!folderName.trim()) return;
     const cleanName = folderName.trim().replace(/^\/+/, '');
     const basePath = currentPath === '/' ? '' : currentPath.replace(/\/+$/, '');
     const newPath = `${basePath}/${cleanName}`;
-    console.log('[OrbitStore] 📁 createRemoteFolder computed newPath:', newPath);
-    try {
-      await storageApi.createDir(activeProfileId, newPath);
-      console.log('[OrbitStore] 📁 createRemoteFolder: createDir finished, calling refreshRemote...');
-      await refreshRemote();
-      console.log('[OrbitStore] ✅ createRemoteFolder completed successfully');
-    } catch (err) {
-      console.error('[OrbitStore] ❌ createRemoteFolder error:', err);
-      throw err;
-    }
+    await storageApi.createDir(activeProfileId, newPath);
+    await refreshRemote();
   },
 
   renameRemoteItem: async (oldPath: string, newName: string) => {
