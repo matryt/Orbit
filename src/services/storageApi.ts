@@ -208,24 +208,39 @@ export const storageApi = {
   },
 
   async listDir(profileId: string | undefined, path: string): Promise<FileEntry[]> {
+    console.log('[StorageAPI] 🔍 listDir called:', { profileId, path });
     if (!isTauri()) {
       return MOCK_REMOTE_FILES[path] || [];
     }
-    return await invoke<FileEntry[]>('storage_list_dir', {
-      profileId: profileId || null,
-      path,
-    });
+    try {
+      const res = await invoke<FileEntry[]>('storage_list_dir', {
+        profileId: profileId || null,
+        path,
+      });
+      console.log('[StorageAPI] 🔍 listDir returned:', res.length, 'entries for path:', path, res);
+      return res;
+    } catch (err) {
+      console.error('[StorageAPI] ❌ listDir error for path:', path, err);
+      throw err;
+    }
   },
 
   async createDir(profileId: string | undefined, path: string): Promise<void> {
+    console.log('[StorageAPI] 📁 createDir called:', { profileId, path });
     if (!isTauri()) {
       console.log('[Mock] createDir:', path);
       return;
     }
-    await invoke('storage_create_dir', {
-      profileId: profileId || null,
-      path,
-    });
+    try {
+      await invoke('storage_create_dir', {
+        profileId: profileId || null,
+        path,
+      });
+      console.log('[StorageAPI] ✅ createDir succeeded for path:', path);
+    } catch (err) {
+      console.error('[StorageAPI] ❌ createDir error for path:', path, err);
+      throw err;
+    }
   },
 
   async deleteFile(profileId: string | undefined, path: string, isDir: boolean): Promise<void> {

@@ -260,8 +260,23 @@ pub async fn storage_create_dir(
     path: String,
     state: State<'_, SessionManager>,
 ) -> Result<(), AppError> {
+    eprintln!(
+        "[Tauri Command] 📁 storage_create_dir: profile_id={:?}, path='{}'",
+        profile_id, path
+    );
     let provider = state.get_provider(profile_id.as_deref()).await?;
-    provider.create_dir(&path).await
+    let res = provider.create_dir(&path).await;
+    match &res {
+        Ok(_) => eprintln!(
+            "[Tauri Command] ✅ storage_create_dir succeeded for path='{}'",
+            path
+        ),
+        Err(e) => eprintln!(
+            "[Tauri Command] ❌ storage_create_dir failed for path='{}': {}",
+            path, e
+        ),
+    }
+    res
 }
 
 #[tauri::command]
