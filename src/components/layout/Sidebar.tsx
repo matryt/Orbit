@@ -204,7 +204,7 @@ export const Sidebar: React.FC = () => {
                         e.stopPropagation();
                         setMenuOpenProfileId(isMenuOpen ? null : profile.id);
                       }}
-                      className={`p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-all ${
+                      className={`p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-all focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-white/20 ${
                         isMenuOpen ? 'opacity-100 bg-white/10 text-white' : 'opacity-0 group-hover:opacity-100'
                       }`}
                       title="Options de la connexion"
