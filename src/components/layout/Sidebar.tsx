@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { APP_VERSION } from '../../version';
+import { ConnectionProfile } from '../../types';
 import {
   Plus,
   Download,
@@ -33,6 +34,7 @@ export const Sidebar: React.FC = () => {
   } = useOrbitStore();
 
   const [menuOpenProfileId, setMenuOpenProfileId] = useState<string | null>(null);
+  const [profileToDelete, setProfileToDelete] = useState<ConnectionProfile | null>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
 
   // Close context menu on outside click or Escape
@@ -46,6 +48,7 @@ export const Sidebar: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setMenuOpenProfileId(null);
+        setProfileToDelete(null);
       }
     };
 
@@ -232,14 +235,12 @@ export const Sidebar: React.FC = () => {
                       type="button"
                       onClick={() => {
                         setMenuOpenProfileId(null);
-                        if (window.confirm(`Supprimer la connexion "${profile.name}" ?`)) {
-                          deleteProfile(profile.id);
-                        }
+                        setProfileToDelete(profile);
                       }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-red-500/10 text-red-400 hover:text-red-300 transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                      <span>Supprimer</span>
+                      <span>Supprimer...</span>
                     </button>
                   </div>
                 )}
@@ -286,6 +287,54 @@ export const Sidebar: React.FC = () => {
           <span className="text-[10px] text-zinc-600 font-mono">Orbit</span>
         </div>
       </div>
+
+      {/* Modal Confirmation Suppression Profil */}
+      {profileToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#161926] border border-red-500/30 rounded-xl shadow-2xl p-5 text-zinc-200"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400 flex-shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-white">Supprimer la connexion ?</h3>
+                <p className="text-xs text-zinc-400 truncate max-w-[220px] font-mono mt-0.5">
+                  {profileToDelete.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-400 mb-4 bg-white/5 p-2.5 rounded-lg border border-white/5">
+              Êtes-vous sûr de vouloir supprimer ce profil ? Les identifiants associés stockés dans le trousseau système seront également effacés.
+            </p>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setProfileToDelete(null)}
+                className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const target = profileToDelete;
+                  setProfileToDelete(null);
+                  await deleteProfile(target.id);
+                }}
+                className="px-3.5 py-1.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm shadow-red-900/50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Supprimer</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   );
 };
