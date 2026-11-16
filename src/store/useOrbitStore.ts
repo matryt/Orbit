@@ -156,7 +156,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       remoteNavigationError: null,
     });
 
-    if (profile && profile.type === 'sftp') {
+    if (profile && (profile.type === 'sftp' || profile.type === 's3')) {
       await get().connectProfile(id);
     } else {
       const files = MOCK_REMOTE_FILES['/'] || [];
@@ -187,7 +187,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       };
     });
 
-    if (profile.type === 'sftp') {
+    if (profile.type === 'sftp' || profile.type === 's3') {
       await get().connectProfile(profile.id, secret);
     }
   },
@@ -210,7 +210,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       profiles: state.profiles.map((p) => (p.id === profile.id ? profile : p)),
     }));
 
-    if (get().activeProfileId === profile.id && profile.type === 'sftp') {
+    if (get().activeProfileId === profile.id && (profile.type === 'sftp' || profile.type === 's3')) {
       await get().connectProfile(profile.id, secret);
     }
   },
@@ -374,7 +374,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     });
 
     try {
-      if (profile && profile.type === 'sftp' && profile.status === 'connected') {
+      if (profile && (profile.type === 'sftp' || profile.type === 's3') && profile.status === 'connected') {
         const liveFiles = await storageApi.listDir(activeProfileId, path);
         if (remoteNavGen !== reqGen) return;
         set({
