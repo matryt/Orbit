@@ -310,6 +310,10 @@ pub async fn storage_upload_file(
     provider
         .upload_file(path_buf, remote_path, progress_tx)
         .await
+        .map_err(|e| {
+            eprintln!("[Tauri Command] ❌ storage_upload_file error: {:?}", e);
+            e
+        })
 }
 
 #[tauri::command]

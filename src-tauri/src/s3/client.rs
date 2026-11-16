@@ -619,10 +619,10 @@ impl StorageProvider for S3Provider {
             status: "transferring".to_string(),
         });
 
-        const SINGLE_PUT_LIMIT: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
-        const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+        const MULTIPART_THRESHOLD: u64 = 32 * 1024 * 1024; // 32 MB
+        const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
-        if total_bytes > SINGLE_PUT_LIMIT {
+        if total_bytes > MULTIPART_THRESHOLD {
             let multipart = self
                 .client
                 .create_multipart_upload()
@@ -631,6 +631,10 @@ impl StorageProvider for S3Provider {
                 .send()
                 .await
                 .map_err(|e| {
+                    eprintln!(
+                        "[Orbit S3] ❌ multipart init failed for key='{}' in bucket='{}': {}",
+                        key, self.bucket, e
+                    );
                     AppError::S3(format!("Erreur d'initialisation multipart S3 : {}", e))
                 })?;
 
@@ -680,6 +684,10 @@ impl StorageProvider for S3Provider {
                         .send()
                         .await
                         .map_err(|e| {
+                            eprintln!(
+                                "[Orbit S3] ❌ upload_part {} failed for key='{}': {}",
+                                part_number, key, e
+                            );
                             AppError::S3(format!(
                                 "Erreur d'envoi de la part {} : {}",
                                 part_number, e
@@ -743,11 +751,18 @@ impl StorageProvider for S3Provider {
                 .multipart_upload(completed_upload)
                 .send()
                 .await
-                .map_err(|e| AppError::S3(format!("Erreur de finalisation multipart : {}", e)))?;
+                .map_err(|e| {
+                    eprintln!(
+                        "[Orbit S3] ❌ complete_multipart failed for key='{}': {}",
+                        key, e
+                    );
+                    AppError::S3(format!("Erreur de finalisation multipart : {}", e))
+                })?;
         } else {
-            let body = ByteStream::from_path(&local_path)
+            let data = tokio::fs::read(&local_path)
                 .await
                 .map_err(|e| AppError::Io(format!("Erreur de lecture du fichier local : {}", e)))?;
+            let body = ByteStream::from(data);
 
             self.client
                 .put_object()
@@ -757,7 +772,13 @@ impl StorageProvider for S3Provider {
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| AppError::S3(format!("Erreur d'envoi vers S3 : {}", e)))?;
+                .map_err(|e| {
+                    eprintln!(
+                        "[Orbit S3] ❌ put_object failed for key='{}' in bucket='{}': {}",
+                        key, self.bucket, e
+                    );
+                    AppError::S3(format!("Erreur d'envoi vers S3 : {}", e))
+                })?;
         }
 
         let _ = progress_tx.send(TransferProgress {

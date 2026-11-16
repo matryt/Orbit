@@ -768,9 +768,14 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       );
       await get().refreshRemote();
     } catch (err: any) {
+      console.error('[Orbit] Upload failed:', err);
+      const errorMsg =
+        typeof err === 'string'
+          ? err
+          : err?.message || 'Erreur lors du transfert';
       set((state) => ({
         transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
+          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
         ),
       }));
     }
@@ -821,10 +826,18 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           }));
         }
       );
+      if (get().isDualPane) {
+        await get().refreshLocal();
+      }
     } catch (err: any) {
+      console.error('[Orbit] Download failed:', err);
+      const errorMsg =
+        typeof err === 'string'
+          ? err
+          : err?.message || 'Erreur lors du transfert';
       set((state) => ({
         transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
+          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
         ),
       }));
     }

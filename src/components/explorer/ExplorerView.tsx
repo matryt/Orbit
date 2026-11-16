@@ -157,38 +157,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     }
   }, [isModalActive]);
 
-  // Listen to OS file drops (e.g. from macOS Finder / Windows Explorer) into the remote pane
-  useEffect(() => {
-    if (!isTauri() || isLocal) return;
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-        unlisten = await getCurrentWebview().onDragDropEvent(async (event) => {
-          if (event.payload.type === 'drop') {
-            const paths = event.payload.paths;
-            if (paths && paths.length > 0) {
-              for (const filePath of paths) {
-                const fileName = filePath.split(/[/\\]/).pop() || 'file';
-                const remoteTarget =
-                  currentPath === '/'
-                    ? `/${fileName}`
-                    : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
-                await uploadFile(filePath, remoteTarget, fileName);
-              }
-            }
-          }
-        });
-      } catch (err) {
-        console.error('Failed to setup Tauri drag-drop listener:', err);
-      }
-    })();
-
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, [currentPath, isLocal, uploadFile]);
-
   // Navigate up one folder
   const handleGoUp = () => {
     if (currentPath === '/' || currentPath === '' || currentPath === '\\') return;
@@ -433,6 +401,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   return (
     <div
       ref={containerRef}
+      data-pane={isLocal ? 'local' : 'remote'}
+      data-current-path={currentPath}
       tabIndex={0}
       onFocus={() => setActivePane(isLocal ? 'local' : 'remote')}
       onClick={() => setActivePane(isLocal ? 'local' : 'remote')}
@@ -645,7 +615,17 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         onDrop={async (e) => {
           e.preventDefault();
           setIsDragOver(false);
-          const item = activeDragItem;
+          let item = activeDragItem;
+          if (!item) {
+            try {
+              const raw = e.dataTransfer.getData('application/orbit-item');
+              if (raw) {
+                item = JSON.parse(raw);
+              }
+            } catch (err) {
+              console.error('Failed to parse drag item:', err);
+            }
+          }
           activeDragItem = null;
 
           if (item && !item.file.is_dir) {
@@ -749,14 +729,56 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             return (
               <div
                 key={file.path}
+                data-folder-path={file.is_dir ? file.path : undefined}
                 draggable={!file.is_dir}
                 onDragStart={(e) => {
-                  activeDragItem = { source: isLocal ? 'local' : 'remote', file };
+                  const dragData: { source: 'local' | 'remote'; file: FileEntry } = {
+                    source: isLocal ? 'local' : 'remote',
+                    file,
+                  };
+                  activeDragItem = dragData;
                   e.dataTransfer.effectAllowed = 'copy';
+                  e.dataTransfer.setData(
+                    'application/orbit-item',
+                    JSON.stringify(dragData)
+                  );
                   e.dataTransfer.setData('text/plain', file.name);
                 }}
                 onDragEnd={() => {
+                  setTimeout(() => {
+                    activeDragItem = null;
+                  }, 600);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                }}
+                onDrop={async (e) => {
+                  if (!file.is_dir) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsDragOver(false);
+
+                  let item = activeDragItem;
+                  if (!item) {
+                    try {
+                      const raw = e.dataTransfer.getData('application/orbit-item');
+                      if (raw) item = JSON.parse(raw);
+                    } catch {
+                      // ignore
+                    }
+                  }
                   activeDragItem = null;
+
+                  if (item && !item.file.is_dir) {
+                    if (item.source === 'local' && !isLocal) {
+                      const remoteTarget = `${file.path.replace(/\/+$/, '')}/${item.file.name}`;
+                      await uploadFile(item.file.path, remoteTarget, item.file.name);
+                    } else if (item.source === 'remote' && isLocal) {
+                      const localTarget = `${file.path.replace(/[/\\]+$/, '')}/${item.file.name}`;
+                      await downloadFile(item.file.path, localTarget, item.file.name);
+                    }
+                  }
                 }}
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}

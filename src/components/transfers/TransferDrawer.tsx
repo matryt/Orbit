@@ -12,6 +12,7 @@ import {
   Cloud,
   Server,
   Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const TransferDrawer: React.FC = () => {
@@ -134,6 +135,17 @@ export const TransferDrawer: React.FC = () => {
                         <CheckCircle2 className="w-3 h-3" /> Terminé
                       </span>
                     )}
+                    {tx.status === 'failed' && (
+                      <span
+                        className="flex items-center gap-1 text-red-400 font-medium"
+                        title={tx.error}
+                      >
+                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                        <span className="truncate max-w-[200px]">
+                          Échec{tx.error ? ` : ${tx.error}` : ''}
+                        </span>
+                      </span>
+                    )}
                     {tx.status === 'paused' && (
                       <span className="text-amber-400 font-medium">En pause</span>
                     )}
@@ -190,6 +202,8 @@ export const TransferDrawer: React.FC = () => {
                   className={`h-full transition-all duration-300 ${
                     tx.status === 'completed'
                       ? 'bg-emerald-500'
+                      : tx.status === 'failed'
+                      ? 'bg-red-500'
                       : tx.status === 'paused'
                       ? 'bg-amber-500'
                       : tx.status === 'cancelled'
