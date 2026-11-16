@@ -8,6 +8,7 @@ use russh_sftp::client::SftpSession;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -95,11 +96,27 @@ pub fn check_cert_authority(
     Ok(false)
 }
 
+struct PromptGuard<'a>(&'a AtomicBool);
+
+impl<'a> PromptGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+impl<'a> Drop for PromptGuard<'a> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct SshHandler {
     host: String,
     port: u16,
     key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
     prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+    prompt_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,11 +149,28 @@ impl SshHandler {
         key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
     ) -> Self {
+        Self::with_prompt_tracker(
+            host,
+            port,
+            key_status,
+            prompt_handler,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub fn with_prompt_tracker(
+        host: String,
+        port: u16,
+        key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+        prompt_active: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             host,
             port,
             key_status,
             prompt_handler,
+            prompt_active,
         }
     }
 }
@@ -241,7 +275,9 @@ impl Handler for SshHandler {
                         changed_line: None,
                     };
 
+                    let _guard = PromptGuard::new(&self.prompt_active);
                     let decision = handler.prompt(req).await;
+                    drop(_guard);
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
                             let mut status = key_status.lock().await;
@@ -290,7 +326,9 @@ impl Handler for SshHandler {
                         changed_line: Some(line),
                     };
 
+                    let _guard = PromptGuard::new(&self.prompt_active);
                     let decision = handler.prompt(req).await;
+                    drop(_guard);
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
                             let mut status = key_status.lock().await;
@@ -459,15 +497,39 @@ impl SftpProvider {
         ));
 
         let key_status = Arc::new(tokio::sync::Mutex::new(None));
-        let handler = SshHandler::new(
+        let prompt_active = Arc::new(AtomicBool::new(false));
+        let handler = SshHandler::with_prompt_tracker(
             config.host.clone(),
             config.port,
             Arc::clone(&key_status),
             prompt_handler,
+            Arc::clone(&prompt_active),
         );
 
         let connect_fut = client::connect(ssh_config, &addr, handler);
-        let mut handle = match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
+        tokio::pin!(connect_fut);
+
+        let mut network_elapsed = Duration::ZERO;
+        let step = Duration::from_millis(200);
+        let timeout_limit = Duration::from_secs(15);
+
+        let connect_res = loop {
+            tokio::select! {
+                res = &mut connect_fut => {
+                    break Ok(res);
+                }
+                _ = tokio::time::sleep(step) => {
+                    if !prompt_active.load(Ordering::SeqCst) {
+                        network_elapsed += step;
+                        if network_elapsed >= timeout_limit {
+                            break Err(());
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut handle = match connect_res {
             Ok(Ok(h)) => {
                 logs.push(format!(
                     "[{}] Connexion TCP socket établie avec succès.",
@@ -1879,5 +1941,16 @@ docker:x:999:ubuntu,mathieu
             parse_sudo_probe_output("sudo: a password is required"),
             SudoCapability::None
         );
+    }
+
+    #[test]
+    fn test_prompt_guard_lifecycle() {
+        let flag = AtomicBool::new(false);
+        assert!(!flag.load(Ordering::SeqCst));
+        {
+            let _guard = PromptGuard::new(&flag);
+            assert!(flag.load(Ordering::SeqCst));
+        }
+        assert!(!flag.load(Ordering::SeqCst));
     }
 }
