@@ -37,20 +37,25 @@ export const Sidebar: React.FC = () => {
   const [menuOpenProfileId, setMenuOpenProfileId] = useState<string | null>(null);
   const [profileToDelete, setProfileToDelete] = useState<ConnectionProfile | null>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
-  const lastActiveElementRef = useRef<HTMLElement | null>(null);
+  const optionsButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const triggerButtonRef = useRef<HTMLElement | null>(null);
+  const newConnectionButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
 
   // Manage focus when confirmation modal opens and closes
   useEffect(() => {
     if (profileToDelete) {
-      lastActiveElementRef.current = document.activeElement as HTMLElement | null;
       requestAnimationFrame(() => {
         cancelButtonRef.current?.focus();
       });
-    } else if (lastActiveElementRef.current) {
-      lastActiveElementRef.current.focus();
-      lastActiveElementRef.current = null;
+    } else if (triggerButtonRef.current) {
+      if (document.contains(triggerButtonRef.current)) {
+        triggerButtonRef.current.focus();
+      } else {
+        newConnectionButtonRef.current?.focus();
+      }
+      triggerButtonRef.current = null;
     }
   }, [profileToDelete]);
 
@@ -187,6 +192,13 @@ export const Sidebar: React.FC = () => {
 
                     {/* 3-dots action button */}
                     <button
+                      ref={(el) => {
+                        if (el) {
+                          optionsButtonsRef.current.set(profile.id, el);
+                        } else {
+                          optionsButtonsRef.current.delete(profile.id);
+                        }
+                      }}
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -251,6 +263,7 @@ export const Sidebar: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
+                        triggerButtonRef.current = optionsButtonsRef.current.get(profile.id) || null;
                         setMenuOpenProfileId(null);
                         setProfileToDelete(profile);
                       }}
@@ -270,6 +283,7 @@ export const Sidebar: React.FC = () => {
       {/* Bottom actions */}
       <div className="p-3 border-t border-border-subtle bg-surface-muted/50 flex flex-col gap-1.5">
         <button
+          ref={newConnectionButtonRef}
           onClick={() => setNewConnectionModalOpen(true)}
           className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-md bg-white/[0.06] hover:bg-white/[0.1] text-xs font-medium text-zinc-200 hover:text-white border border-border-subtle transition-all"
         >
@@ -364,8 +378,10 @@ export const Sidebar: React.FC = () => {
                 type="button"
                 onClick={async () => {
                   const target = profileToDelete;
+                  triggerButtonRef.current = null;
                   setProfileToDelete(null);
                   await deleteProfile(target.id);
+                  newConnectionButtonRef.current?.focus();
                 }}
                 className="px-3.5 py-1.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm shadow-red-900/50"
               >
