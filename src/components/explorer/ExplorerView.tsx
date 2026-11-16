@@ -50,6 +50,9 @@ interface ContextMenuState {
   file: FileEntry | null;
 }
 
+// Module-level drag state shared reliably between local and remote ExplorerView panes
+let activeDragItem: { source: 'local' | 'remote'; file: FileEntry } | null = null;
+
 export const ExplorerView: React.FC<ExplorerViewProps> = ({
   files,
   currentPath,
@@ -76,7 +79,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     downloadFile,
     uploadFile,
     isDualPane,
-    localPath,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
     searchQuery,
@@ -339,10 +341,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleSendToRemote = async (file: FileEntry) => {
     setContextMenu(null);
     if (file.is_dir) return;
+    const { currentPath: remoteCurrentPath } = useOrbitStore.getState();
     const remoteTarget =
-      currentPath === '/'
+      remoteCurrentPath === '/'
         ? `/${file.name}`
-        : `${currentPath.replace(/\/+$/, '')}/${file.name}`;
+        : `${remoteCurrentPath.replace(/\/+$/, '')}/${file.name}`;
     await uploadFile(file.path, remoteTarget, file.name);
   };
 
@@ -350,7 +353,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleDownloadToLocal = async (file: FileEntry) => {
     setContextMenu(null);
     if (file.is_dir) return;
-    const target = `${localPath.replace(/[/\\]+$/, '')}/${file.name}`;
+    const { localPath: storeLocalPath } = useOrbitStore.getState();
+    const target = `${storeLocalPath.replace(/[/\\]+$/, '')}/${file.name}`;
     await downloadFile(file.path, target, file.name);
   };
 
@@ -641,22 +645,19 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         onDrop={async (e) => {
           e.preventDefault();
           setIsDragOver(false);
-          const dataStr = e.dataTransfer.getData('application/json');
-          if (dataStr) {
-            try {
-              const data = JSON.parse(dataStr);
-              if (data.source === 'local' && !isLocal && !data.file.is_dir) {
-                const remoteTarget =
-                  currentPath === '/'
-                    ? `/${data.file.name}`
-                    : `${currentPath.replace(/\/+$/, '')}/${data.file.name}`;
-                await uploadFile(data.file.path, remoteTarget, data.file.name);
-              } else if (data.source === 'remote' && isLocal && !data.file.is_dir) {
-                const localTarget = `${currentPath.replace(/[/\\]+$/, '')}/${data.file.name}`;
-                await downloadFile(data.file.path, localTarget, data.file.name);
-              }
-            } catch (err) {
-              console.error('Drop error:', err);
+          const item = activeDragItem;
+          activeDragItem = null;
+
+          if (item && !item.file.is_dir) {
+            if (item.source === 'local' && !isLocal) {
+              const remoteTarget =
+                currentPath === '/'
+                  ? `/${item.file.name}`
+                  : `${currentPath.replace(/\/+$/, '')}/${item.file.name}`;
+              await uploadFile(item.file.path, remoteTarget, item.file.name);
+            } else if (item.source === 'remote' && isLocal) {
+              const localTarget = `${currentPath.replace(/[/\\]+$/, '')}/${item.file.name}`;
+              await downloadFile(item.file.path, localTarget, item.file.name);
             }
           }
         }}
@@ -750,10 +751,12 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 key={file.path}
                 draggable={!file.is_dir}
                 onDragStart={(e) => {
-                  e.dataTransfer.setData(
-                    'application/json',
-                    JSON.stringify({ source: isLocal ? 'local' : 'remote', file })
-                  );
+                  activeDragItem = { source: isLocal ? 'local' : 'remote', file };
+                  e.dataTransfer.effectAllowed = 'copy';
+                  e.dataTransfer.setData('text/plain', file.name);
+                }}
+                onDragEnd={() => {
+                  activeDragItem = null;
                 }}
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}

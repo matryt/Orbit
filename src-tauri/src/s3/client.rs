@@ -753,6 +753,7 @@ impl StorageProvider for S3Provider {
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&key)
+                .content_length(total_bytes as i64)
                 .body(body)
                 .send()
                 .await
