@@ -37,6 +37,22 @@ export const Sidebar: React.FC = () => {
   const [menuOpenProfileId, setMenuOpenProfileId] = useState<string | null>(null);
   const [profileToDelete, setProfileToDelete] = useState<ConnectionProfile | null>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
+  const lastActiveElementRef = useRef<HTMLElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Manage focus when confirmation modal opens and closes
+  useEffect(() => {
+    if (profileToDelete) {
+      lastActiveElementRef.current = document.activeElement as HTMLElement | null;
+      requestAnimationFrame(() => {
+        cancelButtonRef.current?.focus();
+      });
+    } else if (lastActiveElementRef.current) {
+      lastActiveElementRef.current.focus();
+      lastActiveElementRef.current = null;
+    }
+  }, [profileToDelete]);
 
   // Close context menu on outside click or Escape
   useEffect(() => {
@@ -296,6 +312,21 @@ export const Sidebar: React.FC = () => {
           aria-modal="true"
           aria-labelledby="delete-profile-dialog-title"
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+          onKeyDown={(e) => {
+            if (e.key === 'Tab') {
+              if (e.shiftKey) {
+                if (document.activeElement === cancelButtonRef.current) {
+                  e.preventDefault();
+                  confirmButtonRef.current?.focus();
+                }
+              } else {
+                if (document.activeElement === confirmButtonRef.current) {
+                  e.preventDefault();
+                  cancelButtonRef.current?.focus();
+                }
+              }
+            }
+          }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -321,14 +352,15 @@ export const Sidebar: React.FC = () => {
 
             <div className="flex items-center justify-end gap-2">
               <button
+                ref={cancelButtonRef}
                 type="button"
-                autoFocus
                 onClick={() => setProfileToDelete(null)}
                 className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors"
               >
                 Annuler
               </button>
               <button
+                ref={confirmButtonRef}
                 type="button"
                 onClick={async () => {
                   const target = profileToDelete;
