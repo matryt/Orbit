@@ -466,8 +466,9 @@ impl SftpProvider {
             prompt_handler,
         );
 
-        let mut handle = match client::connect(ssh_config, &addr, handler).await {
-            Ok(h) => {
+        let connect_fut = client::connect(ssh_config, &addr, handler);
+        let mut handle = match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
+            Ok(Ok(h)) => {
                 logs.push(format!(
                     "[{}] Connexion TCP socket établie avec succès.",
                     now()
@@ -514,7 +515,7 @@ impl SftpProvider {
                 }
                 h
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let recorded_status = key_status.lock().await.clone();
                 if let Some(HostKeyStatus::Rejected(ref reason)) = recorded_status {
                     logs.push(format!("[{}] ❌ Connexion annulée : {reason}", now()));
@@ -555,6 +556,17 @@ impl SftpProvider {
                     "[{}] ℹ️ Conseil: Vérifiez l'adresse IP, le port {} et assurez-vous que le serveur SSH est en écoute.",
                     now(),
                     config.port
+                ));
+                return Err((AppError::Ssh(err_msg), logs));
+            }
+            Err(_) => {
+                let err_msg = format!(
+                    "Délai d'attente dépassé (timeout 15s) lors de la négociation SSH avec {addr}"
+                );
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                logs.push(format!(
+                    "[{}] ℹ️ Conseil: Le serveur a accepté la connexion TCP mais n'a pas répondu à l'initialisation du protocole SSH.",
+                    now()
                 ));
                 return Err((AppError::Ssh(err_msg), logs));
             }
