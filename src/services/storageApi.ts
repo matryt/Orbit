@@ -144,7 +144,14 @@ export const storageApi = {
 
   async connectS3(params: S3ConnectParams): Promise<SftpSessionInfo> {
     if (!isTauri()) {
-      console.log('[Mock] Connecting S3:', params);
+      console.log('[Mock] Connecting S3:', {
+        profile_id: params.profile_id,
+        bucket: params.bucket,
+        endpoint: params.endpoint,
+        region: params.region,
+        hasAccessKey: Boolean(params.accessKey),
+        hasSecretKey: Boolean(params.secretKey),
+      });
       return {
         profile_id: params.profile_id,
         is_elevated: false,

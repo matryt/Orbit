@@ -417,6 +417,14 @@ export const NewConnectionModal: React.FC = () => {
                   placeholder="https://<account_id>.r2.cloudflarestorage.com"
                   className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 font-mono"
                 />
+                {endpoint.trim().startsWith('http://') &&
+                  !endpoint.includes('localhost') &&
+                  !endpoint.includes('127.0.0.1') &&
+                  !endpoint.includes('::1') && (
+                    <p className="mt-1 text-[11px] text-amber-400">
+                      ⚠️ Attention : cet endpoint utilise HTTP non chiffré. Vos identifiants et données transiteront en clair.
+                    </p>
+                  )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">

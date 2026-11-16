@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -6,6 +7,7 @@ use aws_config::Region;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use tauri::ipc::Channel;
 use tokio::io::AsyncWriteExt;
 
@@ -45,24 +47,18 @@ impl S3Provider {
                     } else {
                         trimmed.to_string()
                     };
-                conf_builder = conf_builder.endpoint_url(endpoint_url);
+
+                // Remove trailing slash to avoid malformed AWS URLs
+                let clean_ep = endpoint_url.trim_end_matches('/').to_string();
+                conf_builder = conf_builder.endpoint_url(clean_ep);
+
+                // Most S3-compatible providers (MinIO, R2, Scaleway, Wasabi) require path-style addressing
+                conf_builder = conf_builder.force_path_style(true);
             }
         }
 
-        // Force path style is recommended for MinIO, LocalStack, and generic S3-compatible endpoints
-        let force_path_style = config.force_path_style.unwrap_or_else(|| {
-            if let Some(ref ep) = config.endpoint {
-                ep.contains("localhost") || ep.contains("127.0.0.1") || ep.contains("minio")
-            } else {
-                false
-            }
-        });
-
-        if force_path_style {
-            conf_builder = conf_builder.force_path_style(true);
-        }
-
-        let client = Client::from_conf(conf_builder.build());
+        let sdk_config = conf_builder.build();
+        let client = Client::from_conf(sdk_config);
 
         Ok(Self {
             client,
@@ -70,6 +66,10 @@ impl S3Provider {
             endpoint: config.endpoint,
             region: region_str,
         })
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     pub fn bucket(&self) -> &str {
@@ -82,6 +82,19 @@ impl S3Provider {
 
     pub fn region(&self) -> &str {
         &self.region
+    }
+
+    pub async fn validate_access(&self) -> Result<(), AppError> {
+        self.client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .max_keys(1)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::S3(format!("Échec d'accès au bucket '{}' : {}", self.bucket, e))
+            })?;
+        Ok(())
     }
 
     pub async fn test_connection(
@@ -102,6 +115,17 @@ impl S3Provider {
             config.region.as_deref().unwrap_or("auto")
         ));
         if let Some(ref ep) = config.endpoint {
+            if ep.starts_with("http://") {
+                let is_loopback =
+                    ep.contains("localhost") || ep.contains("127.0.0.1") || ep.contains("[::1]");
+                if !is_loopback {
+                    logs.push(format!(
+                        "[{}] ⚠️ Avertissement : endpoint HTTP distant non chiffré ('{}'). Les données transitent en clair.",
+                        now_fmt(),
+                        ep
+                    ));
+                }
+            }
             logs.push(format!("[{}] Endpoint personnalisé : '{}'", now_fmt(), ep));
         } else {
             logs.push(format!("[{}] Endpoint : AWS S3 Standard", now_fmt()));
@@ -125,14 +149,7 @@ impl S3Provider {
         ));
 
         // Test listing with max_keys=1 to verify access
-        match provider
-            .client
-            .list_objects_v2()
-            .bucket(&provider.bucket)
-            .max_keys(1)
-            .send()
-            .await
-        {
+        match provider.validate_access().await {
             Ok(_) => {
                 logs.push(format!(
                     "[{}] ✅ Accès au bucket '{}' validé avec succès !",
@@ -142,21 +159,19 @@ impl S3Provider {
                 Ok((provider, logs))
             }
             Err(e) => {
-                let err_msg = format!("Échec d'accès au bucket '{}' : {}", provider.bucket, e);
+                let err_msg = e.to_string();
                 logs.push(format!("[{}] ❌ {}", now_fmt(), err_msg));
-                Err((AppError::S3(err_msg), logs))
+                Err((e, logs))
             }
         }
     }
 
     fn normalize_key(path: &str) -> String {
-        path.trim_start_matches('/')
-            .trim_start_matches('\\')
-            .to_string()
+        path.trim_start_matches('/').to_string()
     }
 
     fn normalize_prefix(path: &str) -> String {
-        let trimmed = path.trim_matches('/').trim_matches('\\');
+        let trimmed = path.trim_start_matches('/').trim_end_matches('/');
         if trimmed.is_empty() {
             String::new()
         } else {
@@ -170,76 +185,119 @@ impl StorageProvider for S3Provider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
         let prefix = Self::normalize_prefix(path);
 
-        let resp = self
-            .client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&prefix)
-            .delimiter("/")
-            .send()
-            .await
-            .map_err(|e| {
+        let mut entries = Vec::new();
+        let mut seen_dirs = HashSet::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix)
+                .delimiter("/");
+
+            if let Some(token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.map_err(|e| {
                 AppError::S3(format!(
                     "Erreur lors du listage du bucket '{}' (prefix: '{}'): {}",
                     self.bucket, prefix, e
                 ))
             })?;
 
-        let mut entries = Vec::new();
+            // 1. Common prefixes (folders)
+            for cp in resp.common_prefixes() {
+                if let Some(prefix_str) = cp.prefix() {
+                    let clean = prefix_str.trim_end_matches('/');
+                    let name = clean.split('/').next_back().unwrap_or(clean).to_string();
+                    let full_path = format!("/{}", clean);
 
-        // 1. Common prefixes (folders)
-        for cp in resp.common_prefixes() {
-            if let Some(prefix_str) = cp.prefix() {
-                let clean = prefix_str.trim_end_matches('/');
-                let name = clean.split('/').next_back().unwrap_or(clean).to_string();
-                let full_path = format!("/{}", prefix_str);
-
-                entries.push(FileEntry {
-                    name,
-                    path: full_path,
-                    is_dir: true,
-                    size: 0,
-                    modified_at: chrono::Utc::now().to_rfc3339(),
-                    permissions: Some("drwxr-xr-x".into()),
-                    owner: None,
-                    group: None,
-                    etag: None,
-                });
-            }
-        }
-
-        // 2. Objects (files)
-        for obj in resp.contents() {
-            if let Some(key) = obj.key() {
-                // Ignore folder placeholder objects matching the current prefix
-                if key == prefix || key.ends_with('/') {
-                    continue;
+                    if seen_dirs.insert(full_path.clone()) {
+                        entries.push(FileEntry {
+                            name,
+                            path: full_path,
+                            is_dir: true,
+                            size: 0,
+                            modified_at: chrono::Utc::now().to_rfc3339(),
+                            permissions: Some("drwxr-xr-x".into()),
+                            owner: None,
+                            group: None,
+                            etag: None,
+                        });
+                    }
                 }
+            }
 
-                let name = key.split('/').next_back().unwrap_or(key).to_string();
-                let full_path = format!("/{}", key);
-                let size = obj.size().unwrap_or(0) as u64;
+            // 2. Objects (files & directory placeholders)
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    // Ignore folder placeholder objects matching the current prefix itself
+                    if key == prefix {
+                        continue;
+                    }
 
-                let modified_at = obj
-                    .last_modified()
-                    .and_then(|dt| dt.to_millis().ok())
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_default();
+                    if key.ends_with('/') {
+                        let clean = key.trim_end_matches('/');
+                        let name = clean.split('/').next_back().unwrap_or(clean).to_string();
+                        let full_path = format!("/{}", clean);
 
-                let etag = obj.e_tag().map(|e| e.trim_matches('"').to_string());
+                        if seen_dirs.insert(full_path.clone()) {
+                            let modified_at = obj
+                                .last_modified()
+                                .and_then(|dt| dt.to_millis().ok())
+                                .and_then(chrono::DateTime::from_timestamp_millis)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_default();
 
-                entries.push(FileEntry {
-                    name,
-                    path: full_path,
-                    is_dir: false,
-                    size,
-                    modified_at,
-                    permissions: Some("-rw-r--r--".into()),
-                    owner: None,
-                    group: None,
-                    etag,
-                });
+                            entries.push(FileEntry {
+                                name,
+                                path: full_path,
+                                is_dir: true,
+                                size: 0,
+                                modified_at,
+                                permissions: Some("drwxr-xr-x".into()),
+                                owner: None,
+                                group: None,
+                                etag: None,
+                            });
+                        }
+                        continue;
+                    }
+
+                    let name = key.split('/').next_back().unwrap_or(key).to_string();
+                    let full_path = format!("/{}", key);
+                    let size = obj.size().unwrap_or(0) as u64;
+
+                    let modified_at = obj
+                        .last_modified()
+                        .and_then(|dt| dt.to_millis().ok())
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default();
+
+                    let etag = obj.e_tag().map(|e| e.trim_matches('"').to_string());
+
+                    entries.push(FileEntry {
+                        name,
+                        path: full_path,
+                        is_dir: false,
+                        size,
+                        modified_at,
+                        permissions: Some("-rw-r--r--".into()),
+                        owner: None,
+                        group: None,
+                        etag,
+                    });
+                }
+            }
+
+            if resp.is_truncated().unwrap_or(false) && resp.next_continuation_token().is_some() {
+                continuation_token = resp.next_continuation_token().map(String::from);
+            } else {
+                break;
             }
         }
 
@@ -336,7 +394,17 @@ impl StorageProvider for S3Provider {
             return Err(AppError::InvalidPath("Chemin de renommage invalide".into()));
         }
 
-        let is_dir = old_path.ends_with('/') || new_path.ends_with('/');
+        let is_dir = if old_path.ends_with('/') || new_path.ends_with('/') {
+            true
+        } else {
+            self.client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&old_key)
+                .send()
+                .await
+                .is_err()
+        };
 
         if !is_dir {
             // S3 rename = copy + delete
@@ -371,6 +439,12 @@ impl StorageProvider for S3Provider {
         // Directory rename
         let old_prefix = Self::normalize_prefix(old_path);
         let new_prefix = Self::normalize_prefix(new_path);
+
+        if new_prefix.starts_with(&old_prefix) {
+            return Err(AppError::InvalidPath(
+                "Impossible de déplacer un dossier dans lui-même".into(),
+            ));
+        }
 
         let mut continuation_token = None;
         loop {
@@ -539,18 +613,145 @@ impl StorageProvider for S3Provider {
             status: "transferring".to_string(),
         });
 
-        let body = ByteStream::from_path(&local_path)
-            .await
-            .map_err(|e| AppError::Io(format!("Erreur de lecture du fichier local : {}", e)))?;
+        const SINGLE_PUT_LIMIT: u64 = 5 * 1024 * 1024 * 1024; // 5 GB
+        const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 16 MB
 
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| AppError::S3(format!("Erreur d'envoi vers S3 : {}", e)))?;
+        if total_bytes > SINGLE_PUT_LIMIT {
+            let multipart = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    AppError::S3(format!("Erreur d'initialisation multipart S3 : {}", e))
+                })?;
+
+            let upload_id = multipart.upload_id().ok_or_else(|| {
+                AppError::S3("UploadId manquant dans la réponse multipart".into())
+            })?;
+
+            let mut file = tokio::fs::File::open(&local_path).await.map_err(|e| {
+                AppError::Io(format!("Erreur d'ouverture du fichier local : {}", e))
+            })?;
+
+            let mut part_number = 1;
+            let mut completed_parts = Vec::new();
+            let mut bytes_sent = 0u64;
+            let mut buffer = vec![0u8; CHUNK_SIZE];
+            let start_time = Instant::now();
+            let mut last_progress_emit = Instant::now();
+
+            let upload_result: Result<(), AppError> = async {
+                use tokio::io::AsyncReadExt;
+                loop {
+                    let mut bytes_read_total = 0;
+                    while bytes_read_total < CHUNK_SIZE {
+                        let n = file
+                            .read(&mut buffer[bytes_read_total..])
+                            .await
+                            .map_err(|e| AppError::Io(e.to_string()))?;
+                        if n == 0 {
+                            break;
+                        }
+                        bytes_read_total += n;
+                    }
+
+                    if bytes_read_total == 0 {
+                        break;
+                    }
+
+                    let part_body = ByteStream::from(buffer[..bytes_read_total].to_vec());
+                    let part_resp = self
+                        .client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .upload_id(upload_id)
+                        .part_number(part_number)
+                        .body(part_body)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            AppError::S3(format!(
+                                "Erreur d'envoi de la part {} : {}",
+                                part_number, e
+                            ))
+                        })?;
+
+                    let etag = part_resp.e_tag().map(String::from);
+                    completed_parts.push(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .set_e_tag(etag)
+                            .build(),
+                    );
+
+                    bytes_sent += bytes_read_total as u64;
+                    part_number += 1;
+
+                    if last_progress_emit.elapsed().as_millis() >= 150 {
+                        let elapsed_secs = start_time.elapsed().as_secs_f64();
+                        let speed_bps = if elapsed_secs > 0.0 {
+                            (bytes_sent as f64 / elapsed_secs) as u64
+                        } else {
+                            0
+                        };
+
+                        let _ = progress_tx.send(TransferProgress {
+                            transfer_id: transfer_id.clone(),
+                            bytes_transferred: bytes_sent,
+                            total_bytes,
+                            speed_bps,
+                            status: "transferring".to_string(),
+                        });
+                        last_progress_emit = Instant::now();
+                    }
+                }
+                Ok(())
+            }
+            .await;
+
+            if let Err(err) = upload_result {
+                let _ = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .upload_id(upload_id)
+                    .send()
+                    .await;
+                return Err(err);
+            }
+
+            let completed_upload = CompletedMultipartUpload::builder()
+                .set_parts(Some(completed_parts))
+                .build();
+
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(upload_id)
+                .multipart_upload(completed_upload)
+                .send()
+                .await
+                .map_err(|e| AppError::S3(format!("Erreur de finalisation multipart : {}", e)))?;
+        } else {
+            let body = ByteStream::from_path(&local_path)
+                .await
+                .map_err(|e| AppError::Io(format!("Erreur de lecture du fichier local : {}", e)))?;
+
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| AppError::S3(format!("Erreur d'envoi vers S3 : {}", e)))?;
+        }
 
         let _ = progress_tx.send(TransferProgress {
             transfer_id,
@@ -585,7 +786,7 @@ mod tests {
         );
         assert_eq!(
             S3Provider::normalize_key("\\windows\\path.txt"),
-            "windows\\path.txt"
+            "\\windows\\path.txt"
         );
     }
 

@@ -191,7 +191,9 @@ pub async fn connect_s3(
             }
         }
 
-        S3Provider::new(config).await
+        let provider = S3Provider::new(config).await?;
+        provider.validate_access().await?;
+        Ok::<S3Provider, AppError>(provider)
     };
 
     tokio::select! {
