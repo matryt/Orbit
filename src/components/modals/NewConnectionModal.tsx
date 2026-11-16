@@ -21,6 +21,7 @@ import {
   Copy,
   ChevronDown,
   ChevronUp,
+  ShieldAlert,
 } from 'lucide-react';
 
 export const NewConnectionModal: React.FC = () => {
@@ -52,6 +53,7 @@ export const NewConnectionModal: React.FC = () => {
   const [passphrase, setPassphrase] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [useSudo, setUseSudo] = useState(false);
 
   // Test state & logs
   const [isTesting, setIsTesting] = useState(false);
@@ -76,6 +78,7 @@ export const NewConnectionModal: React.FC = () => {
       setUsername(editingProfile.username || '');
       setAuthType(editingProfile.authType || 'key');
       setKeyPath(editingProfile.keyPath || '~/.ssh/id_ed25519');
+      setUseSudo(Boolean(editingProfile.useSudo));
       storageApi.getSecret(editingProfile.id).then((sec) => {
         if (sec) {
           if (editingProfile.type === 's3') setSecretKey(sec);
@@ -98,6 +101,7 @@ export const NewConnectionModal: React.FC = () => {
       setKeyPath('~/.ssh/id_ed25519');
       setPassphrase('');
       setPassword('');
+      setUseSudo(false);
       setTestResult(null);
       setIsTesting(false);
       setShowLogs(false);
@@ -183,6 +187,7 @@ export const NewConnectionModal: React.FC = () => {
           password: authType === 'password' ? password.trim() : undefined,
           key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
           passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
+          use_sudo: useSudo,
         }),
         timeoutPromise,
       ]);
@@ -249,6 +254,7 @@ export const NewConnectionModal: React.FC = () => {
               username: username.trim(),
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+              useSudo,
               endpoint: undefined,
               bucket: undefined,
               region: undefined,
@@ -274,6 +280,7 @@ export const NewConnectionModal: React.FC = () => {
               username: username.trim(),
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+              useSudo,
             }),
       };
       await addProfile(newProfile, secret || undefined);
@@ -283,14 +290,8 @@ export const NewConnectionModal: React.FC = () => {
   };
 
   return (
-    <div
-      onClick={handleClose}
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150"
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-      >
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+      <div className="w-full max-w-lg bg-surface border border-border-light rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="h-12 px-5 border-b border-border-subtle flex items-center justify-between bg-surface-muted/60 select-none flex-shrink-0">
           <h2 className="text-sm font-semibold text-white">
@@ -661,6 +662,30 @@ export const NewConnectionModal: React.FC = () => {
                   </div>
                 </div>
               )}
+
+              {/* Sudo / Root privileges toggle */}
+              <div className="pt-2 border-t border-white/5">
+                <label className="flex items-start gap-2.5 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={useSudo}
+                    onChange={(e) => {
+                      setUseSudo(e.target.checked);
+                      setTestResult(null);
+                    }}
+                    className="w-4 h-4 mt-0.5 rounded border-border-subtle bg-surface-muted text-indigo-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-300 group-hover:text-white transition-colors">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Mode Superutilisateur (Sudo / Root)</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-500 mt-0.5">
+                      Lance le serveur SFTP avec sudo pour accéder aux dossiers système protégés (nécessite les privilèges sudo).
+                    </p>
+                  </div>
+                </label>
+              </div>
             </>
           )}
 

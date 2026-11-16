@@ -14,6 +14,7 @@ export interface ConnectionProfile {
   keyPath?: string;
   status: 'connected' | 'idle' | 'error';
   isFavorite: boolean;
+  useSudo?: boolean;
 }
 
 export interface FileEntry {
@@ -70,5 +71,20 @@ export interface UpdateCheckResult {
   release_url: string;
   download_url: string | null;
   asset_name: string | null;
+}
+
+export type SudoCapability = 'none' | 'passwordless' | 'password_required';
+
+export interface SftpSessionInfo {
+  profile_id: string;
+  is_elevated: boolean;
+  sudo_capability: SudoCapability;
+}
+
+export interface NavigationError {
+  pane: 'remote' | 'local';
+  path: string;
+  message: string;
+  isPermissionDenied: boolean;
 }
 

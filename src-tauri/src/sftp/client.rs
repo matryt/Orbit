@@ -8,13 +8,15 @@ use russh_sftp::client::SftpSession;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
-    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, TransferProgress,
+    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, SudoCapability,
+    TransferProgress,
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
@@ -94,11 +96,27 @@ pub fn check_cert_authority(
     Ok(false)
 }
 
+struct PromptGuard<'a>(&'a AtomicBool);
+
+impl<'a> PromptGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+impl<'a> Drop for PromptGuard<'a> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct SshHandler {
     host: String,
     port: u16,
     key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
     prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+    prompt_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,11 +149,28 @@ impl SshHandler {
         key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
     ) -> Self {
+        Self::with_prompt_tracker(
+            host,
+            port,
+            key_status,
+            prompt_handler,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub fn with_prompt_tracker(
+        host: String,
+        port: u16,
+        key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+        prompt_active: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             host,
             port,
             key_status,
             prompt_handler,
+            prompt_active,
         }
     }
 }
@@ -240,7 +275,9 @@ impl Handler for SshHandler {
                         changed_line: None,
                     };
 
+                    let _guard = PromptGuard::new(&self.prompt_active);
                     let decision = handler.prompt(req).await;
+                    drop(_guard);
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
                             let mut status = key_status.lock().await;
@@ -289,7 +326,9 @@ impl Handler for SshHandler {
                         changed_line: Some(line),
                     };
 
+                    let _guard = PromptGuard::new(&self.prompt_active);
                     let decision = handler.prompt(req).await;
+                    drop(_guard);
                     match decision {
                         HostKeyDecision::AcceptAndRemember => {
                             let mut status = key_status.lock().await;
@@ -345,6 +384,18 @@ pub struct SftpProvider {
     username: String,
     identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
     pub host_key_status: Option<HostKeyStatus>,
+    pub is_elevated: bool,
+    pub sudo_capability: SudoCapability,
+}
+
+pub fn parse_sudo_probe_output(text: &str) -> SudoCapability {
+    if text.contains("ORBIT_SUDO:NOPASSWD") {
+        SudoCapability::Passwordless
+    } else if text.contains("ORBIT_SUDO:PASSWD") {
+        SudoCapability::PasswordRequired
+    } else {
+        SudoCapability::None
+    }
 }
 
 impl SftpProvider {
@@ -363,6 +414,42 @@ impl SftpProvider {
             eprintln!("{line}");
         }
         Ok(provider)
+    }
+
+    async fn probe_sudo_capability(handle: &Handle<SshHandler>) -> SudoCapability {
+        let channel_fut = handle.channel_open_session();
+        let mut channel = match tokio::time::timeout(Duration::from_secs(3), channel_fut).await {
+            Ok(Ok(c)) => c,
+            _ => return SudoCapability::None,
+        };
+
+        let probe_cmd = "if sudo -n true 2>/dev/null; then echo ORBIT_SUDO:NOPASSWD; elif [ -x \"$(command -v sudo)\" ]; then if id -Gn 2>/dev/null | grep -Eq '\\b(sudo|wheel|admin)\\b'; then echo ORBIT_SUDO:PASSWD; else echo ORBIT_SUDO:NONE; fi; else echo ORBIT_SUDO:NONE; fi";
+
+        if tokio::time::timeout(Duration::from_secs(3), channel.exec(true, probe_cmd))
+            .await
+            .map_or(true, |r| r.is_err())
+        {
+            return SudoCapability::None;
+        }
+
+        let mut output = Vec::new();
+        let read_fut = async {
+            while let Some(msg) = channel.wait().await {
+                if let russh::ChannelMsg::Data { ref data } = msg {
+                    output.extend_from_slice(data);
+                    if let Some(pos) = output.windows(11).position(|w| w == b"ORBIT_SUDO:") {
+                        if output[pos..].contains(&b'\n') {
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), read_fut).await;
+
+        let text = String::from_utf8_lossy(&output);
+        parse_sudo_probe_output(&text)
     }
 
     pub async fn connect_with_logs(
@@ -395,7 +482,10 @@ impl SftpProvider {
         ));
 
         let ssh_config = Arc::new(client::Config {
+            inactivity_timeout: None,
             keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            nodelay: true,
             ..Default::default()
         });
 
@@ -407,15 +497,40 @@ impl SftpProvider {
         ));
 
         let key_status = Arc::new(tokio::sync::Mutex::new(None));
-        let handler = SshHandler::new(
+        let prompt_active = Arc::new(AtomicBool::new(false));
+        let handler = SshHandler::with_prompt_tracker(
             config.host.clone(),
             config.port,
             Arc::clone(&key_status),
             prompt_handler,
+            Arc::clone(&prompt_active),
         );
 
-        let mut handle = match client::connect(ssh_config, &addr, handler).await {
-            Ok(h) => {
+        let connect_fut = client::connect(ssh_config, &addr, handler);
+        tokio::pin!(connect_fut);
+
+        let mut network_elapsed = Duration::ZERO;
+        let step = Duration::from_millis(200);
+        let timeout_limit = Duration::from_secs(15);
+
+        let connect_res = loop {
+            tokio::select! {
+                res = &mut connect_fut => {
+                    break Ok(res);
+                }
+                _ = tokio::time::sleep(step) => {
+                    if !prompt_active.load(Ordering::SeqCst) {
+                        network_elapsed += step;
+                        if network_elapsed >= timeout_limit {
+                            break Err(());
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut handle = match connect_res {
+            Ok(Ok(h)) => {
                 logs.push(format!(
                     "[{}] Connexion TCP socket établie avec succès.",
                     now()
@@ -462,7 +577,7 @@ impl SftpProvider {
                 }
                 h
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let recorded_status = key_status.lock().await.clone();
                 if let Some(HostKeyStatus::Rejected(ref reason)) = recorded_status {
                     logs.push(format!("[{}] ❌ Connexion annulée : {reason}", now()));
@@ -503,6 +618,17 @@ impl SftpProvider {
                     "[{}] ℹ️ Conseil: Vérifiez l'adresse IP, le port {} et assurez-vous que le serveur SSH est en écoute.",
                     now(),
                     config.port
+                ));
+                return Err((AppError::Ssh(err_msg), logs));
+            }
+            Err(_) => {
+                let err_msg = format!(
+                    "Délai d'attente dépassé (timeout 15s) lors de la négociation SSH avec {addr}"
+                );
+                logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                logs.push(format!(
+                    "[{}] ℹ️ Conseil: Le serveur a accepté la connexion TCP mais n'a pas répondu à l'initialisation du protocole SSH.",
+                    now()
                 ));
                 return Err((AppError::Ssh(err_msg), logs));
             }
@@ -739,33 +865,72 @@ impl SftpProvider {
             }
         };
 
-        match channel.request_subsystem(true, "sftp").await {
-            Ok(_) => {
-                logs.push(format!(
-                    "[{}] Sous-système SFTP accepté par le serveur.",
-                    now()
-                ));
+        let sftp_session = if config.use_sudo {
+            logs.push(format!(
+                "[{}] 🛡️ Mode Privilèges Élevés (Sudo) activé : lancement du serveur SFTP sous sudo...",
+                now()
+            ));
+            let sudo_cmd = "sudo -n sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server; do [ -x \"$p\" ] && exec \"$p\"; done; exec sftp-server'";
+            match channel.exec(true, sudo_cmd).await {
+                Ok(_) => {
+                    logs.push(format!(
+                        "[{}] Commande sudo sftp-server lancée avec succès.",
+                        now()
+                    ));
+                }
+                Err(e) => {
+                    let err_msg =
+                        format!("Le serveur SSH a refusé l'exécution de sudo sftp-server: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
-            Err(e) => {
-                let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                logs.push(format!(
-                    "[{}] ℹ️ Conseil: Assurez-vous que la ligne 'Subsystem sftp' est activée dans /etc/ssh/sshd_config sur le serveur distant.",
-                    now()
-                ));
-                return Err((AppError::Sftp(err_msg), logs));
-            }
-        }
 
-        let sftp_session = match SftpSession::new(channel.into_stream()).await {
-            Ok(s) => {
-                logs.push(format!("[{}] ✅ Session SFTP initialisée avec succès ! Prêt pour la navigation et les transferts.", now()));
-                s
+            match SftpSession::new(channel.into_stream()).await {
+                Ok(s) => {
+                    logs.push(format!(
+                        "[{}] ✅ Session SFTP Root initialisée avec succès ! Privilèges administrateur actifs.",
+                        now()
+                    ));
+                    s
+                }
+                Err(e) => {
+                    let err_msg = format!(
+                        "Échec d'initialisation SFTP sous sudo (vérifiez vos droits sudo / NOPASSWD): {e}"
+                    );
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
-            Err(e) => {
-                let err_msg = format!("Échec d'initialisation du protocole SFTP: {e}");
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                return Err((AppError::Sftp(err_msg), logs));
+        } else {
+            match channel.request_subsystem(true, "sftp").await {
+                Ok(_) => {
+                    logs.push(format!(
+                        "[{}] Sous-système SFTP accepté par le serveur.",
+                        now()
+                    ));
+                }
+                Err(e) => {
+                    let err_msg = format!("Le serveur a refusé le sous-système SFTP: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    logs.push(format!(
+                        "[{}] ℹ️ Conseil: Assurez-vous que la ligne 'Subsystem sftp' est activée dans /etc/ssh/sshd_config sur le serveur distant.",
+                        now()
+                    ));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
+            }
+
+            match SftpSession::new(channel.into_stream()).await {
+                Ok(s) => {
+                    logs.push(format!("[{}] ✅ Session SFTP initialisée avec succès ! Prêt pour la navigation et les transferts.", now()));
+                    s
+                }
+                Err(e) => {
+                    let err_msg = format!("Échec d'initialisation du protocole SFTP: {e}");
+                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    return Err((AppError::Sftp(err_msg), logs));
+                }
             }
         };
 
@@ -843,6 +1008,12 @@ impl SftpProvider {
             _ => {}
         }
 
+        let sudo_capability = if config.use_sudo {
+            SudoCapability::Passwordless
+        } else {
+            Self::probe_sudo_capability(&handle).await
+        };
+
         let final_status = key_status.lock().await.clone();
         Ok((
             Self {
@@ -851,6 +1022,8 @@ impl SftpProvider {
                 username: config.username,
                 identities: tokio::sync::RwLock::new(None),
                 host_key_status: final_status,
+                is_elevated: config.use_sudo,
+                sudo_capability,
             },
             logs,
         ))
@@ -1129,11 +1302,14 @@ impl StorageProvider for SftpProvider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
         validate_path_safety(path)?;
         let dir_path = if path.is_empty() { "/" } else { path };
-        let read_dir = self
-            .session
-            .read_dir(dir_path)
-            .await
-            .map_err(|e| AppError::Sftp(format!("Failed to list directory {dir_path}: {e}")))?;
+        let read_dir = self.session.read_dir(dir_path).await.map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.to_lowercase().contains("permission denied") {
+                AppError::PermissionDenied(format!("Permission denied: cannot access '{dir_path}'"))
+            } else {
+                AppError::Sftp(format!("Failed to list directory {dir_path}: {e}"))
+            }
+        })?;
 
         let identities = self.get_or_load_identities().await;
 
@@ -1425,6 +1601,14 @@ impl StorageProvider for SftpProvider {
         });
 
         Ok(())
+    }
+
+    fn is_elevated(&self) -> bool {
+        self.is_elevated
+    }
+
+    fn sudo_capability(&self) -> SudoCapability {
+        self.sudo_capability
     }
 }
 
@@ -1737,5 +1921,36 @@ docker:x:999:ubuntu,mathieu
         assert!(!res);
         let current_status = status.lock().await.clone();
         assert!(matches!(current_status, Some(HostKeyStatus::Rejected(_))));
+    }
+
+    #[test]
+    fn test_parse_sudo_probe_output() {
+        assert_eq!(
+            parse_sudo_probe_output("prefix\nORBIT_SUDO:NOPASSWD\n"),
+            SudoCapability::Passwordless
+        );
+        assert_eq!(
+            parse_sudo_probe_output("ORBIT_SUDO:PASSWD\n"),
+            SudoCapability::PasswordRequired
+        );
+        assert_eq!(
+            parse_sudo_probe_output("ORBIT_SUDO:NONE\n"),
+            SudoCapability::None
+        );
+        assert_eq!(
+            parse_sudo_probe_output("sudo: a password is required"),
+            SudoCapability::None
+        );
+    }
+
+    #[test]
+    fn test_prompt_guard_lifecycle() {
+        let flag = AtomicBool::new(false);
+        assert!(!flag.load(Ordering::SeqCst));
+        {
+            let _guard = PromptGuard::new(&flag);
+            assert!(flag.load(Ordering::SeqCst));
+        }
+        assert!(!flag.load(Ordering::SeqCst));
     }
 }

@@ -122,15 +122,11 @@ export const HostKeyVerificationModal: React.FC = () => {
   const isNew = currentPrompt.is_new;
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150"
-      onClick={() => handleDecision('reject')}
-    >
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
       <div
         className={`w-full max-w-xl bg-[#11131a] border rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh] ${
           isNew ? 'border-sky-500/30' : 'border-rose-500/40'
         }`}
-        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div

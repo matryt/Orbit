@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, UpdateCheckResult } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpSessionInfo, UpdateCheckResult } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -11,6 +11,8 @@ export interface SftpConnectParams {
   password?: string;
   key_path?: string;
   passphrase?: string;
+  use_sudo?: boolean;
+  sudo_password?: string;
 }
 
 export interface BackendTransferProgress {
@@ -24,6 +26,8 @@ export interface BackendTransferProgress {
 export const isTauri = () => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 };
+
+export { isPermissionDeniedError } from '../lib/permissionError';
 
 export function isCancelledError(err: any): boolean {
   if (err?.type === 'Cancelled') return true;
@@ -93,13 +97,17 @@ export const storageApi = {
     }
   },
 
-  async connectSftp(params: SftpConnectParams): Promise<void> {
+  async connectSftp(params: SftpConnectParams): Promise<SftpSessionInfo> {
     if (!isTauri()) {
       console.log('[Mock] Connecting SFTP:', params);
-      return;
+      return {
+        profile_id: params.profile_id,
+        is_elevated: params.use_sudo ?? false,
+        sudo_capability: 'passwordless',
+      };
     }
     try {
-      await invoke('connect_sftp', { config: params });
+      return await invoke<SftpSessionInfo>('connect_sftp', { config: params });
     } catch (err: any) {
       if (isCancelledError(err)) {
         const error = new Error('Connexion annulée : le profil a été déconnecté.');
@@ -107,6 +115,17 @@ export const storageApi = {
         throw error;
       }
       throw new Error(formatConnectionError(err));
+    }
+  },
+
+  async getSessionInfo(profileId?: string): Promise<SftpSessionInfo | null> {
+    if (!isTauri()) {
+      return null;
+    }
+    try {
+      return await invoke<SftpSessionInfo>('get_session_info', { profileId });
+    } catch {
+      return null;
     }
   },
 

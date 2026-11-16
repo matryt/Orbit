@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { APP_VERSION } from '../../version';
+import { ConnectionProfile } from '../../types';
 import {
   Plus,
   Download,
@@ -33,7 +35,29 @@ export const Sidebar: React.FC = () => {
   } = useOrbitStore();
 
   const [menuOpenProfileId, setMenuOpenProfileId] = useState<string | null>(null);
+  const [profileToDelete, setProfileToDelete] = useState<ConnectionProfile | null>(null);
   const menuContainerRef = useRef<HTMLDivElement>(null);
+  const optionsButtonsRef = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const triggerButtonRef = useRef<HTMLElement | null>(null);
+  const newConnectionButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Manage focus when confirmation modal opens and closes
+  useEffect(() => {
+    if (profileToDelete) {
+      requestAnimationFrame(() => {
+        cancelButtonRef.current?.focus();
+      });
+    } else if (triggerButtonRef.current) {
+      if (document.contains(triggerButtonRef.current)) {
+        triggerButtonRef.current.focus();
+      } else {
+        newConnectionButtonRef.current?.focus();
+      }
+      triggerButtonRef.current = null;
+    }
+  }, [profileToDelete]);
 
   // Close context menu on outside click or Escape
   useEffect(() => {
@@ -46,6 +70,7 @@ export const Sidebar: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setMenuOpenProfileId(null);
+        setProfileToDelete(null);
       }
     };
 
@@ -167,12 +192,19 @@ export const Sidebar: React.FC = () => {
 
                     {/* 3-dots action button */}
                     <button
+                      ref={(el) => {
+                        if (el) {
+                          optionsButtonsRef.current.set(profile.id, el);
+                        } else {
+                          optionsButtonsRef.current.delete(profile.id);
+                        }
+                      }}
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         setMenuOpenProfileId(isMenuOpen ? null : profile.id);
                       }}
-                      className={`p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-all ${
+                      className={`p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-all focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-white/20 ${
                         isMenuOpen ? 'opacity-100 bg-white/10 text-white' : 'opacity-0 group-hover:opacity-100'
                       }`}
                       title="Options de la connexion"
@@ -231,15 +263,14 @@ export const Sidebar: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
+                        triggerButtonRef.current = optionsButtonsRef.current.get(profile.id) || null;
                         setMenuOpenProfileId(null);
-                        if (window.confirm(`Supprimer la connexion "${profile.name}" ?`)) {
-                          deleteProfile(profile.id);
-                        }
+                        setProfileToDelete(profile);
                       }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-red-500/10 text-red-400 hover:text-red-300 transition-colors"
                     >
                       <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                      <span>Supprimer</span>
+                      <span>Supprimer...</span>
                     </button>
                   </div>
                 )}
@@ -252,6 +283,7 @@ export const Sidebar: React.FC = () => {
       {/* Bottom actions */}
       <div className="p-3 border-t border-border-subtle bg-surface-muted/50 flex flex-col gap-1.5">
         <button
+          ref={newConnectionButtonRef}
           onClick={() => setNewConnectionModalOpen(true)}
           className="w-full flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-md bg-white/[0.06] hover:bg-white/[0.1] text-xs font-medium text-zinc-200 hover:text-white border border-border-subtle transition-all"
         >
@@ -286,6 +318,81 @@ export const Sidebar: React.FC = () => {
           <span className="text-[10px] text-zinc-600 font-mono">Orbit</span>
         </div>
       </div>
+
+      {/* Modal Confirmation Suppression Profil */}
+      {profileToDelete && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-profile-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+          onKeyDown={(e) => {
+            if (e.key === 'Tab') {
+              if (e.shiftKey) {
+                if (document.activeElement === cancelButtonRef.current) {
+                  e.preventDefault();
+                  confirmButtonRef.current?.focus();
+                }
+              } else {
+                if (document.activeElement === confirmButtonRef.current) {
+                  e.preventDefault();
+                  cancelButtonRef.current?.focus();
+                }
+              }
+            }
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-[#161926] border border-red-500/30 rounded-xl shadow-2xl p-5 text-zinc-200"
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400 flex-shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 id="delete-profile-dialog-title" className="text-sm font-semibold text-white">
+                  Supprimer la connexion ?
+                </h3>
+                <p className="text-xs text-zinc-400 truncate max-w-[220px] font-mono mt-0.5">
+                  {profileToDelete.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-400 mb-4 bg-white/5 p-2.5 rounded-lg border border-white/5">
+              Êtes-vous sûr de vouloir supprimer ce profil ? Les identifiants associés stockés dans le trousseau système seront également effacés.
+            </p>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                ref={cancelButtonRef}
+                type="button"
+                onClick={() => setProfileToDelete(null)}
+                className="px-3 py-1.5 rounded-md hover:bg-white/10 text-xs text-zinc-400 hover:text-white transition-colors"
+              >
+                Annuler
+              </button>
+              <button
+                ref={confirmButtonRef}
+                type="button"
+                onClick={async () => {
+                  const target = profileToDelete;
+                  triggerButtonRef.current = null;
+                  setProfileToDelete(null);
+                  await deleteProfile(target.id);
+                  newConnectionButtonRef.current?.focus();
+                }}
+                className="px-3.5 py-1.5 rounded-md bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 shadow-sm shadow-red-900/50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Supprimer</span>
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </aside>
   );
 };
