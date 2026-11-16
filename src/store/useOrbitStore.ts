@@ -272,7 +272,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   connectProfile: async (profileId, secret) => {
     const profile = get().profiles.find((p) => p.id === profileId);
-    if (!profile || profile.type !== 'sftp') return;
+    if (!profile) return;
 
     set({ isConnecting: true, connectionError: null });
 
@@ -282,23 +282,35 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
         secretVal = (await storageApi.getSecret(profileId)) || undefined;
       }
 
-      const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+      let sessionInfo;
+      if (profile.type === 's3') {
+        sessionInfo = await storageApi.connectS3({
+          profile_id: profile.id,
+          endpoint: profile.endpoint,
+          bucket: profile.bucket || '',
+          region: profile.region,
+          accessKey: profile.accessKey || '',
+          secretKey: secretVal,
+        });
+      } else {
+        const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
 
-      const connectParams: SftpConnectParams = {
-        profile_id: profile.id,
-        host: profile.host || '',
-        port: profile.port || 22,
-        username: profile.username || '',
-        use_sudo: profile.useSudo,
-      };
-      if (isKeyAuth) {
-        if (profile.keyPath) connectParams.key_path = profile.keyPath;
-        if (secretVal) connectParams.passphrase = secretVal;
-      } else if (secretVal) {
-        connectParams.password = secretVal;
+        const connectParams: SftpConnectParams = {
+          profile_id: profile.id,
+          host: profile.host || '',
+          port: profile.port || 22,
+          username: profile.username || '',
+          use_sudo: profile.useSudo,
+        };
+        if (isKeyAuth) {
+          if (profile.keyPath) connectParams.key_path = profile.keyPath;
+          if (secretVal) connectParams.passphrase = secretVal;
+        } else if (secretVal) {
+          connectParams.password = secretVal;
+        }
+
+        sessionInfo = await storageApi.connectSftp(connectParams);
       }
-
-      const sessionInfo = await storageApi.connectSftp(connectParams);
 
       // Update status to connected
       set((state) => ({

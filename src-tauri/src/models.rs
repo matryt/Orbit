@@ -9,6 +9,8 @@ pub struct ConnectionProfile {
     pub endpoint: Option<String>,
     pub bucket: Option<String>,
     pub region: Option<String>,
+    #[serde(rename = "accessKey", default)]
+    pub access_key: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub username: Option<String>,
@@ -56,6 +58,20 @@ pub struct SftpConnectConfig {
     #[serde(default)]
     pub use_sudo: bool,
     pub sudo_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3ConnectConfig {
+    pub profile_id: String,
+    pub endpoint: Option<String>,
+    pub bucket: String,
+    pub region: Option<String>,
+    #[serde(rename = "accessKey")]
+    pub access_key: String,
+    #[serde(rename = "secretKey")]
+    pub secret_key: Option<String>,
+    #[serde(rename = "forcePathStyle", default)]
+    pub force_path_style: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

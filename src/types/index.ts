@@ -7,6 +7,7 @@ export interface ConnectionProfile {
   endpoint?: string;
   bucket?: string;
   region?: string;
+  accessKey?: string;
   host?: string;
   port?: number;
   username?: string;
@@ -79,6 +80,16 @@ export interface SftpSessionInfo {
   profile_id: string;
   is_elevated: boolean;
   sudo_capability: SudoCapability;
+}
+
+export interface S3ConnectParams {
+  profile_id: string;
+  endpoint?: string;
+  bucket: string;
+  region?: string;
+  accessKey: string;
+  secretKey?: string;
+  forcePathStyle?: boolean;
 }
 
 export interface NavigationError {

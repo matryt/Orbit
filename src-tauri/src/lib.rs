@@ -7,6 +7,7 @@ pub mod keyring_service;
 pub mod local_fs;
 pub mod models;
 pub mod provider;
+pub mod s3;
 pub mod session;
 pub mod sftp;
 pub mod updater;
@@ -49,6 +50,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::test_sftp_connection,
             commands::connect_sftp,
+            commands::test_s3_connection,
+            commands::connect_s3,
             commands::get_session_info,
             commands::respond_host_key_prompt,
             commands::get_pending_host_key_prompts,
