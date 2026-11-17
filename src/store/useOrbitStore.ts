@@ -4,6 +4,16 @@ import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
 
+export interface ActiveDragState {
+  source: 'local' | 'remote';
+  files: FileEntry[];
+  currentX: number;
+  currentY: number;
+  isDragging: boolean;
+  hoverPane: 'local' | 'remote' | null;
+  hoverFolderPath: string | null;
+}
+
 interface OrbitState {
   // Profiles
   profiles: ConnectionProfile[];
@@ -88,6 +98,10 @@ interface OrbitState {
   uploadFile: (localPath: string, remotePath: string, fileName: string) => Promise<void>;
   downloadFile: (remotePath: string, localPath: string, fileName: string) => Promise<void>;
 
+  // Dual-Pane Pointer Drag and Drop State
+  activeDrag: ActiveDragState | null;
+  setActiveDrag: (drag: ActiveDragState | null) => void;
+
   // Modals
   isNewConnectionModalOpen: boolean;
   setNewConnectionModalOpen: (open: boolean) => void;
@@ -156,7 +170,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       remoteNavigationError: null,
     });
 
-    if (profile && profile.type === 'sftp') {
+    if (profile && (profile.type === 'sftp' || profile.type === 's3')) {
       await get().connectProfile(id);
     } else {
       const files = MOCK_REMOTE_FILES['/'] || [];
@@ -187,7 +201,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       };
     });
 
-    if (profile.type === 'sftp') {
+    if (profile.type === 'sftp' || profile.type === 's3') {
       await get().connectProfile(profile.id, secret);
     }
   },
@@ -210,7 +224,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       profiles: state.profiles.map((p) => (p.id === profile.id ? profile : p)),
     }));
 
-    if (get().activeProfileId === profile.id && profile.type === 'sftp') {
+    if (get().activeProfileId === profile.id && (profile.type === 'sftp' || profile.type === 's3')) {
       await get().connectProfile(profile.id, secret);
     }
   },
@@ -272,7 +286,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   connectProfile: async (profileId, secret) => {
     const profile = get().profiles.find((p) => p.id === profileId);
-    if (!profile || profile.type !== 'sftp') return;
+    if (!profile) return;
 
     set({ isConnecting: true, connectionError: null });
 
@@ -282,23 +296,35 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
         secretVal = (await storageApi.getSecret(profileId)) || undefined;
       }
 
-      const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+      let sessionInfo;
+      if (profile.type === 's3') {
+        sessionInfo = await storageApi.connectS3({
+          profile_id: profile.id,
+          endpoint: profile.endpoint,
+          bucket: profile.bucket || '',
+          region: profile.region,
+          accessKey: profile.accessKey || '',
+          secretKey: secretVal,
+        });
+      } else {
+        const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
 
-      const connectParams: SftpConnectParams = {
-        profile_id: profile.id,
-        host: profile.host || '',
-        port: profile.port || 22,
-        username: profile.username || '',
-        use_sudo: profile.useSudo,
-      };
-      if (isKeyAuth) {
-        if (profile.keyPath) connectParams.key_path = profile.keyPath;
-        if (secretVal) connectParams.passphrase = secretVal;
-      } else if (secretVal) {
-        connectParams.password = secretVal;
+        const connectParams: SftpConnectParams = {
+          profile_id: profile.id,
+          host: profile.host || '',
+          port: profile.port || 22,
+          username: profile.username || '',
+          use_sudo: profile.useSudo,
+        };
+        if (isKeyAuth) {
+          if (profile.keyPath) connectParams.key_path = profile.keyPath;
+          if (secretVal) connectParams.passphrase = secretVal;
+        } else if (secretVal) {
+          connectParams.password = secretVal;
+        }
+
+        sessionInfo = await storageApi.connectSftp(connectParams);
       }
-
-      const sessionInfo = await storageApi.connectSftp(connectParams);
 
       // Update status to connected
       set((state) => ({
@@ -362,7 +388,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     });
 
     try {
-      if (profile && profile.type === 'sftp' && profile.status === 'connected') {
+      if (profile && (profile.type === 'sftp' || profile.type === 's3') && profile.status === 'connected') {
         const liveFiles = await storageApi.listDir(activeProfileId, path);
         if (remoteNavGen !== reqGen) return;
         set({
@@ -756,9 +782,14 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       );
       await get().refreshRemote();
     } catch (err: any) {
+      console.error('[Orbit] Upload failed:', err);
+      const errorMsg =
+        typeof err === 'string'
+          ? err
+          : err?.message || 'Erreur lors du transfert';
       set((state) => ({
         transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
+          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
         ),
       }));
     }
@@ -809,14 +840,25 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           }));
         }
       );
+      if (get().isDualPane) {
+        await get().refreshLocal();
+      }
     } catch (err: any) {
+      console.error('[Orbit] Download failed:', err);
+      const errorMsg =
+        typeof err === 'string'
+          ? err
+          : err?.message || 'Erreur lors du transfert';
       set((state) => ({
         transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed' } : tx
+          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
         ),
       }));
     }
   },
+
+  activeDrag: null,
+  setActiveDrag: (drag) => set({ activeDrag: drag }),
 
   isNewConnectionModalOpen: false,
   setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useOrbitStore } from './store/useOrbitStore';
+import { isTauri } from './services/storageApi';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { WindowsTitlebar } from './components/layout/WindowsTitlebar';
@@ -28,6 +29,77 @@ export function App() {
     loadPersistedProfiles();
     checkForUpdates(false);
   }, [loadPersistedProfiles, checkForUpdates]);
+
+  // Singleton OS drag-and-drop listener (macOS Finder / Windows Explorer)
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let isDisposed = false;
+    let lastDropTime = 0;
+
+    (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        const unlistenFn = await getCurrentWebview().onDragDropEvent(
+          async (event) => {
+            if (event.payload.type === 'drop') {
+              const now = Date.now();
+              if (now - lastDropTime < 400) {
+                return; // debounce duplicate drop events
+              }
+              lastDropTime = now;
+
+              const paths = event.payload.paths;
+              if (!paths || paths.length === 0) return;
+
+              const store = useOrbitStore.getState();
+              const { currentPath, uploadFile } = store;
+
+              // Determine if drop happened over a specific folder element
+              let targetDir = currentPath;
+              const position = event.payload.position;
+              if (position) {
+                const scale = window.devicePixelRatio || 1;
+                const elem = document.elementFromPoint(
+                  position.x / scale,
+                  position.y / scale
+                );
+                const folderElem = elem?.closest('[data-folder-path]');
+                if (folderElem) {
+                  const folderPath = folderElem.getAttribute('data-folder-path');
+                  if (folderPath) {
+                    targetDir = folderPath;
+                  }
+                }
+              }
+
+              for (const filePath of paths) {
+                const fileName = filePath.split(/[/\\]/).pop() || 'file';
+                const remoteTarget =
+                  targetDir === '/'
+                    ? `/${fileName}`
+                    : `${targetDir.replace(/\/+$/, '')}/${fileName}`;
+                await uploadFile(filePath, remoteTarget, fileName);
+              }
+            }
+          }
+        );
+
+        if (isDisposed) {
+          unlistenFn();
+        } else {
+          unlisten = unlistenFn;
+        }
+      } catch (err) {
+        console.error('Failed to register global Tauri drag-drop listener:', err);
+      }
+    })();
+
+    return () => {
+      isDisposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // Global keyboard shortcuts
   useEffect(() => {

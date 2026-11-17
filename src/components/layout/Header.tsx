@@ -10,10 +10,13 @@ import {
   Loader2,
   AlertCircle,
   FolderPlus,
+  Upload,
   X,
   Sparkles,
   ShieldAlert,
 } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { isTauri } from '../../services/storageApi';
 
 export const Header: React.FC = () => {
   const {
@@ -39,6 +42,7 @@ export const Header: React.FC = () => {
     setNewFolderModalOpen,
     availableUpdate,
     setUpdateModalOpen,
+    uploadFile,
   } = useOrbitStore();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -79,6 +83,30 @@ export const Header: React.FC = () => {
         const newPath = '/' + pathSegments.slice(0, index + 1).join('/');
         setCurrentPath(newPath);
       }
+    }
+  };
+
+  const handleUploadClick = async () => {
+    try {
+      if (isTauri()) {
+        const selected = await open({
+          multiple: true,
+          directory: false,
+        });
+        if (selected) {
+          const filePaths = Array.isArray(selected) ? selected : [selected];
+          for (const filePath of filePaths) {
+            const fileName = filePath.split(/[/\\]/).pop() || 'file';
+            const remoteTarget =
+              currentPath === '/'
+                ? `/${fileName}`
+                : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
+            await uploadFile(filePath, remoteTarget, fileName);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to open file dialog for upload:', err);
     }
   };
 
@@ -173,6 +201,17 @@ export const Header: React.FC = () => {
           >
             <Sparkles className="w-3 h-3 text-amber-400" />
             <span className="font-mono">{availableUpdate.latest_version}</span>
+          </button>
+        )}
+
+        {/* Upload File button */}
+        {!isLocalActive && (
+          <button
+            onClick={handleUploadClick}
+            className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
+            title="Importer des fichiers vers le dossier distant"
+          >
+            <Upload className="w-3.5 h-3.5 text-zinc-400 hover:text-indigo-400 transition-colors" />
           </button>
         )}
 

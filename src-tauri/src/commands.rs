@@ -7,10 +7,11 @@ use crate::config_service::ConfigService;
 use crate::error::AppError;
 use crate::keyring_service::KeyringService;
 use crate::models::{
-    ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, SftpConnectConfig,
-    TransferProgress,
+    ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, S3ConnectConfig,
+    SftpConnectConfig, TransferProgress,
 };
 use crate::provider::StorageProvider;
+use crate::s3::client::S3Provider;
 use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 use crate::sftp::host_key::{HostKeyPromptManager, TauriHostKeyPromptHandler};
@@ -146,6 +147,81 @@ pub async fn connect_sftp(
 }
 
 #[tauri::command]
+pub async fn test_s3_connection(
+    mut config: S3ConnectConfig,
+) -> Result<ConnectionTestResult, AppError> {
+    if config.secret_key.is_none() || config.secret_key.as_deref() == Some("") {
+        let pid = config.profile_id.clone();
+        if let Ok(Ok(Some(secret))) =
+            tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+        {
+            config.secret_key = Some(secret);
+        }
+    }
+
+    match S3Provider::test_connection(config).await {
+        Ok((_provider, logs)) => Ok(ConnectionTestResult {
+            success: true,
+            message: "Connexion S3 établie avec succès ! Accès au bucket validé.".into(),
+            logs,
+        }),
+        Err((err, logs)) => Ok(ConnectionTestResult {
+            success: false,
+            message: err.to_string(),
+            logs,
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn connect_s3(
+    mut config: S3ConnectConfig,
+    state: State<'_, SessionManager>,
+) -> Result<crate::models::SftpSessionInfo, AppError> {
+    let profile_id = config.profile_id.clone();
+    let (generation, mut cancel_rx) = state.start_connecting(&profile_id).await;
+
+    let connect_task = async move {
+        if config.secret_key.is_none() || config.secret_key.as_deref() == Some("") {
+            let pid = config.profile_id.clone();
+            if let Ok(Ok(Some(secret))) =
+                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+            {
+                config.secret_key = Some(secret);
+            }
+        }
+
+        let provider = S3Provider::new(config).await?;
+        provider.validate_access().await?;
+        Ok::<S3Provider, AppError>(provider)
+    };
+
+    tokio::select! {
+        _ = cancel_rx.changed() => {
+            Err(AppError::Cancelled(
+                "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
+            ))
+        }
+        res = connect_task => {
+            let provider = res?;
+            if !state
+                .complete_connecting(&profile_id, generation, Arc::new(provider))
+                .await
+            {
+                return Err(AppError::Cancelled(
+                    "Connexion annulée : le profil a été déconnecté pendant l'établissement.".into(),
+                ));
+            }
+            Ok(crate::models::SftpSessionInfo {
+                profile_id,
+                is_elevated: false,
+                sudo_capability: crate::models::SudoCapability::None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn get_session_info(
     profile_id: Option<String>,
     state: State<'_, SessionManager>,
@@ -234,6 +310,10 @@ pub async fn storage_upload_file(
     provider
         .upload_file(path_buf, remote_path, progress_tx)
         .await
+        .map_err(|e| {
+            eprintln!("[Tauri Command] ❌ storage_upload_file error: {:?}", e);
+            e
+        })
 }
 
 #[tauri::command]

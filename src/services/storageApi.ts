@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpSessionInfo, UpdateCheckResult } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, S3ConnectParams, SftpSessionInfo, UpdateCheckResult } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -115,6 +115,58 @@ export const storageApi = {
         throw error;
       }
       throw new Error(formatConnectionError(err));
+    }
+  },
+
+  async testS3Connection(params: S3ConnectParams): Promise<ConnectionTestResult> {
+    if (!isTauri()) {
+      return {
+        success: true,
+        message: 'Connexion S3 établie avec succès ! Accès au bucket validé.',
+        logs: [
+          `[${new Date().toLocaleTimeString()}] Résolution du bucket '${params.bucket}'`,
+          `[${new Date().toLocaleTimeString()}] Endpoint : ${params.endpoint || 'AWS S3 Standard'}`,
+          `[${new Date().toLocaleTimeString()}] Région : ${params.region || 'auto'}`,
+          `[${new Date().toLocaleTimeString()}] ✅ Accès au bucket validé avec succès.`,
+        ],
+      };
+    }
+    try {
+      return await invoke<ConnectionTestResult>('test_s3_connection', { config: params });
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || String(err),
+        logs: [`[Erreur Système] ${err?.message || err}`],
+      };
+    }
+  },
+
+  async connectS3(params: S3ConnectParams): Promise<SftpSessionInfo> {
+    if (!isTauri()) {
+      console.log('[Mock] Connecting S3:', {
+        profile_id: params.profile_id,
+        bucket: params.bucket,
+        endpoint: params.endpoint,
+        region: params.region,
+        hasAccessKey: Boolean(params.accessKey),
+        hasSecretKey: Boolean(params.secretKey),
+      });
+      return {
+        profile_id: params.profile_id,
+        is_elevated: false,
+        sudo_capability: 'none',
+      };
+    }
+    try {
+      return await invoke<SftpSessionInfo>('connect_s3', { config: params });
+    } catch (err: any) {
+      if (isCancelledError(err)) {
+        const error = new Error('Connexion annulée : le profil a été déconnecté.');
+        (error as any).type = 'Cancelled';
+        throw error;
+      }
+      throw new Error(err?.message || String(err));
     }
   },
 
