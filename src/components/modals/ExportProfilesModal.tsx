@@ -9,11 +9,11 @@ export const ExportProfilesModal: React.FC = () => {
   if (!isExportModalOpen) return null;
 
   // Sanitized profiles: no secret keys or passwords
-  const sanitizedProfiles = profiles.map(({ id, name, type, endpoint, bucket, region, host, port, username, isFavorite }) => ({
+  const sanitizedProfiles = profiles.map(({ id, name, type, endpoint, bucket, region, accessKey, host, port, username, isFavorite }) => ({
     id,
     name,
     type,
-    ...(type === 's3' ? { endpoint, bucket, region } : { host, port, username }),
+    ...(type === 's3' ? { endpoint, bucket, region, accessKey } : { host, port, username }),
     isFavorite,
   }));
 

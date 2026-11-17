@@ -1,6 +1,6 @@
 [package]
 name = "orbit"
-version = "0.1.4"
+version = "0.2.0"
 description = "Orbit - Modern S3 & SFTP Desktop Client"
 authors = ["Orbit Team"]
 edition = "2024"
@@ -29,6 +29,9 @@ russh-sftp = "3.0.1"
 chrono = "0.4.45"
 tauri-plugin-dialog = "2.8.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+aws-config = "1"
+aws-sdk-s3 = "1"
+urlencoding = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

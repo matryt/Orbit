@@ -36,6 +36,9 @@ pub enum AppError {
 
     #[error("Transfer error: {0}")]
     Transfer(String),
+
+    #[error("S3 error: {0}")]
+    S3(String),
 }
 
 impl From<std::io::Error> for AppError {

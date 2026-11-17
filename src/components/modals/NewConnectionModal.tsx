@@ -73,6 +73,7 @@ export const NewConnectionModal: React.FC = () => {
       setEndpoint(editingProfile.endpoint || '');
       setBucket(editingProfile.bucket || '');
       setRegion(editingProfile.region || 'eu-west-3');
+      setAccessKey(editingProfile.accessKey || '');
       setHost(editingProfile.host || '');
       setPort(editingProfile.port || 22);
       setUsername(editingProfile.username || '');
@@ -139,15 +140,53 @@ export const NewConnectionModal: React.FC = () => {
     setShowLogs(false);
 
     if (type === 's3') {
-      setTestResult({
-        type: 'success',
-        message: 'Configuration S3 prête (le test direct via AWS SDK sera activé à l\'étape 2).',
-        logs: [
-          `[${new Date().toLocaleTimeString()}] Validation des identifiants S3`,
-          `[${new Date().toLocaleTimeString()}] Bucket : ${bucket || '(racine)'}`,
-          `[${new Date().toLocaleTimeString()}] Endpoint : ${endpoint || 'AWS Standard (S3)'}`,
-        ],
-      });
+      if (!bucket.trim()) {
+        setTestResult({
+          type: 'error',
+          message: 'Veuillez saisir un nom de bucket S3.',
+          logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Bucket est obligatoire.`],
+        });
+        return;
+      }
+      if (!accessKey.trim()) {
+        setTestResult({
+          type: 'error',
+          message: 'Veuillez renseigner votre Access Key ID.',
+          logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Access Key est obligatoire.`],
+        });
+        return;
+      }
+
+      setIsTesting(true);
+      try {
+        const res = await storageApi.testS3Connection({
+          profile_id: editingProfile?.id || `test-${Date.now()}`,
+          endpoint: endpoint.trim() || undefined,
+          bucket: bucket.trim(),
+          region: region.trim() || undefined,
+          accessKey: accessKey.trim(),
+          secretKey: secretKey.trim() || undefined,
+        });
+
+        setTestResult({
+          type: res.success ? 'success' : 'error',
+          message: res.message,
+          logs: res.logs,
+        });
+
+        if (!res.success) {
+          setShowLogs(true);
+        }
+      } catch (err: any) {
+        setTestResult({
+          type: 'error',
+          message: err.message || 'Impossible de contacter le service S3.',
+          logs: [`[Erreur inattendue] ${err?.message || err}`],
+        });
+        setShowLogs(true);
+      } finally {
+        setIsTesting(false);
+      }
       return;
     }
 
@@ -242,6 +281,7 @@ export const NewConnectionModal: React.FC = () => {
               endpoint: endpoint.trim() || undefined,
               bucket: bucket.trim() || undefined,
               region: region.trim() || undefined,
+              accessKey: accessKey.trim() || undefined,
               host: undefined,
               port: undefined,
               username: undefined,
@@ -258,6 +298,7 @@ export const NewConnectionModal: React.FC = () => {
               endpoint: undefined,
               bucket: undefined,
               region: undefined,
+              accessKey: undefined,
             }),
       };
       await updateProfile(updatedProfile, secret || undefined);
@@ -273,6 +314,7 @@ export const NewConnectionModal: React.FC = () => {
               endpoint: endpoint.trim() || undefined,
               bucket: bucket.trim() || undefined,
               region: region.trim() || undefined,
+              accessKey: accessKey.trim() || undefined,
             }
           : {
               host: host.trim(),
@@ -315,22 +357,29 @@ export const NewConnectionModal: React.FC = () => {
                 setType('sftp');
                 setTestResult(null);
               }}
-              className="flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm"
+              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
+                type === 'sftp'
+                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30 shadow-sm'
+                  : 'text-zinc-400 hover:text-white hover:bg-white/5 border border-transparent'
+              }`}
             >
-              <Server className="w-4 h-4 text-sky-400" />
+              <Server className={`w-4 h-4 ${type === 'sftp' ? 'text-sky-400' : 'text-zinc-400'}`} />
               <span>SFTP (SSH)</span>
             </button>
             <button
               type="button"
-              disabled
-              title="Le support S3 (AWS, Cloudflare R2, Scaleway, MinIO) arrive dans la version v0.2"
-              className="flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all opacity-45 cursor-not-allowed text-zinc-500 select-none bg-surface/30 border border-transparent"
+              onClick={() => {
+                setType('s3');
+                setTestResult(null);
+              }}
+              className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all ${
+                type === 's3'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 shadow-sm'
+                  : 'text-zinc-400 hover:text-white hover:bg-white/5 border border-transparent'
+              }`}
             >
-              <Cloud className="w-4 h-4 text-zinc-500" />
+              <Cloud className={`w-4 h-4 ${type === 's3' ? 'text-amber-400' : 'text-zinc-400'}`} />
               <span>Amazon S3 / R2 / MinIO</span>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/25 font-normal">
-                Bientôt
-              </span>
             </button>
           </div>
 
@@ -368,6 +417,14 @@ export const NewConnectionModal: React.FC = () => {
                   placeholder="https://<account_id>.r2.cloudflarestorage.com"
                   className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 font-mono"
                 />
+                {endpoint.trim().startsWith('http://') &&
+                  !endpoint.includes('localhost') &&
+                  !endpoint.includes('127.0.0.1') &&
+                  !endpoint.includes('::1') && (
+                    <p className="mt-1 text-[11px] text-amber-400">
+                      ⚠️ Attention : cet endpoint utilise HTTP non chiffré. Vos identifiants et données transiteront en clair.
+                    </p>
+                  )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
