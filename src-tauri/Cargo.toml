@@ -1,6 +1,6 @@
 [package]
 name = "orbit"
-version = "0.1.4"
+version = "0.2.0"
 description = "Orbit - Modern S3 & SFTP Desktop Client"
 authors = ["Orbit Team"]
 edition = "2024"

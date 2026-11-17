@@ -7,7 +7,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-**Orbit** is a modern, lightweight, blazing-fast SFTP (and soon S3) desktop client inspired by **Transmit**, **Linear**, and **Raycast**. Built with Tauri v2, pure Rust, and React, Orbit is engineered to replace legacy tools like Cyberduck and FileZilla with a sleek, minimalist, and developer-friendly experience.
+**Orbit** is a modern, lightweight, blazing-fast SFTP and S3 desktop client inspired by **Transmit**, **Linear**, and **Raycast**. Built with Tauri v2, pure Rust, and React, Orbit is engineered to replace legacy tools like Cyberduck and FileZilla with a sleek, minimalist, and developer-friendly experience.
 
 ---
 
@@ -15,7 +15,8 @@
 
 - ⚡ **Pure Rust Engine**: Powered by `tokio` and `russh`. High-performance streaming transfers without loading files into RAM.
 - 🔑 **Modern SFTP**: Pure Rust SFTP client with password and SSH Key authentication (`ed25519`, `rsa`, `id_ecdsa`).
-- 🪣 **Universal S3 Support** *(Coming in v0.2)*: Architecture prepared for AWS S3, Cloudflare R2, Scaleway, MinIO with custom endpoint URLs and multipart uploads. *(v0.1 is 100% focused on rock-solid SFTP)*.
+- 🪣 **Universal S3 & S3-Compatible Storage**: Native support for AWS S3, Cloudflare R2, MinIO, Scaleway, Wasabi, and Ceph with custom endpoint URLs, virtual folder navigation, multipart uploads, and region configuration.
+- 🖱️ **Fluid Dual-Pane Drag & Drop**: High-performance pointer-based transfers between local and remote panes with multi-file selection, target folder dropping, and instant cancellation via `Escape`, alongside native OS file drops from macOS Finder / Windows Explorer.
 - 🔒 **Native OS Keyring Security**: Credentials, passwords, and SSH passphrases are encrypted and stored directly in your operating system's native secure store (macOS Keychain or Windows Credential Manager). Never plain text.
 - 🪟 **Native macOS & Windows Experience**:
   - **macOS**: Native window vibrancy (translucent sidebar), hidden title bar overlay, and smooth gestures.
@@ -152,8 +153,8 @@ Orbit is developed as an open-source project to solve the daily frustration of s
 - [x] Remote file operations: New folder, inline rename, delete with confirmation (v0.1)
 - [x] Secure credentials management via native OS Keyring (v0.1)
 - [x] Quick Look instant preview and dual-pane browsing (v0.1)
-- [ ] **Universal S3 Provider** (AWS S3, Cloudflare R2, Scaleway, MinIO) *(v0.2)*
-- [ ] Native drag-and-drop file transfers from OS desktop/explorer
+- [x] **Universal S3 Provider** (AWS S3, Cloudflare R2, Scaleway, MinIO) *(v0.2)*
+- [x] **Dual-pane & OS Drag-and-Drop** with multi-selection and Escape cancel *(v0.2)*
 - [ ] Recursive directory upload and download
 - [ ] Remote file permissions editor (`chmod`)
 - [ ] "Edit in external editor" with automatic upload on save
