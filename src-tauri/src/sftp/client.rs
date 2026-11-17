@@ -20,7 +20,7 @@ use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
     HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
 };
-use crate::transfer::TransferHandle;
+use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
@@ -1447,13 +1447,14 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
-        let mut remote_file = transfer
-            .guard(async {
-                self.session.create(&remote_path).await.map_err(|e| {
-                    AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
-                })
-            })
-            .await?;
+        // Pas de `guard` ici : interrompre `create` après réception de l'OPEN par le serveur
+        // laisserait un fichier distant vide/tronqué sans nettoyage. On laisse l'ouverture
+        // aboutir ; une annulation sera prise en compte au premier `checkpoint` de la boucle,
+        // qui passe par le nettoyage ci-dessous.
+        let mut remote_file =
+            self.session.create(&remote_path).await.map_err(|e| {
+                AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
+            })?;
 
         transfer.start(total_bytes);
 
@@ -1535,10 +1536,11 @@ impl StorageProvider for SftpProvider {
             .await?;
         let total_bytes = meta.size.unwrap_or(0);
 
-        let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| {
+        let partial_path = partial_download_path(&local_path, transfer.id());
+        let mut local_file = tokio::fs::File::create(&partial_path).await.map_err(|e| {
             AppError::Io(format!(
                 "Cannot create local file {}: {e}",
-                local_path.display()
+                partial_path.display()
             ))
         })?;
 
@@ -1576,11 +1578,12 @@ impl StorageProvider for SftpProvider {
         }
         .await;
 
+        drop(local_file);
         if let Err(err) = copy_result {
-            drop(local_file);
-            let _ = tokio::fs::remove_file(&local_path).await;
+            let _ = tokio::fs::remove_file(&partial_path).await;
             return Err(err);
         }
+        finalize_partial_download(&partial_path, &local_path).await?;
 
         transfer.complete();
         Ok(())

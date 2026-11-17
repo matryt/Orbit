@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tauri::ipc::Channel;
@@ -167,6 +168,34 @@ impl TransferHandle {
     {
         self.control.guard(fut).await
     }
+}
+
+/// Chemin temporaire, propre à un transfert, dans lequel un téléchargement est écrit avant
+/// d'être renommé vers sa destination finale. Un transfert interrompu ne touche ainsi jamais
+/// au fichier de destination existant, ni à celui d'un autre transfert visant le même chemin.
+pub fn partial_download_path(local_path: &Path, transfer_id: &str) -> PathBuf {
+    let file_name = local_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".into());
+    // L'identifiant vient du frontend : on n'en garde que des caractères sûrs pour un nom de fichier.
+    let safe_id: String = transfer_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    local_path.with_file_name(format!(".{file_name}.{safe_id}.orbit-part"))
+}
+
+/// Remplace `local_path` par le fichier temporaire une fois le téléchargement terminé.
+pub async fn finalize_partial_download(partial: &Path, local_path: &Path) -> Result<(), AppError> {
+    if let Err(e) = tokio::fs::rename(partial, local_path).await {
+        let _ = tokio::fs::remove_file(partial).await;
+        return Err(AppError::Io(format!(
+            "Impossible de finaliser le téléchargement vers {} : {e}",
+            local_path.display()
+        )));
+    }
+    Ok(())
 }
 
 struct TransferEntry {
@@ -342,6 +371,24 @@ mod tests {
         };
         let (res, _) = tokio::join!(handle.checkpoint(), cancel);
         assert!(matches!(res, Err(AppError::Cancelled(_))));
+    }
+
+    #[test]
+    fn partial_download_path_stays_in_destination_dir_and_is_unique() {
+        let dest = Path::new("/tmp/dir/report.pdf");
+        let a = partial_download_path(dest, "tx-1");
+        let b = partial_download_path(dest, "tx-2");
+        assert_eq!(a.parent(), dest.parent());
+        assert_ne!(a, b);
+        assert_ne!(a, dest);
+    }
+
+    #[test]
+    fn partial_download_path_sanitizes_transfer_id() {
+        let dest = Path::new("/tmp/dir/report.pdf");
+        let p = partial_download_path(dest, "../../etc/passwd");
+        assert_eq!(p.parent(), dest.parent());
+        assert_eq!(p.file_name().unwrap(), ".report.pdf.etcpasswd.orbit-part");
     }
 
     #[tokio::test]

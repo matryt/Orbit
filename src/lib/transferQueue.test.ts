@@ -25,9 +25,10 @@ test('respects running transfers when computing free slots', () => {
   assert.deepEqual(pickTransfersToStart(transfers, 3), ['c']);
 });
 
-test('paused transfers free their slot', () => {
+test('paused transfers keep their slot', () => {
   const transfers = [item('b', 'queued'), item('a', 'paused')];
-  assert.deepEqual(pickTransfersToStart(transfers, 1), ['b']);
+  assert.deepEqual(pickTransfersToStart(transfers, 1), []);
+  assert.deepEqual(pickTransfersToStart(transfers, 2), ['b']);
 });
 
 test('returns nothing when the queue is full', () => {

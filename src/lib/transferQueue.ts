@@ -5,9 +5,12 @@ export const MAX_CONCURRENT_TRANSFERS = 3;
 
 export type TransferStatus = TransferItem['status'];
 
-/** Un transfert en pause libère son créneau : seuls les transferts actifs comptent. */
+/**
+ * Nombre de créneaux occupés. Un transfert en pause conserve son créneau : côté Rust il garde
+ * ses ressources ouvertes (handle SFTP, flux S3), et sa reprise ne doit jamais dépasser la limite.
+ */
 export function countRunning(transfers: Pick<TransferItem, 'status'>[]): number {
-  return transfers.filter((t) => t.status === 'transferring').length;
+  return transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').length;
 }
 
 /**

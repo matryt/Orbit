@@ -808,7 +808,6 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       console.error('[Orbit] Pause failed:', err);
       updateTransfer(set, id, { status: 'transferring' }, ['paused']);
     });
-    get().processTransferQueue();
   },
 
   resumeTransfer: (id) => {

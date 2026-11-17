@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use crate::error::AppError;
 use crate::models::{FileEntry, S3ConnectConfig};
 use crate::provider::StorageProvider;
-use crate::transfer::TransferHandle;
+use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
 
 pub struct S3Provider {
     client: Client,
@@ -555,7 +555,8 @@ impl StorageProvider for S3Provider {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut file = tokio::fs::File::create(&local_path).await?;
+        let partial_path = partial_download_path(&local_path, transfer.id());
+        let mut file = tokio::fs::File::create(&partial_path).await?;
         let mut body = resp.body;
 
         transfer.start(total_bytes);
@@ -582,11 +583,12 @@ impl StorageProvider for S3Provider {
         }
         .await;
 
+        drop(file);
         if let Err(err) = copy_result {
-            drop(file);
-            let _ = tokio::fs::remove_file(&local_path).await;
+            let _ = tokio::fs::remove_file(&partial_path).await;
             return Err(err);
         }
+        finalize_partial_download(&partial_path, &local_path).await?;
 
         transfer.complete();
         Ok(())
@@ -745,6 +747,7 @@ impl StorageProvider for S3Provider {
                 .map_err(|e| AppError::Io(format!("Erreur de lecture du fichier local : {}", e)))?;
             let body = ByteStream::from(data);
 
+            transfer.checkpoint().await?;
             transfer
                 .guard(async {
                     self.client
