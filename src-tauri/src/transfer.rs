@@ -170,25 +170,44 @@ impl TransferHandle {
     }
 }
 
+/// Max length of the transfer id embedded in a temporary file name.
+const PARTIAL_ID_MAX_LEN: usize = 64;
+
 /// Per-transfer temporary path a download is written to before being renamed to its final
 /// destination. An interrupted transfer therefore never touches an existing destination file,
 /// nor the output of another transfer targeting the same path.
+///
+/// The name does not embed the destination file name, so its length stays bounded
+/// (a long but valid destination name must not exceed the 255-byte file name limit).
 pub fn partial_download_path(local_path: &Path, transfer_id: &str) -> PathBuf {
-    let file_name = local_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "download".into());
     // The id comes from the frontend: keep only characters that are safe in a file name.
     let safe_id: String = transfer_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(PARTIAL_ID_MAX_LEN)
         .collect();
-    local_path.with_file_name(format!(".{file_name}.{safe_id}.orbit-part"))
+    local_path.with_file_name(format!(".orbit-{safe_id}.part"))
 }
 
 /// Replaces `local_path` with the temporary file once the download has finished.
+///
+/// If `local_path` already exists, its permissions are copied onto the temporary file first:
+/// `rename` swaps the inode, so without this an existing private file (e.g. `0600`) would
+/// silently become readable with the process default mode (e.g. `0644`).
 pub async fn finalize_partial_download(partial: &Path, local_path: &Path) -> Result<(), AppError> {
-    if let Err(e) = tokio::fs::rename(partial, local_path).await {
+    let result: Result<(), String> = async {
+        if let Ok(existing) = tokio::fs::metadata(local_path).await {
+            tokio::fs::set_permissions(partial, existing.permissions())
+                .await
+                .map_err(|e| format!("cannot preserve permissions: {e}"))?;
+        }
+        tokio::fs::rename(partial, local_path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+
+    if let Err(e) = result {
         let _ = tokio::fs::remove_file(partial).await;
         return Err(AppError::Io(format!(
             "Impossible de finaliser le téléchargement vers {} : {e}",
@@ -388,7 +407,57 @@ mod tests {
         let dest = Path::new("/tmp/dir/report.pdf");
         let p = partial_download_path(dest, "../../etc/passwd");
         assert_eq!(p.parent(), dest.parent());
-        assert_eq!(p.file_name().unwrap(), ".report.pdf.etcpasswd.orbit-part");
+        assert_eq!(p.file_name().unwrap(), ".orbit-etcpasswd.part");
+    }
+
+    #[test]
+    fn partial_download_path_length_is_bounded() {
+        let long_name = "a".repeat(250);
+        let dest = PathBuf::from("/tmp/dir").join(&long_name);
+        let p = partial_download_path(&dest, &"x".repeat(500));
+        assert!(p.file_name().unwrap().len() <= 255);
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("orbit-transfer-test-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn finalize_replaces_destination_content() {
+        let dir = scratch_dir("replace");
+        let dest = dir.join("file.txt");
+        let partial = partial_download_path(&dest, "t1");
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::write(&partial, b"new").unwrap();
+
+        finalize_partial_download(&partial, &dest).await.unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_preserves_existing_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("perms");
+        let dest = dir.join("secret.env");
+        let partial = partial_download_path(&dest, "t1");
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&partial, b"new").unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        finalize_partial_download(&partial, &dest).await.unwrap();
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
