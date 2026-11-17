@@ -31,7 +31,7 @@ export function splitPath(path: string, remote = false): { dir: string; name: st
   if (idx < 0) return { dir: '', name: path };
   let dir = path.substring(0, idx);
   if (dir === '') dir = path[idx]; // root: "/file" -> "/"
-  else if (/^[A-Za-z]:$/.test(dir)) dir = `${dir}\\`; // "C:\file" -> "C:\"
+  else if (!remote && /^[A-Za-z]:$/.test(dir)) dir = `${dir}\\`; // local "C:\file" -> "C:\"
   return { dir, name: path.substring(idx + 1) };
 }
 

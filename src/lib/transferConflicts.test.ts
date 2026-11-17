@@ -20,6 +20,10 @@ describe('remote paths', () => {
   it('only split remote paths on slashes', () => {
     assert.deepEqual(splitPath('/srv/report\\final.txt', true), { dir: '/srv', name: 'report\\final.txt' });
   });
+  it('never turns a remote drive-like prefix into a backslash root', () => {
+    assert.deepEqual(splitPath('C:/file.txt', true), { dir: 'C:', name: 'file.txt' });
+    assert.deepEqual(splitPath('/C:/file.txt', true), { dir: '/C:', name: 'file.txt' });
+  });
   it('join remote paths with a slash', () => {
     assert.equal(joinPath('/srv', 'a (1).txt', true), '/srv/a (1).txt');
   });
