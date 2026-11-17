@@ -14,23 +14,28 @@ export function countRunning(transfers: Pick<TransferItem, 'status'>[]): number 
 }
 
 type SchedulableTransfer = Pick<TransferItem, 'id' | 'status' | 'direction' | 'remotePath' | 'localPath'> &
-  Partial<Pick<TransferItem, 'profileId'>>;
+  Partial<Pick<TransferItem, 'profileId' | 'inFlight'>>;
 
 /**
- * Identifies the file a transfer writes. Local names are compared case-insensitively
- * (APFS / NTFS defaults), remote ones are scoped to their profile.
+ * Identifies the file a transfer writes. Local paths are compared case-insensitively
+ * (APFS / NTFS defaults) and with `\\` and `/` treated alike (Windows accepts both);
+ * remote paths are kept as-is and scoped to their profile.
  */
 export function destinationKey(tx: SchedulableTransfer): string {
   return tx.direction === 'upload'
     ? `up:${tx.profileId ?? ''}:${tx.remotePath}`
-    : `down:${tx.localPath.toLowerCase()}`;
+    : `down:${tx.localPath.replace(/\\/g, '/').toLowerCase()}`;
 }
+
+/** A destination is busy while a transfer is active on it or its backend call has not returned. */
+const holdsDestination = (t: SchedulableTransfer) =>
+  t.inFlight === true || t.status === 'transferring' || t.status === 'paused';
 
 /**
  * Returns the ids of queued transfers to start, in FIFO order.
  * The store list is ordered newest first, so it is walked backwards.
- * A queued transfer whose destination is already being written by an active transfer
- * waits for it to finish: there is never more than one writer per destination.
+ * A queued transfer whose destination is held by another transfer (active, or cancelled but
+ * still stopping on the backend) waits for it: there is never more than one writer per destination.
  */
 export function pickTransfersToStart(
   transfers: SchedulableTransfer[],
@@ -39,9 +44,7 @@ export function pickTransfersToStart(
   let freeSlots = Math.max(0, maxConcurrent - countRunning(transfers));
   if (freeSlots === 0) return [];
 
-  const busy = new Set(
-    transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').map(destinationKey)
-  );
+  const busy = new Set(transfers.filter(holdsDestination).map(destinationKey));
   const ids: string[] = [];
   for (let i = transfers.length - 1; i >= 0 && freeSlots > 0; i--) {
     const tx = transfers[i];

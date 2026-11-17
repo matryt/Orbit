@@ -92,3 +92,16 @@ test('same remote path on different profiles is not a collision', () => {
   const b = { ...item('b', 'queued'), remotePath: '/same.txt', profileId: 'p2' };
   assert.deepEqual(pickTransfersToStart([b, a], 3), ['b']);
 });
+
+test('local destinations ignore separator style', () => {
+  const running = { ...item('a', 'transferring'), direction: 'download' as const, localPath: 'C:\\Downloads\\a.txt' };
+  const queued = { ...item('b', 'queued'), direction: 'download' as const, localPath: 'C:\\Downloads/a.txt' };
+  assert.deepEqual(pickTransfersToStart([queued, running], 3), []);
+});
+
+test('a cancelled transfer still stopping keeps its destination reserved', () => {
+  const stopping = { ...item('a', 'cancelled'), remotePath: '/same.txt', inFlight: true };
+  const queued = { ...item('b', 'queued'), remotePath: '/same.txt' };
+  assert.deepEqual(pickTransfersToStart([queued, stopping], 3), []);
+  assert.deepEqual(pickTransfersToStart([queued, { ...stopping, inFlight: false }], 3), ['b']);
+});

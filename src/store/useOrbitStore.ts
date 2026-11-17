@@ -295,6 +295,7 @@ async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
     }
   } finally {
     pendingCancels.delete(tx.id);
+    updateTransfer(set, tx.id, { inFlight: false });
     get().processTransferQueue();
   }
 }
@@ -920,7 +921,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   clearCompletedTransfers: () => {
     set((state) => ({
-      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status)),
+      // Keep cancelled transfers whose backend call is still stopping: they hold their destination.
+      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status) || tx.inFlight),
     }));
   },
 
@@ -958,7 +960,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     if (toStart.length === 0) return;
     set((state) => ({
       transfers: state.transfers.map((tx) =>
-        toStart.includes(tx.id) ? { ...tx, status: 'transferring' as const } : tx
+        toStart.includes(tx.id) ? { ...tx, status: 'transferring' as const, inFlight: true } : tx
       ),
     }));
     for (const id of toStart) {
