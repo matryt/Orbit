@@ -1,8 +1,8 @@
 use crate::error::AppError;
-use crate::models::{FileEntry, SudoCapability, TransferProgress};
+use crate::models::{FileEntry, SudoCapability};
+use crate::transfer::TransferHandle;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tauri::ipc::Channel;
 
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
@@ -15,13 +15,13 @@ pub trait StorageProvider: Send + Sync {
         &self,
         local_path: PathBuf,
         remote_path: String,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError>;
     async fn download_file(
         &self,
         remote_path: String,
         local_path: PathBuf,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError>;
 
     fn is_elevated(&self) -> bool {

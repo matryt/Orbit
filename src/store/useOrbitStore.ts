@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferItem, UpdateCheckResult } from '../types';
-import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
+import { MOCK_REMOTE_FILES } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
+import { applyProgress, generateTransferId, isFinishedStatus, pickTransfersToStart } from '../lib/transferQueue';
 
 export interface ActiveDragState {
   source: 'local' | 'remote';
@@ -95,6 +96,8 @@ interface OrbitState {
   resumeTransfer: (id: string) => void;
   cancelTransfer: (id: string) => void;
   clearCompletedTransfers: () => void;
+  /** Starts queued transfers within the available concurrency slots. */
+  processTransferQueue: () => void;
   uploadFile: (localPath: string, remotePath: string, fileName: string) => Promise<void>;
   downloadFile: (remotePath: string, localPath: string, fileName: string) => Promise<void>;
 
@@ -123,6 +126,93 @@ interface OrbitState {
 
 let remoteNavGen = 0;
 let localNavGen = 0;
+
+// ─── Transfers ────────────────────────────────────────────────────────────────
+
+type StoreSet = (fn: (state: OrbitState) => Partial<OrbitState>) => void;
+type StoreGet = () => OrbitState;
+
+/** Cancellations requested before the backend registered the transfer. */
+const pendingCancels = new Set<string>();
+
+function updateTransfer(
+  set: StoreSet,
+  id: string,
+  patch: Partial<TransferItem>,
+  onlyIfStatus?: TransferItem['status'][]
+) {
+  set((state) => ({
+    transfers: state.transfers.map((tx) =>
+      tx.id === id && (!onlyIfStatus || onlyIfStatus.includes(tx.status)) ? { ...tx, ...patch } : tx
+    ),
+  }));
+}
+
+function enqueueTransfer(
+  set: StoreSet,
+  get: StoreGet,
+  params: Pick<TransferItem, 'direction' | 'localPath' | 'remotePath' | 'fileName'>
+) {
+  const { activeProfileId, profiles } = get();
+  const profile = profiles.find((p) => p.id === activeProfileId);
+
+  const item: TransferItem = {
+    id: generateTransferId(),
+    profileId: activeProfileId,
+    serverName: profile?.name || 'SFTP Server',
+    serverType: profile?.type || 'sftp',
+    ...params,
+    bytesTransferred: 0,
+    totalBytes: 0,
+    speedBps: 0,
+    status: 'queued',
+  };
+
+  set((state) => ({
+    transfers: [item, ...state.transfers],
+    isTransferDrawerOpen: true,
+  }));
+  get().processTransferQueue();
+}
+
+async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
+  const onProgress = (p: BackendTransferProgress) => {
+    if (pendingCancels.has(tx.id)) {
+      storageApi.cancelTransfer(tx.id).catch(() => {});
+    }
+    set((state) => ({
+      transfers: state.transfers.map((t) => (t.id === tx.id ? applyProgress(t, p) : t)),
+    }));
+  };
+
+  try {
+    if (tx.direction === 'upload') {
+      await storageApi.uploadFile(tx.profileId ?? undefined, tx.id, tx.localPath, tx.remotePath, onProgress);
+    } else {
+      await storageApi.downloadFile(tx.profileId ?? undefined, tx.id, tx.remotePath, tx.localPath, onProgress);
+    }
+    // The file made it: show it as completed even if a late cancellation was requested.
+    updateTransfer(set, tx.id, { status: 'completed', speedBps: 0 });
+
+    const state = get();
+    if (tx.direction === 'upload' && state.activeProfileId === tx.profileId) {
+      await state.refreshRemote();
+    } else if (tx.direction === 'download' && state.isDualPane) {
+      await state.refreshLocal();
+    }
+  } catch (err: any) {
+    if (isCancelledError(err) || pendingCancels.has(tx.id)) {
+      updateTransfer(set, tx.id, { status: 'cancelled', speedBps: 0 });
+    } else {
+      console.error(`[Orbit] ${tx.direction === 'upload' ? 'Upload' : 'Download'} failed:`, err);
+      const errorMsg = typeof err === 'string' ? err : err?.message || 'Erreur lors du transfert';
+      updateTransfer(set, tx.id, { status: 'failed', speedBps: 0, error: errorMsg });
+    }
+  } finally {
+    pendingCancels.delete(tx.id);
+    get().processTransferQueue();
+  }
+}
 
 export const useOrbitStore = create<OrbitState>((set, get) => ({
   profiles: [],
@@ -230,6 +320,13 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   disconnectProfile: async (id: string) => {
+    // Queued transfers on this profile can no longer start; running ones are
+    // cancelled on the Rust side by the `disconnect` command.
+    set((state) => ({
+      transfers: state.transfers.map((tx) =>
+        tx.profileId === id && tx.status === 'queued' ? { ...tx, status: 'cancelled' as const } : tx
+      ),
+    }));
     try {
       await storageApi.disconnect(id);
     } catch (err) {
@@ -697,163 +794,70 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }
   },
 
-  transfers: MOCK_TRANSFERS,
+  transfers: [],
   isTransferDrawerOpen: false,
   toggleTransferDrawer: () =>
     set((state) => ({ isTransferDrawerOpen: !state.isTransferDrawerOpen })),
   setTransferDrawerOpen: (open) => set({ isTransferDrawerOpen: open }),
 
   pauseTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'paused', speedBps: 0 } : tx
-      ),
-    }));
+    const tx = get().transfers.find((t) => t.id === id);
+    if (!tx || tx.status !== 'transferring') return;
+    updateTransfer(set, id, { status: 'paused', speedBps: 0 });
+    storageApi.pauseTransfer(id).catch((err) => {
+      console.error('[Orbit] Pause failed:', err);
+      updateTransfer(set, id, { status: 'transferring' }, ['paused']);
+    });
   },
 
   resumeTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'transferring', speedBps: 24500000 } : tx
-      ),
-    }));
+    const tx = get().transfers.find((t) => t.id === id);
+    if (!tx || tx.status !== 'paused') return;
+    updateTransfer(set, id, { status: 'transferring' });
+    storageApi.resumeTransfer(id).catch((err) => {
+      console.error('[Orbit] Resume failed:', err);
+    });
   },
 
   cancelTransfer: (id) => {
-    set((state) => ({
-      transfers: state.transfers.map((tx) =>
-        tx.id === id ? { ...tx, status: 'cancelled', speedBps: 0 } : tx
-      ),
-    }));
+    const tx = get().transfers.find((t) => t.id === id);
+    if (!tx || isFinishedStatus(tx.status)) return;
+    const wasQueued = tx.status === 'queued';
+    updateTransfer(set, id, { status: 'cancelled', speedBps: 0 });
+    if (!wasQueued) {
+      // The transfer may not be registered on the Rust side yet: retry as soon
+      // as the first progress event arrives.
+      pendingCancels.add(id);
+      storageApi.cancelTransfer(id).catch(() => {});
+    }
+    get().processTransferQueue();
   },
 
   clearCompletedTransfers: () => {
     set((state) => ({
-      transfers: state.transfers.filter(
-        (tx) => tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'queued'
-      ),
+      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status)),
     }));
   },
 
   uploadFile: async (localPath, remotePath, fileName) => {
-    const { activeProfileId, profiles } = get();
-    const profile = profiles.find((p) => p.id === activeProfileId);
-    const txId = `tx-${Date.now()}`;
-
-    const newTransfer: TransferItem = {
-      id: txId,
-      serverName: profile?.name || 'SFTP Server',
-      serverType: profile?.type || 'sftp',
-      fileName,
-      localPath,
-      remotePath,
-      direction: 'upload',
-      bytesTransferred: 0,
-      totalBytes: 0,
-      speedBps: 0,
-      status: 'transferring',
-    };
-
-    set((state) => ({
-      transfers: [newTransfer, ...state.transfers],
-      isTransferDrawerOpen: true,
-    }));
-
-    try {
-      await storageApi.uploadFile(
-        activeProfileId,
-        localPath,
-        remotePath,
-        (p: BackendTransferProgress) => {
-          set((state) => ({
-            transfers: state.transfers.map((tx) =>
-              tx.id === txId
-                ? {
-                  ...tx,
-                  bytesTransferred: p.bytes_transferred,
-                  totalBytes: p.total_bytes,
-                  speedBps: p.speed_bps,
-                  status: p.status === 'completed' ? 'completed' : 'transferring',
-                }
-                : tx
-            ),
-          }));
-        }
-      );
-      await get().refreshRemote();
-    } catch (err: any) {
-      console.error('[Orbit] Upload failed:', err);
-      const errorMsg =
-        typeof err === 'string'
-          ? err
-          : err?.message || 'Erreur lors du transfert';
-      set((state) => ({
-        transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
-        ),
-      }));
-    }
+    enqueueTransfer(set, get, { direction: 'upload', localPath, remotePath, fileName });
   },
 
   downloadFile: async (remotePath, localPath, fileName) => {
-    const { activeProfileId, profiles } = get();
-    const profile = profiles.find((p) => p.id === activeProfileId);
-    const txId = `tx-${Date.now()}`;
+    enqueueTransfer(set, get, { direction: 'download', localPath, remotePath, fileName });
+  },
 
-    const newTransfer: TransferItem = {
-      id: txId,
-      serverName: profile?.name || 'SFTP Server',
-      serverType: profile?.type || 'sftp',
-      fileName,
-      localPath,
-      remotePath,
-      direction: 'download',
-      bytesTransferred: 0,
-      totalBytes: 0,
-      speedBps: 0,
-      status: 'transferring',
-    };
-
+  processTransferQueue: () => {
+    const toStart = pickTransfersToStart(get().transfers);
+    if (toStart.length === 0) return;
     set((state) => ({
-      transfers: [newTransfer, ...state.transfers],
-      isTransferDrawerOpen: true,
+      transfers: state.transfers.map((tx) =>
+        toStart.includes(tx.id) ? { ...tx, status: 'transferring' as const } : tx
+      ),
     }));
-
-    try {
-      await storageApi.downloadFile(
-        activeProfileId,
-        remotePath,
-        localPath,
-        (p: BackendTransferProgress) => {
-          set((state) => ({
-            transfers: state.transfers.map((tx) =>
-              tx.id === txId
-                ? {
-                  ...tx,
-                  bytesTransferred: p.bytes_transferred,
-                  totalBytes: p.total_bytes,
-                  speedBps: p.speed_bps,
-                  status: p.status === 'completed' ? 'completed' : 'transferring',
-                }
-                : tx
-            ),
-          }));
-        }
-      );
-      if (get().isDualPane) {
-        await get().refreshLocal();
-      }
-    } catch (err: any) {
-      console.error('[Orbit] Download failed:', err);
-      const errorMsg =
-        typeof err === 'string'
-          ? err
-          : err?.message || 'Erreur lors du transfert';
-      set((state) => ({
-        transfers: state.transfers.map((tx) =>
-          tx.id === txId ? { ...tx, status: 'failed', error: errorMsg } : tx
-        ),
-      }));
+    for (const id of toStart) {
+      const tx = get().transfers.find((t) => t.id === id);
+      if (tx) void runTransfer(set, get, tx);
     }
   },
 

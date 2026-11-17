@@ -28,13 +28,17 @@ export const TransferDrawer: React.FC = () => {
 
   if (!isTransferDrawerOpen && transfers.length === 0) return null;
 
-  const activeTransfers = transfers.filter((t) => t.status === 'transferring' || t.status === 'queued');
-  const totalSpeed = activeTransfers.reduce((acc, t) => acc + t.speedBps, 0);
+  const runningTransfers = transfers.filter((t) => t.status === 'transferring');
+  const pendingTransfers = transfers.filter(
+    (t) => t.status === 'transferring' || t.status === 'queued' || t.status === 'paused'
+  );
+  const queuedCount = transfers.filter((t) => t.status === 'queued').length;
+  const totalSpeed = runningTransfers.reduce((acc, t) => acc + t.speedBps, 0);
 
   // Floating indicator when collapsed
   if (!isTransferDrawerOpen) {
-    if (activeTransfers.length === 0) return null;
-    const firstActive = activeTransfers[0];
+    if (pendingTransfers.length === 0) return null;
+    const firstActive = pendingTransfers[0];
     return (
       <div
         onClick={() => setTransferDrawerOpen(true)}
@@ -43,7 +47,10 @@ export const TransferDrawer: React.FC = () => {
         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
         <div className="text-xs">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-white">{activeTransfers.length} transfert(s) en cours</span>
+            <span className="font-semibold text-white">
+              {runningTransfers.length} transfert(s) en cours
+              {queuedCount > 0 && <span className="text-zinc-400 font-normal"> · {queuedCount} en attente</span>}
+            </span>
             {firstActive.serverName && (
               <span className="text-[10px] text-zinc-400 bg-white/5 border border-border-subtle px-1.5 py-0.2 rounded font-mono truncate max-w-[140px]">
                 {firstActive.serverName}
@@ -71,6 +78,9 @@ export const TransferDrawer: React.FC = () => {
           <span className="text-[11px] font-mono text-zinc-400 bg-white/5 border border-border-subtle px-2 py-0.5 rounded">
             {formatBytes(totalSpeed)}/s
           </span>
+          {queuedCount > 0 && (
+            <span className="text-[11px] text-zinc-400">{queuedCount} en attente</span>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -152,7 +162,10 @@ export const TransferDrawer: React.FC = () => {
                     {tx.status === 'cancelled' && (
                       <span className="text-zinc-500 line-through">Arrêté</span>
                     )}
-                    {(tx.status === 'transferring' || tx.status === 'queued') && (
+                    {tx.status === 'queued' && (
+                      <span className="text-zinc-400">En attente</span>
+                    )}
+                    {tx.status === 'transferring' && (
                       <span className="flex items-center gap-1.5">
                         <span>{formatBytes(tx.bytesTransferred)} / {formatBytes(tx.totalBytes)}</span>
                         <span className="text-zinc-500">•</span>
@@ -183,7 +196,7 @@ export const TransferDrawer: React.FC = () => {
                       </button>
                     )}
 
-                    {(tx.status === 'transferring' || tx.status === 'paused') && (
+                    {(tx.status === 'transferring' || tx.status === 'paused' || tx.status === 'queued') && (
                       <button
                         onClick={() => cancelTransfer(tx.id)}
                         className="p-1 rounded hover:bg-red-500/20 text-zinc-400 hover:text-red-400 transition-colors"
@@ -206,7 +219,7 @@ export const TransferDrawer: React.FC = () => {
                       ? 'bg-red-500'
                       : tx.status === 'paused'
                       ? 'bg-amber-500'
-                      : tx.status === 'cancelled'
+                      : tx.status === 'cancelled' || tx.status === 'queued'
                       ? 'bg-zinc-600'
                       : 'bg-indigo-500'
                   }`}

@@ -32,6 +32,8 @@ export interface FileEntry {
 
 export interface TransferItem {
   id: string;
+  /** Profile the transfer was started on (frozen when enqueued). */
+  profileId?: string | null;
   serverName?: string;
   serverType?: StorageType;
   fileName: string;
