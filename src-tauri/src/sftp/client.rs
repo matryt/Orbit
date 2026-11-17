@@ -24,7 +24,7 @@ use crate::transfer::{TransferHandle, finalize_partial_download, partial_downloa
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
-/// Taille des blocs lus/écrits lors des transferts SFTP.
+/// Chunk size used for SFTP reads/writes during transfers.
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
 
 static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1447,10 +1447,10 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
-        // Pas de `guard` ici : interrompre `create` après réception de l'OPEN par le serveur
-        // laisserait un fichier distant vide/tronqué sans nettoyage. On laisse l'ouverture
-        // aboutir ; une annulation sera prise en compte au premier `checkpoint` de la boucle,
-        // qui passe par le nettoyage ci-dessous.
+        // No `guard` here: aborting `create` after the server has received the OPEN would
+        // leave an empty/truncated remote file with no cleanup. Let the open complete; a
+        // cancellation is then picked up by the first `checkpoint` in the copy loop, which
+        // goes through the cleanup below.
         let mut remote_file =
             self.session.create(&remote_path).await.map_err(|e| {
                 AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
@@ -1495,8 +1495,8 @@ impl StorageProvider for SftpProvider {
         .await;
 
         if let Err(err) = copy_result {
-            // Ne laisse pas de fichier distant tronqué derrière un transfert interrompu
-            // (le handle distant a déjà été libéré à la sortie du bloc de copie).
+            // Don't leave a truncated remote file behind an interrupted transfer
+            // (the remote handle was already released when the copy block exited).
             if let Err(rm_err) = self.session.remove_file(&remote_path).await {
                 eprintln!(
                     "[Orbit SFTP] ⚠️ Could not remove partial remote file {remote_path}: {rm_err}"

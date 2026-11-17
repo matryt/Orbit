@@ -1,8 +1,8 @@
-//! Contrôle des transferts en cours : pause, reprise, annulation et émission de progression.
+//! Control of running transfers: pause, resume, cancellation and progress emission.
 //!
-//! Chaque transfert lancé depuis le frontend est enregistré dans le [`TransferManager`] sous
-//! un identifiant fourni par le frontend. Le provider reçoit un [`TransferHandle`] qu'il
-//! interroge entre chaque bloc (`checkpoint`) et autour de chaque opération réseau (`guard`).
+//! Every transfer started by the frontend is registered in the [`TransferManager`] under an
+//! id supplied by the frontend. The provider receives a [`TransferHandle`] that it polls
+//! between chunks (`checkpoint`) and around each network operation (`guard`).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -28,7 +28,7 @@ fn cancelled_error() -> AppError {
     AppError::Cancelled("Transfert annulé par l'utilisateur.".into())
 }
 
-/// Côté consommateur : reçoit les signaux de contrôle d'un transfert.
+/// Consumer side: receives the control signals of a transfer.
 pub struct TransferControl {
     rx: watch::Receiver<TransferSignal>,
 }
@@ -38,8 +38,8 @@ impl TransferControl {
         *self.rx.borrow()
     }
 
-    /// Exécute `fut` en l'interrompant immédiatement si le transfert est annulé.
-    /// Une mise en pause n'interrompt pas l'opération en vol (elle prend effet au prochain `checkpoint`).
+    /// Runs `fut`, aborting it immediately if the transfer is cancelled.
+    /// A pause does not interrupt the in-flight operation (it takes effect at the next `checkpoint`).
     pub async fn guard<F, T>(&mut self, fut: F) -> Result<T, AppError>
     where
         F: Future<Output = Result<T, AppError>>,
@@ -53,7 +53,7 @@ impl TransferControl {
                 res = &mut fut => return res,
                 changed = self.rx.changed() => {
                     if changed.is_err() {
-                        // Le manager a été détruit : on termine simplement l'opération en cours.
+                        // The manager was dropped: just let the in-flight operation finish.
                         return fut.await;
                     }
                     if self.current() == TransferSignal::Cancelled {
@@ -65,7 +65,7 @@ impl TransferControl {
     }
 }
 
-/// Handle passé aux providers : combine le contrôle et l'émission de progression.
+/// Handle passed to providers: combines control and progress emission.
 pub struct TransferHandle {
     id: String,
     control: TransferControl,
@@ -112,14 +112,14 @@ impl TransferHandle {
         self.last_emit_bytes = self.bytes_transferred;
     }
 
-    /// Déclare la taille totale et émet un premier événement de progression.
+    /// Sets the total size and emits an initial progress event.
     pub fn start(&mut self, total_bytes: u64) {
         self.total_bytes = total_bytes;
         self.reset_speed_window();
         self.emit("transferring", 0);
     }
 
-    /// Comptabilise `n` octets transférés et émet la progression au plus toutes les 150 ms.
+    /// Records `n` transferred bytes and emits progress at most every 150 ms.
     pub fn advance(&mut self, n: u64) {
         self.bytes_transferred += n;
         let elapsed = self.last_emit.elapsed();
@@ -136,8 +136,8 @@ impl TransferHandle {
         self.emit("completed", 0);
     }
 
-    /// Point de contrôle entre deux blocs : attend tant que le transfert est en pause
-    /// et retourne `AppError::Cancelled` s'il a été annulé.
+    /// Checkpoint between two chunks: waits while the transfer is paused
+    /// and returns `AppError::Cancelled` if it was cancelled.
     pub async fn checkpoint(&mut self) -> Result<(), AppError> {
         match self.control.current() {
             TransferSignal::Running => Ok(()),
@@ -161,7 +161,7 @@ impl TransferHandle {
         }
     }
 
-    /// Voir [`TransferControl::guard`].
+    /// See [`TransferControl::guard`].
     pub async fn guard<F, T>(&mut self, fut: F) -> Result<T, AppError>
     where
         F: Future<Output = Result<T, AppError>>,
@@ -170,15 +170,15 @@ impl TransferHandle {
     }
 }
 
-/// Chemin temporaire, propre à un transfert, dans lequel un téléchargement est écrit avant
-/// d'être renommé vers sa destination finale. Un transfert interrompu ne touche ainsi jamais
-/// au fichier de destination existant, ni à celui d'un autre transfert visant le même chemin.
+/// Per-transfer temporary path a download is written to before being renamed to its final
+/// destination. An interrupted transfer therefore never touches an existing destination file,
+/// nor the output of another transfer targeting the same path.
 pub fn partial_download_path(local_path: &Path, transfer_id: &str) -> PathBuf {
     let file_name = local_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".into());
-    // L'identifiant vient du frontend : on n'en garde que des caractères sûrs pour un nom de fichier.
+    // The id comes from the frontend: keep only characters that are safe in a file name.
     let safe_id: String = transfer_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -186,7 +186,7 @@ pub fn partial_download_path(local_path: &Path, transfer_id: &str) -> PathBuf {
     local_path.with_file_name(format!(".{file_name}.{safe_id}.orbit-part"))
 }
 
-/// Remplace `local_path` par le fichier temporaire une fois le téléchargement terminé.
+/// Replaces `local_path` with the temporary file once the download has finished.
 pub async fn finalize_partial_download(partial: &Path, local_path: &Path) -> Result<(), AppError> {
     if let Err(e) = tokio::fs::rename(partial, local_path).await {
         let _ = tokio::fs::remove_file(partial).await;
@@ -203,7 +203,7 @@ struct TransferEntry {
     tx: watch::Sender<TransferSignal>,
 }
 
-/// Registre global des transferts actifs (état Tauri).
+/// Global registry of active transfers (Tauri state).
 #[derive(Default)]
 pub struct TransferManager {
     entries: Mutex<HashMap<String, TransferEntry>>,
@@ -239,7 +239,7 @@ impl TransferManager {
         let entry = entries
             .get(transfer_id)
             .ok_or_else(|| AppError::NotFound(format!("Transfert introuvable : {transfer_id}")))?;
-        // Une annulation est définitive : on ne repasse jamais d'un état annulé à un autre.
+        // Cancellation is final: never move out of the cancelled state.
         entry.tx.send_if_modified(|current| {
             if *current == TransferSignal::Cancelled || *current == signal {
                 false
@@ -263,7 +263,7 @@ impl TransferManager {
         self.signal(transfer_id, TransferSignal::Cancelled).await
     }
 
-    /// Annule tous les transferts liés à un profil (utilisé lors d'une déconnexion).
+    /// Cancels every transfer bound to a profile (used on disconnect).
     pub async fn cancel_for_profile(&self, profile_id: &str) {
         let entries = self.entries.lock().await;
         for entry in entries.values() {
@@ -347,7 +347,7 @@ mod tests {
         let mut handle = test_handle(manager.register("t1", None).await.unwrap());
         manager.pause("t1").await.unwrap();
 
-        // Toujours bloqué tant que le transfert est en pause.
+        // Still blocked while the transfer is paused.
         let blocked = tokio::time::timeout(Duration::from_millis(30), handle.checkpoint()).await;
         assert!(blocked.is_err());
 

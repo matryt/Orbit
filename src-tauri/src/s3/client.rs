@@ -730,7 +730,7 @@ impl StorageProvider for S3Provider {
             .await;
 
             if let Err(err) = upload_result {
-                // Libère les parts déjà envoyées (sinon elles restent facturées côté fournisseur).
+                // Release already-uploaded parts (otherwise the provider keeps billing for them).
                 let _ = self
                     .client
                     .abort_multipart_upload()

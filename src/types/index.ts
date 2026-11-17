@@ -32,7 +32,7 @@ export interface FileEntry {
 
 export interface TransferItem {
   id: string;
-  /** Profil sur lequel le transfert a été lancé (figé à la mise en file). */
+  /** Profile the transfer was started on (frozen when enqueued). */
   profileId?: string | null;
   serverName?: string;
   serverType?: StorageType;

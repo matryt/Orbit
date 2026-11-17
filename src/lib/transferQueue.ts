@@ -1,21 +1,21 @@
 import type { TransferItem } from '../types';
 
-/** Nombre maximum de transferts exécutés simultanément. */
+/** Maximum number of transfers running at the same time. */
 export const MAX_CONCURRENT_TRANSFERS = 3;
 
 export type TransferStatus = TransferItem['status'];
 
 /**
- * Nombre de créneaux occupés. Un transfert en pause conserve son créneau : côté Rust il garde
- * ses ressources ouvertes (handle SFTP, flux S3), et sa reprise ne doit jamais dépasser la limite.
+ * Number of occupied slots. A paused transfer keeps its slot: on the Rust side it still holds
+ * its resources (SFTP handle, S3 stream), and resuming it must never exceed the limit.
  */
 export function countRunning(transfers: Pick<TransferItem, 'status'>[]): number {
   return transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').length;
 }
 
 /**
- * Retourne les identifiants des transferts en attente à démarrer, dans l'ordre FIFO.
- * La liste du store est ordonnée du plus récent au plus ancien : on la parcourt donc à l'envers.
+ * Returns the ids of queued transfers to start, in FIFO order.
+ * The store list is ordered newest first, so it is walked backwards.
  */
 export function pickTransfersToStart(
   transfers: Pick<TransferItem, 'id' | 'status'>[],
@@ -36,9 +36,9 @@ export function isFinishedStatus(status: TransferStatus): boolean {
 }
 
 /**
- * Fusionne un événement de progression du backend dans un transfert.
- * Le statut n'est piloté par le backend que pour la complétion : pause/reprise/annulation
- * sont des actions de l'utilisateur et ne doivent pas être écrasées par un événement en retard.
+ * Merges a backend progress event into a transfer.
+ * The backend only drives the status for completion: pause/resume/cancel are user actions
+ * and must not be overwritten by a late event.
  */
 export function applyProgress<T extends TransferItem>(
   tx: T,

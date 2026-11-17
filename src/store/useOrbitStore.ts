@@ -96,7 +96,7 @@ interface OrbitState {
   resumeTransfer: (id: string) => void;
   cancelTransfer: (id: string) => void;
   clearCompletedTransfers: () => void;
-  /** Démarre les transferts en attente dans la limite des créneaux disponibles. */
+  /** Starts queued transfers within the available concurrency slots. */
   processTransferQueue: () => void;
   uploadFile: (localPath: string, remotePath: string, fileName: string) => Promise<void>;
   downloadFile: (remotePath: string, localPath: string, fileName: string) => Promise<void>;
@@ -127,12 +127,12 @@ interface OrbitState {
 let remoteNavGen = 0;
 let localNavGen = 0;
 
-// ─── Transferts ──────────────────────────────────────────────────────────────
+// ─── Transfers ────────────────────────────────────────────────────────────────
 
 type StoreSet = (fn: (state: OrbitState) => Partial<OrbitState>) => void;
 type StoreGet = () => OrbitState;
 
-/** Annulations demandées avant que le backend n'ait enregistré le transfert. */
+/** Cancellations requested before the backend registered the transfer. */
 const pendingCancels = new Set<string>();
 
 function updateTransfer(
@@ -191,7 +191,7 @@ async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
     } else {
       await storageApi.downloadFile(tx.profileId ?? undefined, tx.id, tx.remotePath, tx.localPath, onProgress);
     }
-    // Le fichier est arrivé : on l'affiche comme terminé même si une annulation tardive a été demandée.
+    // The file made it: show it as completed even if a late cancellation was requested.
     updateTransfer(set, tx.id, { status: 'completed', speedBps: 0 });
 
     const state = get();
@@ -320,8 +320,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   disconnectProfile: async (id: string) => {
-    // Les transferts en attente sur ce profil ne pourront plus démarrer ; ceux en cours
-    // sont annulés côté Rust par la commande `disconnect`.
+    // Queued transfers on this profile can no longer start; running ones are
+    // cancelled on the Rust side by the `disconnect` command.
     set((state) => ({
       transfers: state.transfers.map((tx) =>
         tx.profileId === id && tx.status === 'queued' ? { ...tx, status: 'cancelled' as const } : tx
@@ -825,8 +825,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     const wasQueued = tx.status === 'queued';
     updateTransfer(set, id, { status: 'cancelled', speedBps: 0 });
     if (!wasQueued) {
-      // Le transfert peut ne pas être encore enregistré côté Rust : on réessaiera
-      // dès le premier événement de progression reçu.
+      // The transfer may not be registered on the Rust side yet: retry as soon
+      // as the first progress event arrives.
       pendingCancels.add(id);
       storageApi.cancelTransfer(id).catch(() => {});
     }
