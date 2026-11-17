@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { useOrbitStore } from '../../store/useOrbitStore';
+import { useOrbitStore, TransferRequest } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
 import { FileEntry } from '../../types';
@@ -75,6 +75,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     refreshLocal,
     downloadFile,
     uploadFile,
+    enqueueTransfers,
     isDualPane,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
@@ -279,7 +280,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       }
 
       if (targetPath) {
-        await downloadFile(file.path, targetPath, file.name);
+        // The native save dialog already asked about overwriting an existing file.
+        await enqueueTransfers(
+          [{ direction: 'download', localPath: targetPath, remotePath: file.path, fileName: file.name }],
+          { checkConflicts: false }
+        );
       }
     } catch (err: any) {
       console.error('Download prompt failed:', err);
@@ -297,14 +302,16 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         });
         if (selected) {
           const filePaths = Array.isArray(selected) ? selected : [selected];
-          for (const filePath of filePaths) {
-            const fileName = filePath.split(/[/\\]/).pop() || 'file';
-            const remoteTarget =
-              currentPath === '/'
-                ? `/${fileName}`
-                : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
-            await uploadFile(filePath, remoteTarget, fileName);
-          }
+          await enqueueTransfers(
+            filePaths.map((filePath) => {
+              const fileName = filePath.split(/[/\\]/).pop() || 'file';
+              const remoteTarget =
+                currentPath === '/'
+                  ? `/${fileName}`
+                  : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
+              return { direction: 'upload' as const, localPath: filePath, remotePath: remoteTarget, fileName };
+            })
+          );
         }
       }
     } catch (err: any) {
@@ -502,18 +509,20 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           targetFolder ||
           (targetPane === 'remote' ? store.currentPath : store.localPath);
 
+        const requests: TransferRequest[] = [];
         for (const item of dragFiles) {
           if (isLocal && targetPane === 'remote') {
             const remoteTarget =
               targetBaseDir === '/'
                 ? `/${item.name}`
                 : `${targetBaseDir.replace(/\/+$/, '')}/${item.name}`;
-            await store.uploadFile(item.path, remoteTarget, item.name);
+            requests.push({ direction: 'upload', localPath: item.path, remotePath: remoteTarget, fileName: item.name });
           } else if (!isLocal && targetPane === 'local') {
             const localTarget = `${targetBaseDir.replace(/[/\\]+$/, '')}/${item.name}`;
-            await store.downloadFile(item.path, localTarget, item.name);
+            requests.push({ direction: 'download', localPath: localTarget, remotePath: item.path, fileName: item.name });
           }
         }
+        await store.enqueueTransfers(requests);
       }
     };
 

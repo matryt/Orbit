@@ -11,6 +11,7 @@ import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
 import { UpdateModal } from './components/modals/UpdateModal';
+import { TransferConflictModal } from './components/modals/TransferConflictModal';
 
 export function App() {
   const {
@@ -53,7 +54,7 @@ export function App() {
               if (!paths || paths.length === 0) return;
 
               const store = useOrbitStore.getState();
-              const { currentPath, uploadFile } = store;
+              const { currentPath, enqueueTransfers } = store;
 
               // Determine if drop happened over a specific folder element
               let targetDir = currentPath;
@@ -73,14 +74,16 @@ export function App() {
                 }
               }
 
-              for (const filePath of paths) {
-                const fileName = filePath.split(/[/\\]/).pop() || 'file';
-                const remoteTarget =
-                  targetDir === '/'
-                    ? `/${fileName}`
-                    : `${targetDir.replace(/\/+$/, '')}/${fileName}`;
-                await uploadFile(filePath, remoteTarget, fileName);
-              }
+              await enqueueTransfers(
+                paths.map((filePath) => {
+                  const fileName = filePath.split(/[/\\]/).pop() || 'file';
+                  const remoteTarget =
+                    targetDir === '/'
+                      ? `/${fileName}`
+                      : `${targetDir.replace(/\/+$/, '')}/${fileName}`;
+                  return { direction: 'upload' as const, localPath: filePath, remotePath: remoteTarget, fileName };
+                })
+              );
             }
           }
         );
@@ -163,6 +166,7 @@ export function App() {
       {isExportModalOpen && <ExportProfilesModal />}
       <HostKeyVerificationModal />
       <UpdateModal />
+      <TransferConflictModal />
     </div>
   );
 }

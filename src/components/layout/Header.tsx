@@ -42,7 +42,7 @@ export const Header: React.FC = () => {
     setNewFolderModalOpen,
     availableUpdate,
     setUpdateModalOpen,
-    uploadFile,
+    enqueueTransfers,
   } = useOrbitStore();
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -95,14 +95,16 @@ export const Header: React.FC = () => {
         });
         if (selected) {
           const filePaths = Array.isArray(selected) ? selected : [selected];
-          for (const filePath of filePaths) {
-            const fileName = filePath.split(/[/\\]/).pop() || 'file';
-            const remoteTarget =
-              currentPath === '/'
-                ? `/${fileName}`
-                : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
-            await uploadFile(filePath, remoteTarget, fileName);
-          }
+          await enqueueTransfers(
+            filePaths.map((filePath) => {
+              const fileName = filePath.split(/[/\\]/).pop() || 'file';
+              const remoteTarget =
+                currentPath === '/'
+                  ? `/${fileName}`
+                  : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
+              return { direction: 'upload' as const, localPath: filePath, remotePath: remoteTarget, fileName };
+            })
+          );
         }
       }
     } catch (err) {
