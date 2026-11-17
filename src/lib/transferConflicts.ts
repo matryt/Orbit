@@ -21,9 +21,13 @@ export interface ConflictDecision {
   applyToAll: boolean;
 }
 
-/** Splits a local or remote path into its parent directory and its last segment. */
-export function splitPath(path: string): { dir: string; name: string } {
-  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+/**
+ * Splits a path into its parent directory and its last segment.
+ * Remote paths (SFTP, S3) only use `/`: a backslash is a legal character in a remote name.
+ * Local paths also accept `\\` (Windows).
+ */
+export function splitPath(path: string, remote = false): { dir: string; name: string } {
+  const idx = remote ? path.lastIndexOf('/') : Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   if (idx < 0) return { dir: '', name: path };
   let dir = path.substring(0, idx);
   if (dir === '') dir = path[idx]; // root: "/file" -> "/"
@@ -32,7 +36,8 @@ export function splitPath(path: string): { dir: string; name: string } {
 }
 
 /** Joins a directory and a name, reusing the separator style of the directory. */
-export function joinPath(dir: string, name: string): string {
+export function joinPath(dir: string, name: string, remote = false): string {
+  if (remote) return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
   const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
   return dir.endsWith('/') || dir.endsWith('\\') ? `${dir}${name}` : `${dir}${sep}${name}`;
 }
@@ -61,6 +66,12 @@ export class NameSet {
   add(name: string): void {
     this.names.add(this.key(name));
   }
+
+  clone(): NameSet {
+    const copy = new NameSet(this.caseInsensitive);
+    for (const n of this.names) copy.names.add(n);
+    return copy;
+  }
 }
 
 /**
@@ -81,6 +92,10 @@ export function nextAvailableName(name: string, taken: NameSet): string {
 export const destinationOf = (r: Pick<TransferRequest, 'direction' | 'localPath' | 'remotePath'>) =>
   r.direction === 'upload' ? r.remotePath : r.localPath;
 
+/** Splits the destination of a request with the separator rules of its side (remote for uploads). */
+export const splitDestination = (r: Pick<TransferRequest, 'direction' | 'localPath' | 'remotePath'>) =>
+  splitPath(destinationOf(r), r.direction === 'upload');
+
 export interface PlanDeps {
   /** Names already taken in a destination directory. */
   loadTaken: (direction: TransferRequest['direction'], dir: string) => Promise<NameSet>;
@@ -97,21 +112,35 @@ export async function planTransferBatch(
   deps: PlanDeps
 ): Promise<TransferRequest[] | null> {
   const takenByDir = new Map<string, NameSet>();
-  const keyOf = (r: TransferRequest) => `${r.direction}:${splitPath(destinationOf(r)).dir}`;
+  const keyOf = (r: TransferRequest) => `${r.direction}:${splitDestination(r).dir}`;
   for (const r of requests) {
     const key = keyOf(r);
     if (!takenByDir.has(key)) {
-      takenByDir.set(key, await deps.loadTaken(r.direction, splitPath(destinationOf(r)).dir));
+      takenByDir.set(key, await deps.loadTaken(r.direction, splitDestination(r).dir));
     }
   }
-  const conflicts = (r: TransferRequest) => takenByDir.get(keyOf(r))!.has(splitPath(destinationOf(r)).name);
+
+  /** Conflicts left in `requests[from..]`, including collisions between those requests. */
+  const countConflictsFrom = (from: number) => {
+    const simulated = new Map<string, NameSet>();
+    let count = 0;
+    for (const r of requests.slice(from)) {
+      const key = keyOf(r);
+      if (!simulated.has(key)) simulated.set(key, takenByDir.get(key)!.clone());
+      const names = simulated.get(key)!;
+      const { name } = splitDestination(r);
+      if (names.has(name)) count++;
+      else names.add(name);
+    }
+    return count;
+  };
 
   const planned: TransferRequest[] = [];
   let choiceForAll: ConflictChoice | null = null;
 
   for (let i = 0; i < requests.length; i++) {
     const request = requests[i];
-    const { dir, name } = splitPath(destinationOf(request));
+    const { dir, name } = splitDestination(request);
     const taken = takenByDir.get(keyOf(request))!;
 
     if (!taken.has(name)) {
@@ -126,7 +155,7 @@ export async function planTransferBatch(
         fileName: name,
         direction: request.direction,
         destinationDir: dir,
-        otherConflicts: requests.slice(i + 1).filter(conflicts).length,
+        otherConflicts: countConflictsFrom(i + 1),
       });
       if (!decision) return null;
       choice = decision.choice;
@@ -141,7 +170,7 @@ export async function planTransferBatch(
 
     const newName = nextAvailableName(name, taken);
     taken.add(newName);
-    const newDest = joinPath(dir, newName);
+    const newDest = joinPath(dir, newName, request.direction === 'upload');
     planned.push(
       request.direction === 'upload'
         ? { ...request, remotePath: newDest, fileName: newName }

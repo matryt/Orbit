@@ -13,20 +13,44 @@ export function countRunning(transfers: Pick<TransferItem, 'status'>[]): number 
   return transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').length;
 }
 
+type SchedulableTransfer = Pick<TransferItem, 'id' | 'status' | 'direction' | 'remotePath' | 'localPath'> &
+  Partial<Pick<TransferItem, 'profileId'>>;
+
+/**
+ * Identifies the file a transfer writes. Local names are compared case-insensitively
+ * (APFS / NTFS defaults), remote ones are scoped to their profile.
+ */
+export function destinationKey(tx: SchedulableTransfer): string {
+  return tx.direction === 'upload'
+    ? `up:${tx.profileId ?? ''}:${tx.remotePath}`
+    : `down:${tx.localPath.toLowerCase()}`;
+}
+
 /**
  * Returns the ids of queued transfers to start, in FIFO order.
  * The store list is ordered newest first, so it is walked backwards.
+ * A queued transfer whose destination is already being written by an active transfer
+ * waits for it to finish: there is never more than one writer per destination.
  */
 export function pickTransfersToStart(
-  transfers: Pick<TransferItem, 'id' | 'status'>[],
+  transfers: SchedulableTransfer[],
   maxConcurrent: number = MAX_CONCURRENT_TRANSFERS
 ): string[] {
-  const freeSlots = Math.max(0, maxConcurrent - countRunning(transfers));
+  let freeSlots = Math.max(0, maxConcurrent - countRunning(transfers));
   if (freeSlots === 0) return [];
 
+  const busy = new Set(
+    transfers.filter((t) => t.status === 'transferring' || t.status === 'paused').map(destinationKey)
+  );
   const ids: string[] = [];
-  for (let i = transfers.length - 1; i >= 0 && ids.length < freeSlots; i--) {
-    if (transfers[i].status === 'queued') ids.push(transfers[i].id);
+  for (let i = transfers.length - 1; i >= 0 && freeSlots > 0; i--) {
+    const tx = transfers[i];
+    if (tx.status !== 'queued') continue;
+    const key = destinationKey(tx);
+    if (busy.has(key)) continue;
+    busy.add(key);
+    ids.push(tx.id);
+    freeSlots--;
   }
   return ids;
 }

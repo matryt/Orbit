@@ -16,6 +16,15 @@ describe('splitPath', () => {
   });
 });
 
+describe('remote paths', () => {
+  it('only split remote paths on slashes', () => {
+    assert.deepEqual(splitPath('/srv/report\\final.txt', true), { dir: '/srv', name: 'report\\final.txt' });
+  });
+  it('join remote paths with a slash', () => {
+    assert.equal(joinPath('/srv', 'a (1).txt', true), '/srv/a (1).txt');
+  });
+});
+
 describe('joinPath', () => {
   it('joins with the directory separator', () => {
     assert.equal(joinPath('/home/user', 'a.txt'), '/home/user/a.txt');
@@ -104,6 +113,21 @@ describe('planTransferBatch', () => {
     const res = await planTransferBatch([up('a.txt'), up('a.txt')], d);
     assert.deepEqual(res?.map((r) => r.remotePath), ['/srv/a.txt', '/srv/a (1).txt']);
     assert.equal(prompts.length, 1);
+  });
+
+  it('counts later intra-batch collisions in otherConflicts', async () => {
+    const { deps: d, prompts } = deps(['a.txt'], [
+      { choice: 'replace', applyToAll: false },
+      { choice: 'replace', applyToAll: false },
+    ]);
+    await planTransferBatch([up('a.txt'), up('b.txt'), up('b.txt')], d);
+    assert.equal(prompts[0].otherConflicts, 1);
+  });
+
+  it('keeps backslashes in remote names when renaming', async () => {
+    const { deps: d } = deps(['x\\y.txt'], [{ choice: 'keepBoth', applyToAll: false }]);
+    const res = await planTransferBatch([up('x\\y.txt')], d);
+    assert.equal(res?.[0].remotePath, '/srv/x\\y (1).txt');
   });
 
   it('returns null when the batch is cancelled', async () => {

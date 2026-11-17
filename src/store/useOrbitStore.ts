@@ -9,9 +9,8 @@ import {
   ConflictPrompt,
   NameSet,
   TransferRequest,
-  destinationOf,
   planTransferBatch,
-  splitPath,
+  splitDestination,
 } from '../lib/transferConflicts';
 
 export interface ActiveDragState {
@@ -202,42 +201,51 @@ function askConflict(set: StoreSet, prompt: TransferConflictPrompt): Promise<Con
   });
 }
 
-const sameDir = (a: string, b: string) => a.replace(/[/\\]+$/, '') === b.replace(/[/\\]+$/, '');
+const trimDir = (dir: string, remote: boolean) => dir.replace(remote ? /\/+$/ : /[/\\]+$/, '');
 
-/** Names already taken in `dir`: current listing plus destinations of pending transfers. */
+/** Destinations of transfers still queued or running in `dir`. */
+function pendingDestinations(
+  transfers: TransferItem[],
+  direction: TransferItem['direction'],
+  dir: string,
+  profileId: string
+): string[] {
+  const remote = direction === 'upload';
+  const names: string[] = [];
+  for (const tx of transfers) {
+    if (isFinishedStatus(tx.status) || tx.direction !== direction) continue;
+    if (remote && tx.profileId !== profileId) continue;
+    const dest = splitDestination(tx);
+    if (trimDir(dest.dir, remote) === trimDir(dir, remote)) names.push(dest.name);
+  }
+  return names;
+}
+
+/**
+ * Names already taken in `dir`: a fresh listing plus destinations of pending transfers.
+ * The listing is always re-read (the pane's cached listing can miss a transfer that has
+ * just completed), and pending transfers are sampled before and after it so a transfer
+ * finishing during the listing is never missed.
+ */
 async function loadTakenNames(
   get: StoreGet,
   direction: TransferItem['direction'],
   dir: string,
   profileId: string
 ): Promise<NameSet> {
-  const state = get();
+  const pendingBefore = pendingDestinations(get().transfers, direction, dir, profileId);
   let names: string[] = [];
   try {
-    if (direction === 'upload') {
-      const entries =
-        state.activeProfileId === profileId && sameDir(state.currentPath, dir)
-          ? state.remoteFiles
-          : await storageApi.listDir(profileId, dir);
-      names = entries.map((e) => e.name);
-    } else {
-      const entries = sameDir(state.localPath, dir)
-        ? state.localFiles
+    const entries =
+      direction === 'upload'
+        ? await storageApi.listDir(profileId, dir)
         : (await storageApi.listLocalDir(dir)).entries;
-      names = entries.map((e) => e.name);
-    }
+    names = entries.map((e) => e.name);
   } catch {
     // Missing or unreadable directory: no known conflict, the transfer will report the real error.
   }
-
-  const taken = new NameSet(direction === 'download', names);
-  for (const tx of state.transfers) {
-    if (isFinishedStatus(tx.status) || tx.direction !== direction) continue;
-    if (direction === 'upload' && tx.profileId !== profileId) continue;
-    const dest = splitPath(destinationOf(tx));
-    if (sameDir(dest.dir, dir)) taken.add(dest.name);
-  }
-  return taken;
+  const pendingAfter = pendingDestinations(get().transfers, direction, dir, profileId);
+  return new NameSet(direction === 'download', [...names, ...pendingBefore, ...pendingAfter]);
 }
 
 function planBatch(

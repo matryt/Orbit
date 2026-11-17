@@ -73,3 +73,22 @@ test('generateTransferId is unique within the same millisecond', () => {
   const ids = new Set(Array.from({ length: 50 }, () => generateTransferId()));
   assert.equal(ids.size, 50);
 });
+
+test('never starts two writers on the same destination', () => {
+  const running = { ...item('a', 'transferring'), remotePath: '/same.txt', profileId: 'p1' };
+  const queued = { ...item('b', 'queued'), remotePath: '/same.txt', profileId: 'p1' };
+  const other = { ...item('c', 'queued'), profileId: 'p1' };
+  assert.deepEqual(pickTransfersToStart([other, queued, running], 3), ['c']);
+});
+
+test('only one of two queued transfers to the same destination starts', () => {
+  const first = { ...item('a', 'queued'), remotePath: '/same.txt' };
+  const second = { ...item('b', 'queued'), remotePath: '/same.txt' };
+  assert.deepEqual(pickTransfersToStart([second, first], 3), ['a']);
+});
+
+test('same remote path on different profiles is not a collision', () => {
+  const a = { ...item('a', 'transferring'), remotePath: '/same.txt', profileId: 'p1' };
+  const b = { ...item('b', 'queued'), remotePath: '/same.txt', profileId: 'p2' };
+  assert.deepEqual(pickTransfersToStart([b, a], 3), ['b']);
+});

@@ -14,10 +14,13 @@ export const TransferConflictModal: React.FC = () => {
 
   useEffect(() => {
     if (!transferConflict) return;
+    // Capture phase on window: runs before every other keydown listener. Stopping propagation
+    // keeps background shortcuts (Space = Quick Look, Cmd+B, ...) from firing while the prompt
+    // is open, without preventing default actions (Space/Enter on a focused button, Tab).
     const onKeyDown = (e: KeyboardEvent) => {
+      e.stopPropagation();
       if (e.key === 'Escape') {
         e.preventDefault();
-        e.stopPropagation();
         resolveTransferConflict(null);
       }
     };
