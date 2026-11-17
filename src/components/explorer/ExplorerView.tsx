@@ -50,9 +50,6 @@ interface ContextMenuState {
   file: FileEntry | null;
 }
 
-// Module-level drag state shared reliably between local and remote ExplorerView panes
-let activeDragItem: { source: 'local' | 'remote'; file: FileEntry } | null = null;
-
 export const ExplorerView: React.FC<ExplorerViewProps> = ({
   files,
   currentPath,
@@ -87,7 +84,18 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     clearNavigationError,
     elevateActiveSession,
     sudoCapability,
+    selectedRemotePaths,
+    selectedLocalPaths,
+    activeDrag,
+    setActiveDrag,
   } = useOrbitStore();
+
+  const selectedPaths = isLocal ? selectedLocalPaths : selectedRemotePaths;
+
+  const isTargetOfDrag =
+    Boolean(activeDrag?.isDragging) &&
+    activeDrag?.hoverPane === (isLocal ? 'local' : 'remote') &&
+    activeDrag?.source !== (isLocal ? 'local' : 'remote');
 
   const currentNavigationError = isLocal ? localNavigationError : remoteNavigationError;
 
@@ -126,7 +134,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const [newFolderNameInput, setNewFolderNameInput] = useState('');
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isDragOver, setIsDragOver] = useState(false);
 
   // Close context menu on outside click or window blur
   useEffect(() => {
@@ -398,6 +405,124 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     }
   };
 
+  // Pointer-based Drag & Drop (supports multi-selection, Escape cancellation, and works without WebKit Cocoa conflicts)
+  const handleRowPointerDown = (e: React.PointerEvent, file: FileEntry) => {
+    // Only proceed on main left-click, and don't initiate drag if modifier keys are pressed (let click handle multi-select toggle)
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    if (file.is_dir) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let isDragActive = false;
+
+    // Determine files to drag
+    let dragFiles: FileEntry[];
+    if (selectedPaths.includes(file.path)) {
+      dragFiles = files.filter((f) => selectedPaths.includes(f.path) && !f.is_dir);
+      if (dragFiles.length === 0) dragFiles = [file];
+    } else {
+      onSelect(file.path, false);
+      dragFiles = [file];
+    }
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+      window.removeEventListener('keydown', handleKeyDown);
+      setActiveDrag(null);
+    };
+
+    const handleKeyDown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === 'Escape') {
+        keyEvent.preventDefault();
+        keyEvent.stopPropagation();
+        cleanup();
+      }
+    };
+
+    const handlePointerCancel = () => {
+      cleanup();
+    };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (!isDragActive && dist < 6) {
+        return;
+      }
+
+      if (!isDragActive) {
+        isDragActive = true;
+      }
+
+      moveEvent.preventDefault();
+
+      // Detect pane & folder under cursor
+      const elem = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const paneElem = elem?.closest('[data-pane]');
+      const targetPane = paneElem?.getAttribute('data-pane') as 'local' | 'remote' | null;
+
+      const folderElem = elem?.closest('[data-folder-path]');
+      const targetFolder = folderElem?.getAttribute('data-folder-path') || null;
+
+      setActiveDrag({
+        source: isLocal ? 'local' : 'remote',
+        files: dragFiles,
+        currentX: moveEvent.clientX,
+        currentY: moveEvent.clientY,
+        isDragging: true,
+        hoverPane: targetPane,
+        hoverFolderPath: targetFolder,
+      });
+    };
+
+    const handlePointerUp = async (upEvent: PointerEvent) => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+      window.removeEventListener('keydown', handleKeyDown);
+
+      if (!isDragActive) {
+        setActiveDrag(null);
+        return;
+      }
+
+      const elem = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
+      const paneElem = elem?.closest('[data-pane]');
+      const targetPane = paneElem?.getAttribute('data-pane') as 'local' | 'remote' | null;
+      const folderElem = elem?.closest('[data-folder-path]');
+      const targetFolder = folderElem?.getAttribute('data-folder-path') || null;
+
+      setActiveDrag(null);
+
+      // Only execute transfer if released on the opposite pane
+      if (targetPane && targetPane !== (isLocal ? 'local' : 'remote')) {
+        const store = useOrbitStore.getState();
+        const targetBaseDir =
+          targetFolder ||
+          (targetPane === 'remote' ? store.currentPath : store.localPath);
+
+        for (const item of dragFiles) {
+          if (isLocal && targetPane === 'remote') {
+            const remoteTarget =
+              targetBaseDir === '/'
+                ? `/${item.name}`
+                : `${targetBaseDir.replace(/\/+$/, '')}/${item.name}`;
+            await store.uploadFile(item.path, remoteTarget, item.name);
+          } else if (!isLocal && targetPane === 'local') {
+            const localTarget = `${targetBaseDir.replace(/[/\\]+$/, '')}/${item.name}`;
+            await store.downloadFile(item.path, localTarget, item.name);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
+    window.addEventListener('keydown', handleKeyDown);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -601,53 +726,14 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       )}
 
       {/* Files List */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'copy';
-          setIsDragOver(true);
-        }}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            setIsDragOver(false);
-          }
-        }}
-        onDrop={async (e) => {
-          e.preventDefault();
-          setIsDragOver(false);
-          let item = activeDragItem;
-          if (!item) {
-            try {
-              const raw = e.dataTransfer.getData('application/orbit-item');
-              if (raw) {
-                item = JSON.parse(raw);
-              }
-            } catch (err) {
-              console.error('Failed to parse drag item:', err);
-            }
-          }
-          activeDragItem = null;
-
-          if (item && !item.file.is_dir) {
-            if (item.source === 'local' && !isLocal) {
-              const remoteTarget =
-                currentPath === '/'
-                  ? `/${item.file.name}`
-                  : `${currentPath.replace(/\/+$/, '')}/${item.file.name}`;
-              await uploadFile(item.file.path, remoteTarget, item.file.name);
-            } else if (item.source === 'remote' && isLocal) {
-              const localTarget = `${currentPath.replace(/[/\\]+$/, '')}/${item.file.name}`;
-              await downloadFile(item.file.path, localTarget, item.file.name);
-            }
-          }
-        }}
-        className="relative flex-1 overflow-y-auto px-1 py-1 divide-y divide-transparent"
-      >
-        {isDragOver && (
-          <div className="absolute inset-1 z-20 pointer-events-none border-2 border-dashed border-indigo-500 bg-indigo-500/10 backdrop-blur-[1px] flex items-center justify-center rounded-lg">
-            <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-surface/90 border border-indigo-500/30 text-white text-xs font-medium shadow-xl">
+      <div className="relative flex-1 overflow-y-auto px-1 py-1 divide-y divide-transparent">
+        {isTargetOfDrag && (
+          <div className="absolute inset-1 z-20 pointer-events-none border-2 border-dashed border-indigo-500 bg-indigo-500/15 backdrop-blur-[1px] flex items-center justify-center rounded-lg animate-in fade-in duration-100">
+            <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#141722]/95 border border-indigo-500/40 text-white text-xs font-medium shadow-2xl">
               <Upload className="w-4 h-4 text-indigo-400 animate-bounce" />
-              <span>Déposer pour {isLocal ? 'télécharger ici' : 'importer sur le serveur'}</span>
+              <span>
+                Déposer {activeDrag?.files.length} élément{activeDrag?.files.length! > 1 ? 's' : ''} pour {isLocal ? 'télécharger ici' : 'importer sur le serveur'}
+              </span>
             </div>
           </div>
         )}
@@ -725,66 +811,25 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           </div>
         ) : (
           sortedFiles.map((file) => {
-            const isSelected = file.path === selectedPath;
+            const isSelected = selectedPaths.includes(file.path) || file.path === selectedPath;
+            const isHoveredTarget = Boolean(
+              activeDrag?.isDragging &&
+              activeDrag?.hoverFolderPath === file.path &&
+              activeDrag?.source !== (isLocal ? 'local' : 'remote')
+            );
+
             return (
               <div
                 key={file.path}
                 data-folder-path={file.is_dir ? file.path : undefined}
-                draggable={!file.is_dir}
-                onDragStart={(e) => {
-                  const dragData: { source: 'local' | 'remote'; file: FileEntry } = {
-                    source: isLocal ? 'local' : 'remote',
-                    file,
-                  };
-                  activeDragItem = dragData;
-                  e.dataTransfer.effectAllowed = 'copy';
-                  e.dataTransfer.setData(
-                    'application/orbit-item',
-                    JSON.stringify(dragData)
-                  );
-                  e.dataTransfer.setData('text/plain', file.name);
-                }}
-                onDragEnd={() => {
-                  setTimeout(() => {
-                    activeDragItem = null;
-                  }, 600);
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = 'copy';
-                }}
-                onDrop={async (e) => {
-                  if (!file.is_dir) return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setIsDragOver(false);
-
-                  let item = activeDragItem;
-                  if (!item) {
-                    try {
-                      const raw = e.dataTransfer.getData('application/orbit-item');
-                      if (raw) item = JSON.parse(raw);
-                    } catch {
-                      // ignore
-                    }
-                  }
-                  activeDragItem = null;
-
-                  if (item && !item.file.is_dir) {
-                    if (item.source === 'local' && !isLocal) {
-                      const remoteTarget = `${file.path.replace(/\/+$/, '')}/${item.file.name}`;
-                      await uploadFile(item.file.path, remoteTarget, item.file.name);
-                    } else if (item.source === 'remote' && isLocal) {
-                      const localTarget = `${file.path.replace(/[/\\]+$/, '')}/${item.file.name}`;
-                      await downloadFile(item.file.path, localTarget, item.file.name);
-                    }
-                  }
-                }}
+                onPointerDown={(e) => handleRowPointerDown(e, file)}
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}
                 onContextMenu={(e) => handleRowContextMenu(e, file)}
-                className={`grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors ${
-                  isSelected
+                className={`grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors select-none ${
+                  isHoveredTarget
+                    ? 'ring-2 ring-indigo-500 bg-indigo-500/25 text-white font-medium'
+                    : isSelected
                     ? 'bg-indigo-600/20 text-white border border-indigo-500/30 font-medium'
                     : 'text-zinc-300 hover:bg-surface-hover hover:text-white'
                 }`}

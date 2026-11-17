@@ -4,6 +4,16 @@ import { MOCK_REMOTE_FILES, MOCK_TRANSFERS } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
 
+export interface ActiveDragState {
+  source: 'local' | 'remote';
+  files: FileEntry[];
+  currentX: number;
+  currentY: number;
+  isDragging: boolean;
+  hoverPane: 'local' | 'remote' | null;
+  hoverFolderPath: string | null;
+}
+
 interface OrbitState {
   // Profiles
   profiles: ConnectionProfile[];
@@ -87,6 +97,10 @@ interface OrbitState {
   clearCompletedTransfers: () => void;
   uploadFile: (localPath: string, remotePath: string, fileName: string) => Promise<void>;
   downloadFile: (remotePath: string, localPath: string, fileName: string) => Promise<void>;
+
+  // Dual-Pane Pointer Drag and Drop State
+  activeDrag: ActiveDragState | null;
+  setActiveDrag: (drag: ActiveDragState | null) => void;
 
   // Modals
   isNewConnectionModalOpen: boolean;
@@ -842,6 +856,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       }));
     }
   },
+
+  activeDrag: null,
+  setActiveDrag: (drag) => set({ activeDrag: drag }),
 
   isNewConnectionModalOpen: false,
   setNewConnectionModalOpen: (open) => set({ isNewConnectionModalOpen: open }),

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { ExplorerView } from './ExplorerView';
+import { DragFloatingBadge } from './DragFloatingBadge';
 
 export const DualPaneView: React.FC = () => {
   const {
@@ -31,18 +32,21 @@ export const DualPaneView: React.FC = () => {
 
   if (!isDualPane) {
     return (
-      <ExplorerView
-        files={remoteFiles}
-        currentPath={currentPath}
-        onNavigate={setCurrentPath}
-        selectedPath={selectedRemotePath}
-        onSelect={selectRemoteFile}
-      />
+      <>
+        <ExplorerView
+          files={remoteFiles}
+          currentPath={currentPath}
+          onNavigate={setCurrentPath}
+          selectedPath={selectedRemotePath}
+          onSelect={selectRemoteFile}
+        />
+        <DragFloatingBadge />
+      </>
     );
   }
 
   return (
-    <div className="flex-1 flex h-full overflow-hidden divide-x divide-border-subtle">
+    <div className="flex-1 flex h-full overflow-hidden divide-x divide-border-subtle relative">
       {/* Left Pane: Local Storage */}
       <div className="flex-1 flex flex-col h-full min-w-0">
         <ExplorerView
@@ -67,6 +71,7 @@ export const DualPaneView: React.FC = () => {
           onSelect={selectRemoteFile}
         />
       </div>
+      <DragFloatingBadge />
     </div>
   );
 };
