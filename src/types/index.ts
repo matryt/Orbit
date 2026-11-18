@@ -44,6 +44,11 @@ export interface TransferItem {
   totalBytes: number;
   speedBps: number;
   status: 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  /**
+   * True while the backend call is running. It can outlive a `cancelled` status: the Rust
+   * side still has to stop and clean up, so the destination stays reserved until then.
+   */
+  inFlight?: boolean;
   error?: string;
 }
 

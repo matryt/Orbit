@@ -4,6 +4,14 @@ import { MOCK_REMOTE_FILES } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
 import { applyProgress, generateTransferId, isFinishedStatus, pickTransfersToStart } from '../lib/transferQueue';
+import {
+  ConflictDecision,
+  ConflictPrompt,
+  NameSet,
+  TransferRequest,
+  planTransferBatch,
+  splitDestination,
+} from '../lib/transferConflicts';
 
 export interface ActiveDragState {
   source: 'local' | 'remote';
@@ -14,6 +22,9 @@ export interface ActiveDragState {
   hoverPane: 'local' | 'remote' | null;
   hoverFolderPath: string | null;
 }
+
+export type { TransferRequest };
+export type TransferConflictPrompt = ConflictPrompt;
 
 interface OrbitState {
   // Profiles
@@ -100,6 +111,14 @@ interface OrbitState {
   processTransferQueue: () => void;
   uploadFile: (localPath: string, remotePath: string, fileName: string) => Promise<void>;
   downloadFile: (remotePath: string, localPath: string, fileName: string) => Promise<void>;
+  /**
+   * Enqueues a batch of transfers. Unless `checkConflicts` is false, existing destination
+   * files are detected first and the user is asked to replace, skip or keep both.
+   */
+  enqueueTransfers: (requests: TransferRequest[], options?: { checkConflicts?: boolean }) => Promise<void>;
+  transferConflict: TransferConflictPrompt | null;
+  /** Answers the current conflict prompt; `null` cancels the whole batch. */
+  resolveTransferConflict: (decision: ConflictDecision | null) => void;
 
   // Dual-Pane Pointer Drag and Drop State
   activeDrag: ActiveDragState | null;
@@ -148,17 +167,12 @@ function updateTransfer(
   }));
 }
 
-function enqueueTransfer(
-  set: StoreSet,
-  get: StoreGet,
-  params: Pick<TransferItem, 'direction' | 'localPath' | 'remotePath' | 'fileName'>
-) {
-  const { activeProfileId, profiles } = get();
-  const profile = profiles.find((p) => p.id === activeProfileId);
+function enqueueTransfer(set: StoreSet, get: StoreGet, params: TransferRequest, profileId: string) {
+  const profile = get().profiles.find((p) => p.id === profileId);
 
   const item: TransferItem = {
     id: generateTransferId(),
-    profileId: activeProfileId,
+    profileId,
     serverName: profile?.name || 'SFTP Server',
     serverType: profile?.type || 'sftp',
     ...params,
@@ -173,6 +187,77 @@ function enqueueTransfer(
     isTransferDrawerOpen: true,
   }));
   get().processTransferQueue();
+}
+
+/** Resolver of the conflict prompt currently shown, if any. */
+let conflictResolver: ((decision: ConflictDecision | null) => void) | null = null;
+/** Batches are planned one at a time so their conflict prompts never overlap. */
+let batchChain: Promise<void> = Promise.resolve();
+
+function askConflict(set: StoreSet, prompt: TransferConflictPrompt): Promise<ConflictDecision | null> {
+  return new Promise((resolve) => {
+    conflictResolver = resolve;
+    set(() => ({ transferConflict: prompt }));
+  });
+}
+
+const trimDir = (dir: string, remote: boolean) => dir.replace(remote ? /\/+$/ : /[/\\]+$/, '');
+
+/** Destinations of transfers still queued or running in `dir`. */
+function pendingDestinations(
+  transfers: TransferItem[],
+  direction: TransferItem['direction'],
+  dir: string,
+  profileId: string
+): string[] {
+  const remote = direction === 'upload';
+  const names: string[] = [];
+  for (const tx of transfers) {
+    if (isFinishedStatus(tx.status) || tx.direction !== direction) continue;
+    if (remote && tx.profileId !== profileId) continue;
+    const dest = splitDestination(tx);
+    if (trimDir(dest.dir, remote) === trimDir(dir, remote)) names.push(dest.name);
+  }
+  return names;
+}
+
+/**
+ * Names already taken in `dir`: a fresh listing plus destinations of pending transfers.
+ * The listing is always re-read (the pane's cached listing can miss a transfer that has
+ * just completed), and pending transfers are sampled before and after it so a transfer
+ * finishing during the listing is never missed.
+ */
+async function loadTakenNames(
+  get: StoreGet,
+  direction: TransferItem['direction'],
+  dir: string,
+  profileId: string
+): Promise<NameSet> {
+  const pendingBefore = pendingDestinations(get().transfers, direction, dir, profileId);
+  let names: string[] = [];
+  try {
+    const entries =
+      direction === 'upload'
+        ? await storageApi.listDir(profileId, dir)
+        : (await storageApi.listLocalDir(dir)).entries;
+    names = entries.map((e) => e.name);
+  } catch {
+    // Missing or unreadable directory: no known conflict, the transfer will report the real error.
+  }
+  const pendingAfter = pendingDestinations(get().transfers, direction, dir, profileId);
+  return new NameSet(direction === 'download', [...names, ...pendingBefore, ...pendingAfter]);
+}
+
+function planBatch(
+  set: StoreSet,
+  get: StoreGet,
+  requests: TransferRequest[],
+  profileId: string
+): Promise<TransferRequest[] | null> {
+  return planTransferBatch(requests, {
+    loadTaken: (direction, dir) => loadTakenNames(get, direction, dir, profileId),
+    ask: (prompt) => askConflict(set, prompt),
+  });
 }
 
 async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
@@ -210,6 +295,7 @@ async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
     }
   } finally {
     pendingCancels.delete(tx.id);
+    updateTransfer(set, tx.id, { inFlight: false });
     get().processTransferQueue();
   }
 }
@@ -835,16 +921,38 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   clearCompletedTransfers: () => {
     set((state) => ({
-      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status)),
+      // Keep cancelled transfers whose backend call is still stopping: they hold their destination.
+      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status) || tx.inFlight),
     }));
   },
 
-  uploadFile: async (localPath, remotePath, fileName) => {
-    enqueueTransfer(set, get, { direction: 'upload', localPath, remotePath, fileName });
+  uploadFile: (localPath, remotePath, fileName) =>
+    get().enqueueTransfers([{ direction: 'upload', localPath, remotePath, fileName }]),
+
+  downloadFile: (remotePath, localPath, fileName) =>
+    get().enqueueTransfers([{ direction: 'download', localPath, remotePath, fileName }]),
+
+  enqueueTransfers: (requests, options) => {
+    if (requests.length === 0) return Promise.resolve();
+    // Pin the profile now: the user may switch profiles while a conflict prompt is open.
+    const profileId = get().activeProfileId;
+    const checkConflicts = options?.checkConflicts ?? true;
+
+    const run = async () => {
+      const planned = checkConflicts ? await planBatch(set, get, requests, profileId) : requests;
+      if (!planned) return;
+      for (const request of planned) enqueueTransfer(set, get, request, profileId);
+    };
+    batchChain = batchChain.then(run).catch((err) => console.error('[Orbit] Failed to enqueue transfers:', err));
+    return batchChain;
   },
 
-  downloadFile: async (remotePath, localPath, fileName) => {
-    enqueueTransfer(set, get, { direction: 'download', localPath, remotePath, fileName });
+  transferConflict: null,
+  resolveTransferConflict: (decision) => {
+    const resolve = conflictResolver;
+    conflictResolver = null;
+    set({ transferConflict: null });
+    resolve?.(decision);
   },
 
   processTransferQueue: () => {
@@ -852,7 +960,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     if (toStart.length === 0) return;
     set((state) => ({
       transfers: state.transfers.map((tx) =>
-        toStart.includes(tx.id) ? { ...tx, status: 'transferring' as const } : tx
+        toStart.includes(tx.id) ? { ...tx, status: 'transferring' as const, inFlight: true } : tx
       ),
     }));
     for (const id of toStart) {
