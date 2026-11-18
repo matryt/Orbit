@@ -67,6 +67,12 @@ export class NameSet {
     this.names.add(this.key(name));
   }
 
+  merge(other: NameSet): void {
+    for (const n of other.names) {
+      this.names.add(n);
+    }
+  }
+
   clone(): NameSet {
     const copy = new NameSet(this.caseInsensitive);
     for (const n of this.names) copy.names.add(n);
@@ -107,17 +113,42 @@ export interface PlanDeps {
  * Resolves destination conflicts for a batch, asking the user when needed.
  * Returns the requests to enqueue (possibly renamed), or `null` if the batch was cancelled.
  */
-export async function planTransferBatch(
-  requests: TransferRequest[],
+export async function planTransferBatch<T extends TransferRequest>(
+  requests: T[],
   deps: PlanDeps
-): Promise<TransferRequest[] | null> {
-  const takenByDir = new Map<string, NameSet>();
-  const keyOf = (r: TransferRequest) => `${r.direction}:${splitDestination(r).dir}`;
+): Promise<T[] | null> {
+  // Local disks are case-insensitive (see NameSet): `A/` and `a/` are the same download folder.
+  const keyOf = (r: T) => {
+    const { dir } = splitDestination(r);
+    return `${r.direction}:${r.direction === 'download' ? dir.toLowerCase() : dir}`;
+  };
+
+  // 1. Load existing names for every distinct raw directory spelling so case-sensitive
+  // filesystems (or differing paths) never miss existing files in another spelling.
+  const loadedByRawDir = new Map<string, NameSet>();
   for (const r of requests) {
-    const key = keyOf(r);
-    if (!takenByDir.has(key)) {
-      takenByDir.set(key, await deps.loadTaken(r.direction, splitDestination(r).dir));
+    const { dir } = splitDestination(r);
+    const rawKey = `${r.direction}:${dir}`;
+    if (!loadedByRawDir.has(rawKey)) {
+      loadedByRawDir.set(rawKey, await deps.loadTaken(r.direction, dir));
     }
+  }
+
+  // 2. Group into reservation sets keyed by normalized key, merging existing files in a single
+  // linear pass (O(N)) across all loaded directory spellings.
+  const takenByDir = new Map<string, NameSet>();
+  for (const [rawKey, set] of loadedByRawDir.entries()) {
+    const sepIdx = rawKey.indexOf(':');
+    const direction = rawKey.slice(0, sepIdx) as TransferRequest['direction'];
+    const dir = rawKey.slice(sepIdx + 1);
+    const normalizedKey = `${direction}:${direction === 'download' ? dir.toLowerCase() : dir}`;
+
+    let existing = takenByDir.get(normalizedKey);
+    if (!existing) {
+      existing = new NameSet(direction === 'download');
+      takenByDir.set(normalizedKey, existing);
+    }
+    existing.merge(set);
   }
 
   /** Conflicts left in `requests[from..]`, including collisions between those requests. */
@@ -135,7 +166,7 @@ export async function planTransferBatch(
     return count;
   };
 
-  const planned: TransferRequest[] = [];
+  const planned: T[] = [];
   let choiceForAll: ConflictChoice | null = null;
 
   for (let i = 0; i < requests.length; i++) {

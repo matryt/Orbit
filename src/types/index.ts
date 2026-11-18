@@ -49,6 +49,8 @@ export interface TransferItem {
    * side still has to stop and clean up, so the destination stays reserved until then.
    */
   inFlight?: boolean;
+  /** Folder transfer this file belongs to, if any. */
+  groupId?: string;
   error?: string;
 }
 
@@ -107,3 +109,23 @@ export interface NavigationError {
   isPermissionDenied: boolean;
 }
 
+
+/** Entry of a recursive walk; `relative_path` is `/`-separated and relative to the walked root. */
+export interface WalkEntry {
+  relative_path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+/** A folder transfer: one row in the drawer, backed by one TransferItem per file. */
+export interface TransferGroup {
+  id: string;
+  name: string;
+  direction: 'upload' | 'download';
+  profileId: string;
+  serverName?: string;
+  serverType?: StorageType;
+  /** scanning: walking the source tree; ready: files enqueued; failed/cancelled before enqueuing. */
+  phase: 'scanning' | 'ready' | 'failed' | 'cancelled';
+  error?: string;
+}

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ use crate::error::AppError;
 use crate::models::{FileEntry, S3ConnectConfig};
 use crate::provider::StorageProvider;
 use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
+use crate::walk::{MAX_WALK_ENTRIES, WalkEntry, is_safe_relative_path, too_many_entries};
 
 pub struct S3Provider {
     client: Client,
@@ -527,6 +528,78 @@ impl StorageProvider for S3Provider {
             .map_err(|e| AppError::S3(format!("Erreur de lecture du flux : {}", e)))?;
 
         Ok(data.into_bytes().to_vec())
+    }
+
+    async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, AppError> {
+        let prefix = Self::normalize_prefix(root);
+        let mut files = Vec::new();
+        let mut dirs = BTreeSet::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix);
+            if let Some(token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+            let resp = req.send().await.map_err(|e| {
+                AppError::S3(format!(
+                    "Erreur lors du listage récursif de '{}' : {}",
+                    prefix, e
+                ))
+            })?;
+
+            for obj in resp.contents() {
+                let Some(key) = obj.key() else { continue };
+                let Some(relative) = key.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                if relative.is_empty() {
+                    continue; // marker of the root itself
+                }
+                if !is_safe_relative_path(relative.trim_end_matches('/')) {
+                    continue;
+                }
+                // Every intermediate prefix is a (virtual) directory.
+                let segments: Vec<&str> = relative.trim_end_matches('/').split('/').collect();
+                for depth in 1..segments.len() {
+                    dirs.insert(segments[..depth].join("/"));
+                }
+                if relative.ends_with('/') {
+                    dirs.insert(relative.trim_end_matches('/').to_string());
+                } else {
+                    files.push(WalkEntry {
+                        relative_path: relative.to_string(),
+                        is_dir: false,
+                        size: obj.size().unwrap_or(0).max(0) as u64,
+                    });
+                }
+                if files.len() + dirs.len() > MAX_WALK_ENTRIES {
+                    return Err(too_many_entries());
+                }
+            }
+
+            match resp.next_continuation_token() {
+                Some(token) if resp.is_truncated() == Some(true) => {
+                    continuation_token = Some(token.to_string());
+                }
+                _ => break,
+            }
+        }
+
+        let mut entries: Vec<WalkEntry> = dirs
+            .into_iter()
+            .map(|relative_path| WalkEntry {
+                relative_path,
+                is_dir: true,
+                size: 0,
+            })
+            .collect();
+        entries.extend(files);
+        Ok(entries)
     }
 
     async fn download_file(

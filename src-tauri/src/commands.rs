@@ -16,6 +16,7 @@ use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 use crate::sftp::host_key::{HostKeyPromptManager, TauriHostKeyPromptHandler};
 use crate::transfer::{TransferHandle, TransferManager};
+use crate::walk::{LocalWalkResult, WalkEntry};
 
 #[tauri::command]
 pub async fn respond_host_key_prompt(
@@ -338,6 +339,39 @@ pub async fn storage_download_file(
         .await;
     transfers.unregister(&transfer_id).await;
     result
+}
+
+#[tauri::command]
+pub async fn storage_walk(
+    profile_id: Option<String>,
+    path: String,
+    state: State<'_, SessionManager>,
+) -> Result<Vec<WalkEntry>, AppError> {
+    let provider = state.get_provider(profile_id.as_deref()).await?;
+    provider.walk(&path).await
+}
+
+#[tauri::command]
+pub async fn storage_ensure_dir(
+    profile_id: Option<String>,
+    path: String,
+    state: State<'_, SessionManager>,
+) -> Result<(), AppError> {
+    let provider = state.get_provider(profile_id.as_deref()).await?;
+    provider.ensure_dir(&path).await
+}
+
+/// True when `path` is a directory (symlinks are followed, like a Finder/Explorer drop).
+#[tauri::command]
+pub async fn local_is_dir(path: String) -> Result<bool, AppError> {
+    Ok(tokio::fs::metadata(&path).await?.is_dir())
+}
+
+#[tauri::command]
+pub async fn local_walk(path: String) -> Result<LocalWalkResult, AppError> {
+    tokio::task::spawn_blocking(move || crate::walk::walk_local(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| AppError::Io(format!("Local walk task failed: {e}")))?
 }
 
 #[tauri::command]

@@ -12,6 +12,7 @@ pub mod session;
 pub mod sftp;
 pub mod transfer;
 pub mod updater;
+pub mod walk;
 
 use std::sync::Arc;
 
@@ -66,6 +67,10 @@ pub fn run() {
             commands::storage_upload_file,
             commands::storage_download_file,
             commands::transfer_pause,
+            commands::storage_walk,
+            commands::storage_ensure_dir,
+            commands::local_walk,
+            commands::local_is_dir,
             commands::transfer_resume,
             commands::transfer_cancel,
             commands::save_secret,
