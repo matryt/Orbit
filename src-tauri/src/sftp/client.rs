@@ -1299,6 +1299,49 @@ pub fn validate_local_path_safety(path: &std::path::Path) -> Result<(), AppError
     Ok(())
 }
 
+async fn remove_dir_all_sftp(session: &SftpSession, path: &str) -> Result<(), AppError> {
+    validate_path_safety(path)?;
+    let read_dir = session.read_dir(path).await.map_err(|e| {
+        AppError::Sftp(format!("Failed to read directory {path} for deletion: {e}"))
+    })?;
+
+    for entry in read_dir {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        validate_path_safety(&name)?;
+
+        let child_path = if path.ends_with('/') {
+            format!("{path}{name}")
+        } else {
+            format!("{path}/{name}")
+        };
+
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            // Never follow symlinks when deleting! A symlink (even to a directory) is removed with remove_file.
+            session.remove_file(&child_path).await.map_err(|e| {
+                AppError::Sftp(format!("Failed to remove symlink {child_path}: {e}"))
+            })?;
+        } else if file_type.is_dir() {
+            Box::pin(remove_dir_all_sftp(session, &child_path)).await?;
+        } else {
+            session
+                .remove_file(&child_path)
+                .await
+                .map_err(|e| AppError::Sftp(format!("Failed to remove file {child_path}: {e}")))?;
+        }
+    }
+
+    session
+        .remove_dir(path)
+        .await
+        .map_err(|e| AppError::Sftp(format!("Failed to remove directory {path}: {e}")))?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl StorageProvider for SftpProvider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
@@ -1385,17 +1428,14 @@ impl StorageProvider for SftpProvider {
     async fn delete(&self, path: &str, is_dir: bool) -> Result<(), AppError> {
         validate_path_safety(path)?;
         if is_dir {
-            self.session
-                .remove_dir(path)
-                .await
-                .map_err(|e| AppError::Sftp(format!("Failed to remove directory {path}: {e}")))?;
+            remove_dir_all_sftp(&self.session, path).await
         } else {
             self.session
                 .remove_file(path)
                 .await
                 .map_err(|e| AppError::Sftp(format!("Failed to remove file {path}: {e}")))?;
+            Ok(())
         }
-        Ok(())
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), AppError> {
