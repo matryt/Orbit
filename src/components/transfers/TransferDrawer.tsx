@@ -1,13 +1,14 @@
 import React from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { formatBytes } from '../../lib/utils';
-import { isGroupSettled, summarizeGroup } from '../../lib/transferGroups';
+import { collapsedIndicatorLabel, isGroupSettled, summarizeGroup } from '../../lib/transferGroups';
 import type { TransferGroup, TransferItem } from '../../types';
 import {
   ArrowUpRight,
   ArrowDownLeft,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Pause,
   Play,
   Square,
@@ -24,7 +25,9 @@ const GroupRow: React.FC<{ group: TransferGroup; files: TransferItem[]; onCancel
   files,
   onCancel,
 }) => {
+  const [showFailures, setShowFailures] = React.useState(false);
   const s = summarizeGroup(group, files);
+  const failedFiles = s.filesFailed > 0 ? files.filter((f) => f.status === 'failed') : [];
   const progress =
     s.totalBytes > 0
       ? Math.min(100, Math.round((s.bytesTransferred / s.totalBytes) * 100))
@@ -120,6 +123,32 @@ const GroupRow: React.FC<{ group: TransferGroup; files: TransferItem[]; onCancel
           style={{ width: `${progress}%` }}
         />
       </div>
+
+      {failedFiles.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <button
+            onClick={() => setShowFailures((v) => !v)}
+            className="self-start flex items-center gap-1 text-[11px] text-red-400/90 hover:text-red-300 transition-colors"
+          >
+            {showFailures ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            {failedFiles.length} fichier{failedFiles.length > 1 ? 's' : ''} en échec
+          </button>
+          {showFailures && (
+            <ul className="max-h-24 overflow-y-auto pl-4 space-y-0.5 font-mono text-[11px]">
+              {failedFiles.map((f) => (
+                <li
+                  key={f.id}
+                  className="truncate text-zinc-400"
+                  title={`${f.direction === 'upload' ? f.localPath : f.remotePath}${f.error ? `\n${f.error}` : ''}`}
+                >
+                  <span className="text-zinc-200">{f.fileName}</span>
+                  {f.error && <span className="text-red-400/80"> : {f.error}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -139,7 +168,16 @@ export const TransferDrawer: React.FC = () => {
 
   if (!isTransferDrawerOpen && transfers.length === 0 && transferGroups.length === 0) return null;
 
-  const childrenOf = (groupId: string) => transfers.filter((t) => t.groupId === groupId);
+  // Indexed once per render: every progress event re-renders the drawer.
+  const childrenByGroup = new Map<string, TransferItem[]>();
+  for (const t of transfers) {
+    if (!t.groupId) continue;
+    const list = childrenByGroup.get(t.groupId);
+    if (list) list.push(t);
+    else childrenByGroup.set(t.groupId, [t]);
+  }
+  const noChildren: TransferItem[] = [];
+  const childrenOf = (groupId: string) => childrenByGroup.get(groupId) ?? noChildren;
   const scanningCount = transferGroups.filter((g) => g.phase === 'scanning').length;
 
   const runningTransfers = transfers.filter((t) => t.status === 'transferring');
@@ -162,7 +200,7 @@ export const TransferDrawer: React.FC = () => {
         <div className="text-xs">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-white">
-              {runningTransfers.length} transfert(s) en cours
+              {collapsedIndicatorLabel(runningTransfers.length, queuedCount, scanningCount)}
               {queuedCount > 0 && <span className="text-zinc-400 font-normal"> · {queuedCount} en attente</span>}
             </span>
             {firstActive?.serverName && (
@@ -171,9 +209,11 @@ export const TransferDrawer: React.FC = () => {
               </span>
             )}
           </div>
-          <span className="text-zinc-400 font-mono text-[11px]">
-            {formatBytes(totalSpeed)}/s
-          </span>
+          {runningTransfers.length > 0 && (
+            <span className="text-zinc-400 font-mono text-[11px]">
+              {formatBytes(totalSpeed)}/s
+            </span>
+          )}
         </div>
       </div>
     );

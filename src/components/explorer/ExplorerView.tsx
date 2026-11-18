@@ -523,6 +523,9 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       // Only execute transfer if released on the opposite pane
       if (targetPane && targetPane !== (isLocal ? 'local' : 'remote')) {
         const store = useOrbitStore.getState();
+        // Pin the profile for the whole drop: the loop awaits folder scans, during which the
+        // user may switch profiles.
+        const profileId = store.activeProfileId;
         const targetBaseDir =
           targetFolder ||
           (targetPane === 'remote' ? store.currentPath : store.localPath);
@@ -535,6 +538,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               sourcePath: item.path,
               destDir: targetBaseDir,
               name: item.name,
+              profileId,
             });
           } else if (isLocal && targetPane === 'remote') {
             const remoteTarget =
@@ -547,7 +551,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             requests.push({ direction: 'download', localPath: localTarget, remotePath: item.path, fileName: item.name });
           }
         }
-        await store.enqueueTransfers(requests);
+        await store.enqueueTransfers(requests, { profileId });
       }
     };
 
@@ -972,8 +976,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {/* Download (Remote only) */}
-              {!isLocal && (
+              {/* Download (Remote only; folders need the native directory picker) */}
+              {!isLocal && (!contextMenu.file.is_dir || isTauri()) && (
                 <button
                   type="button"
                   onClick={() => handleDownload(contextMenu.file!)}

@@ -54,7 +54,9 @@ export function App() {
               if (!paths || paths.length === 0) return;
 
               const store = useOrbitStore.getState();
-              const { currentPath, enqueueTransfers, enqueueFolder } = store;
+              // Pin the profile with the remote path: the loop below awaits folder scans, during
+              // which the user may switch profiles.
+              const { currentPath, activeProfileId: profileId, enqueueTransfers, enqueueFolder } = store;
 
               // Determine if drop happened over a specific folder element
               let targetDir = currentPath;
@@ -84,7 +86,7 @@ export function App() {
                   // Unreadable path: let the upload report the error.
                 }
                 if (isDir) {
-                  await enqueueFolder({ direction: 'upload', sourcePath: filePath, destDir: targetDir, name });
+                  await enqueueFolder({ direction: 'upload', sourcePath: filePath, destDir: targetDir, name, profileId });
                 } else {
                   files.push({ path: filePath, name });
                 }
@@ -95,7 +97,8 @@ export function App() {
                   localPath: path,
                   remotePath: targetDir === '/' ? `/${name}` : `${targetDir.replace(/\/+$/, '')}/${name}`,
                   fileName: name,
-                }))
+                })),
+                { profileId }
               );
             }
           }

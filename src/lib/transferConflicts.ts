@@ -112,7 +112,11 @@ export async function planTransferBatch<T extends TransferRequest>(
   deps: PlanDeps
 ): Promise<T[] | null> {
   const takenByDir = new Map<string, NameSet>();
-  const keyOf = (r: T) => `${r.direction}:${splitDestination(r).dir}`;
+  // Local disks are case-insensitive (see NameSet): `A/` and `a/` are the same download folder.
+  const keyOf = (r: T) => {
+    const { dir } = splitDestination(r);
+    return `${r.direction}:${r.direction === 'download' ? dir.toLowerCase() : dir}`;
+  };
   for (const r of requests) {
     const key = keyOf(r);
     if (!takenByDir.has(key)) {

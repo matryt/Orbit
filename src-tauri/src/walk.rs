@@ -130,8 +130,18 @@ pub fn walk_local(root: &Path) -> Result<LocalWalkResult, AppError> {
             let (is_dir, size) = if file_type.is_symlink() {
                 match std::fs::metadata(item.path()) {
                     Ok(target) if target.is_file() => (false, target.len()),
-                    // Symlinked directories (possible loops) and dangling links are skipped.
-                    _ => continue,
+                    // Symlinked directories (possible loops) and special files are skipped.
+                    Ok(_) => continue,
+                    // Dangling link: there is nothing to transfer.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    // Any other error (e.g. permission denied on the target) would make the
+                    // upload silently incomplete: report it instead.
+                    Err(e) => {
+                        return Err(AppError::Io(format!(
+                            "Lien symbolique illisible « {} » : {}",
+                            relative_path, e
+                        )))
+                    }
                 }
             } else if file_type.is_dir() {
                 (true, 0)
@@ -249,6 +259,42 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["real", "real/f.txt"]);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_dangling_symlinks() {
+        let root = scratch_dir("dangling");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("f.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("broken")).unwrap();
+
+        let result = walk_local(&root).unwrap();
+        let paths: Vec<_> = result.entries.into_iter().map(|e| e.relative_path).collect();
+        assert_eq!(paths, vec!["f.txt"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_symlinks_whose_target_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_dir("unreadable-link");
+        std::fs::create_dir_all(root.join("locked")).unwrap();
+        std::fs::write(root.join("locked/secret.txt"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::os::unix::fs::symlink(root.join("locked/secret.txt"), root.join("src/link")).unwrap();
+        // Without search permission on `locked`, stat on the link target fails with EACCES.
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = walk_local(&root.join("src"));
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        // Root ignores permission bits: the target is then readable and the walk succeeds.
+        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
+        if !is_root {
+            assert!(result.is_err());
+        }
     }
 
     #[test]
