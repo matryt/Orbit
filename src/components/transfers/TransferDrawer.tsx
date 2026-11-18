@@ -1,6 +1,8 @@
 import React from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { formatBytes } from '../../lib/utils';
+import { isGroupSettled, summarizeGroup } from '../../lib/transferGroups';
+import type { TransferGroup, TransferItem } from '../../types';
 import {
   ArrowUpRight,
   ArrowDownLeft,
@@ -13,7 +15,114 @@ import {
   Server,
   Trash2,
   AlertTriangle,
+  Folder,
+  Loader2,
 } from 'lucide-react';
+
+const GroupRow: React.FC<{ group: TransferGroup; files: TransferItem[]; onCancel: () => void }> = ({
+  group,
+  files,
+  onCancel,
+}) => {
+  const s = summarizeGroup(group, files);
+  const progress =
+    s.totalBytes > 0
+      ? Math.min(100, Math.round((s.bytesTransferred / s.totalBytes) * 100))
+      : s.status === 'completed'
+      ? 100
+      : 0;
+  const canCancel = s.status === 'scanning' || s.status === 'queued' || s.status === 'transferring' || s.status === 'paused';
+
+  return (
+    <div className="p-2.5 rounded bg-surface-muted/50 border border-border-subtle flex flex-col gap-2 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          {group.direction === 'upload' ? (
+            <ArrowUpRight className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+          ) : (
+            <ArrowDownLeft className="w-3.5 h-3.5 text-sky-400 flex-shrink-0" />
+          )}
+          <Folder className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" />
+          <span className="font-medium text-zinc-200 truncate">{group.name}</span>
+          {group.serverName && (
+            <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono text-zinc-400 bg-white/[0.05] border border-border-subtle flex-shrink-0">
+              {group.serverType === 's3' ? (
+                <Cloud className="w-3 h-3 text-amber-400/80" />
+              ) : (
+                <Server className="w-3 h-3 text-sky-400/80" />
+              )}
+              <span>{group.serverName}</span>
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="font-mono text-[11px] text-zinc-400">
+            {s.status === 'scanning' && (
+              <span className="flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" /> Analyse du dossier…
+              </span>
+            )}
+            {s.status === 'completed' && (
+              <span className="flex items-center gap-1 text-emerald-400">
+                <CheckCircle2 className="w-3 h-3" /> Terminé · {s.filesTotal} fichier{s.filesTotal > 1 ? 's' : ''}
+              </span>
+            )}
+            {s.status === 'failed' && (
+              <span className="flex items-center gap-1 text-red-400 font-medium" title={group.error}>
+                <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate max-w-[220px]">
+                  {group.error
+                    ? `Échec : ${group.error}`
+                    : `${s.filesFailed} échec${s.filesFailed > 1 ? 's' : ''} sur ${s.filesTotal} fichiers`}
+                </span>
+              </span>
+            )}
+            {s.status === 'cancelled' && <span className="text-zinc-500 line-through">Arrêté</span>}
+            {(s.status === 'transferring' || s.status === 'queued' || s.status === 'paused') && (
+              <span className="flex items-center gap-1.5">
+                <span>
+                  {s.filesDone} / {s.filesTotal} fichiers
+                </span>
+                <span className="text-zinc-500">•</span>
+                <span>{formatBytes(s.bytesTransferred)} / {formatBytes(s.totalBytes)}</span>
+                <span className="text-zinc-500">•</span>
+                <span className="text-white font-semibold">{progress}%</span>
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 border-l border-border-subtle pl-2">
+            {canCancel && (
+              <button
+                onClick={onCancel}
+                className="p-1 rounded hover:bg-red-500/20 text-zinc-400 hover:text-red-400 transition-colors"
+                title="Arrêter le transfert du dossier"
+              >
+                <Square className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="w-full bg-black/40 h-1.5 rounded-full overflow-hidden">
+        <div
+          className={`h-full transition-all duration-300 ${
+            s.status === 'completed'
+              ? 'bg-emerald-500'
+              : s.status === 'failed'
+              ? 'bg-red-500'
+              : s.status === 'cancelled' || s.status === 'scanning'
+              ? 'bg-zinc-600'
+              : 'bg-indigo-500'
+          }`}
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+    </div>
+  );
+};
 
 export const TransferDrawer: React.FC = () => {
   const {
@@ -24,9 +133,14 @@ export const TransferDrawer: React.FC = () => {
     resumeTransfer,
     cancelTransfer,
     clearCompletedTransfers,
+    transferGroups,
+    cancelTransferGroup,
   } = useOrbitStore();
 
-  if (!isTransferDrawerOpen && transfers.length === 0) return null;
+  if (!isTransferDrawerOpen && transfers.length === 0 && transferGroups.length === 0) return null;
+
+  const childrenOf = (groupId: string) => transfers.filter((t) => t.groupId === groupId);
+  const scanningCount = transferGroups.filter((g) => g.phase === 'scanning').length;
 
   const runningTransfers = transfers.filter((t) => t.status === 'transferring');
   const pendingTransfers = transfers.filter(
@@ -37,8 +151,8 @@ export const TransferDrawer: React.FC = () => {
 
   // Floating indicator when collapsed
   if (!isTransferDrawerOpen) {
-    if (pendingTransfers.length === 0) return null;
-    const firstActive = pendingTransfers[0];
+    if (pendingTransfers.length === 0 && scanningCount === 0) return null;
+    const firstActive = pendingTransfers[0] ?? transferGroups.find((g) => g.phase === 'scanning');
     return (
       <div
         onClick={() => setTransferDrawerOpen(true)}
@@ -51,7 +165,7 @@ export const TransferDrawer: React.FC = () => {
               {runningTransfers.length} transfert(s) en cours
               {queuedCount > 0 && <span className="text-zinc-400 font-normal"> · {queuedCount} en attente</span>}
             </span>
-            {firstActive.serverName && (
+            {firstActive?.serverName && (
               <span className="text-[10px] text-zinc-400 bg-white/5 border border-border-subtle px-1.5 py-0.2 rounded font-mono truncate max-w-[140px]">
                 {firstActive.serverName}
               </span>
@@ -65,9 +179,9 @@ export const TransferDrawer: React.FC = () => {
     );
   }
 
-  const hasFinishedTransfers = transfers.some(
-    (t) => t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed'
-  );
+  const hasFinishedTransfers =
+    transfers.some((t) => !t.groupId && (t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed')) ||
+    transferGroups.some((g) => isGroupSettled(g, childrenOf(g.id)));
 
   return (
     <div className="border-t border-border-subtle bg-surface/95 backdrop-blur-xl flex flex-col z-30 shadow-2xl transition-all max-h-64">
@@ -106,7 +220,15 @@ export const TransferDrawer: React.FC = () => {
 
       {/* Transfers List */}
       <div className="overflow-y-auto p-2 space-y-2 max-h-52">
-        {transfers.map((tx) => {
+        {transferGroups.map((group) => (
+          <GroupRow
+            key={group.id}
+            group={group}
+            files={childrenOf(group.id)}
+            onCancel={() => cancelTransferGroup(group.id)}
+          />
+        ))}
+        {transfers.filter((tx) => !tx.groupId).map((tx) => {
           const progress = Math.min(100, Math.round((tx.bytesTransferred / (tx.totalBytes || 1)) * 100));
 
           return (

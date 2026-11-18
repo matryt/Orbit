@@ -1,14 +1,16 @@
 import { create } from 'zustand';
-import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferItem, UpdateCheckResult } from '../types';
+import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferGroup, TransferItem, UpdateCheckResult } from '../types';
 import { MOCK_REMOTE_FILES } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
 import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
+import { isGroupSettled, planFolderTransfer } from '../lib/transferGroups';
 import { applyProgress, generateTransferId, isFinishedStatus, pickTransfersToStart } from '../lib/transferQueue';
 import {
   ConflictDecision,
   ConflictPrompt,
   NameSet,
   TransferRequest,
+  joinPath,
   planTransferBatch,
   splitDestination,
 } from '../lib/transferConflicts';
@@ -116,6 +118,20 @@ interface OrbitState {
    * files are detected first and the user is asked to replace, skip or keep both.
    */
   enqueueTransfers: (requests: TransferRequest[], options?: { checkConflicts?: boolean }) => Promise<void>;
+  /**
+   * Transfers a whole folder: walks the source, asks about conflicts if the destination folder
+   * already exists, creates the directory tree, then enqueues one transfer per file.
+   */
+  enqueueFolder: (params: {
+    direction: TransferItem['direction'];
+    /** The folder itself on the source side. */
+    sourcePath: string;
+    /** Directory on the destination side the folder is copied into. */
+    destDir: string;
+    name: string;
+  }) => Promise<void>;
+  transferGroups: TransferGroup[];
+  cancelTransferGroup: (groupId: string) => void;
   transferConflict: TransferConflictPrompt | null;
   /** Answers the current conflict prompt; `null` cancels the whole batch. */
   resolveTransferConflict: (decision: ConflictDecision | null) => void;
@@ -167,7 +183,9 @@ function updateTransfer(
   }));
 }
 
-function enqueueTransfer(set: StoreSet, get: StoreGet, params: TransferRequest, profileId: string) {
+type EnqueueParams = TransferRequest & { groupId?: string; totalBytes?: number };
+
+function enqueueTransfer(set: StoreSet, get: StoreGet, params: EnqueueParams, profileId: string) {
   const profile = get().profiles.find((p) => p.id === profileId);
 
   const item: TransferItem = {
@@ -175,9 +193,13 @@ function enqueueTransfer(set: StoreSet, get: StoreGet, params: TransferRequest, 
     profileId,
     serverName: profile?.name || 'SFTP Server',
     serverType: profile?.type || 'sftp',
-    ...params,
+    direction: params.direction,
+    localPath: params.localPath,
+    remotePath: params.remotePath,
+    fileName: params.fileName,
+    groupId: params.groupId,
     bytesTransferred: 0,
-    totalBytes: 0,
+    totalBytes: params.totalBytes ?? 0,
     speedBps: 0,
     status: 'queued',
   };
@@ -248,12 +270,12 @@ async function loadTakenNames(
   return new NameSet(direction === 'download', [...names, ...pendingBefore, ...pendingAfter]);
 }
 
-function planBatch(
+function planBatch<T extends TransferRequest>(
   set: StoreSet,
   get: StoreGet,
-  requests: TransferRequest[],
+  requests: T[],
   profileId: string
-): Promise<TransferRequest[] | null> {
+): Promise<T[] | null> {
   return planTransferBatch(requests, {
     loadTaken: (direction, dir) => loadTakenNames(get, direction, dir, profileId),
     ask: (prompt) => askConflict(set, prompt),
@@ -280,7 +302,13 @@ async function runTransfer(set: StoreSet, get: StoreGet, tx: TransferItem) {
     updateTransfer(set, tx.id, { status: 'completed', speedBps: 0 });
 
     const state = get();
-    if (tx.direction === 'upload' && state.activeProfileId === tx.profileId) {
+    // Inside a folder transfer, refresh once when its last file settles rather than per file.
+    const groupStillRunning =
+      tx.groupId !== undefined &&
+      state.transfers.some((t) => t.groupId === tx.groupId && t.id !== tx.id && !isFinishedStatus(t.status));
+    if (groupStillRunning) {
+      // Nothing to refresh yet.
+    } else if (tx.direction === 'upload' && state.activeProfileId === tx.profileId) {
       await state.refreshRemote();
     } else if (tx.direction === 'download' && state.isDualPane) {
       await state.refreshLocal();
@@ -411,6 +439,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     set((state) => ({
       transfers: state.transfers.map((tx) =>
         tx.profileId === id && tx.status === 'queued' ? { ...tx, status: 'cancelled' as const } : tx
+      ),
+      transferGroups: state.transferGroups.map((g) =>
+        g.profileId === id && g.phase === 'scanning' ? { ...g, phase: 'cancelled' as const } : g
       ),
     }));
     try {
@@ -920,10 +951,20 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   clearCompletedTransfers: () => {
-    set((state) => ({
-      // Keep cancelled transfers whose backend call is still stopping: they hold their destination.
-      transfers: state.transfers.filter((tx) => !isFinishedStatus(tx.status) || tx.inFlight),
-    }));
+    set((state) => {
+      const settledGroups = new Set(
+        state.transferGroups
+          .filter((g) => isGroupSettled(g, state.transfers.filter((t) => t.groupId === g.id)))
+          .map((g) => g.id)
+      );
+      return {
+        transferGroups: state.transferGroups.filter((g) => !settledGroups.has(g.id)),
+        // Keep cancelled transfers whose backend call is still stopping: they hold their destination.
+        transfers: state.transfers.filter(
+          (tx) => (!isFinishedStatus(tx.status) || tx.inFlight) && !(tx.groupId && settledGroups.has(tx.groupId))
+        ),
+      };
+    });
   },
 
   uploadFile: (localPath, remotePath, fileName) =>
@@ -945,6 +986,93 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     };
     batchChain = batchChain.then(run).catch((err) => console.error('[Orbit] Failed to enqueue transfers:', err));
     return batchChain;
+  },
+
+  transferGroups: [],
+
+  enqueueFolder: ({ direction, sourcePath, destDir, name }) => {
+    const profileId = get().activeProfileId;
+    const profile = get().profiles.find((p) => p.id === profileId);
+    const groupId = generateTransferId();
+    const remoteDest = direction === 'upload';
+    const destRoot = joinPath(destDir, name, remoteDest);
+
+    set((state) => ({
+      transferGroups: [
+        {
+          id: groupId,
+          name,
+          direction,
+          profileId,
+          serverName: profile?.name || 'SFTP Server',
+          serverType: profile?.type || 'sftp',
+          phase: 'scanning',
+        },
+        ...state.transferGroups,
+      ],
+      isTransferDrawerOpen: true,
+    }));
+
+    const setPhase = (phase: TransferGroup['phase'], error?: string) =>
+      set((state) => ({
+        transferGroups: state.transferGroups.map((g) => (g.id === groupId ? { ...g, phase, error } : g)),
+      }));
+    const isCancelled = () => get().transferGroups.find((g) => g.id === groupId)?.phase !== 'scanning';
+
+    const run = async () => {
+      try {
+        const entries =
+          direction === 'upload'
+            ? (await storageApi.walkLocal(sourcePath)).entries
+            : await storageApi.walkRemote(profileId, sourcePath);
+        if (isCancelled()) return;
+
+        const plan = planFolderTransfer(direction, sourcePath, destRoot, entries, groupId);
+
+        // Only an existing destination folder can hold conflicting files.
+        const destExists = (await loadTakenNames(get, direction, destDir, profileId)).has(name);
+        const planned = destExists ? await planBatch(set, get, plan.requests, profileId) : plan.requests;
+        if (!planned || isCancelled()) {
+          setPhase('cancelled');
+          return;
+        }
+
+        for (const dir of plan.dirsToCreate) {
+          if (isCancelled()) return;
+          if (remoteDest) await storageApi.ensureRemoteDir(profileId, dir);
+          else await storageApi.createLocalDir(dir);
+        }
+        if (isCancelled()) return;
+
+        setPhase('ready');
+        for (const request of planned) enqueueTransfer(set, get, request, profileId);
+        if (planned.length === 0) {
+          // Nothing to transfer (empty tree or everything skipped): refresh to show created folders.
+          if (remoteDest) await get().refreshRemote();
+          else if (get().isDualPane) await get().refreshLocal();
+        }
+      } catch (err: any) {
+        console.error('[Orbit] Folder transfer failed:', err);
+        if (!isCancelled()) {
+          setPhase('failed', typeof err === 'string' ? err : err?.message || 'Erreur lors du transfert du dossier');
+        }
+      }
+    };
+    batchChain = batchChain.then(run).catch((err) => console.error('[Orbit] Failed to enqueue folder:', err));
+    return batchChain;
+  },
+
+  cancelTransferGroup: (groupId) => {
+    const group = get().transferGroups.find((g) => g.id === groupId);
+    if (!group) return;
+    if (group.phase === 'scanning' || group.phase === 'ready') {
+      set((state) => ({
+        transferGroups: state.transferGroups.map((g) => (g.id === groupId ? { ...g, phase: 'cancelled' } : g)),
+      }));
+    }
+    for (const tx of get().transfers) {
+      if (tx.groupId === groupId) get().cancelTransfer(tx.id);
+    }
   },
 
   transferConflict: null,

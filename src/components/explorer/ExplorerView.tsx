@@ -76,6 +76,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     downloadFile,
     uploadFile,
     enqueueTransfers,
+    enqueueFolder,
     isDualPane,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
@@ -269,7 +270,19 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Trigger download with native Save dialog
   const handleDownload = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
+
+    if (file.is_dir) {
+      try {
+        if (!isTauri()) return;
+        const destDir = await open({ directory: true, multiple: false, title: `Télécharger « ${file.name} » dans…` });
+        if (typeof destDir === 'string') {
+          await enqueueFolder({ direction: 'download', sourcePath: file.path, destDir, name: file.name });
+        }
+      } catch (err: any) {
+        console.error('Folder download prompt failed:', err);
+      }
+      return;
+    }
 
     try {
       let targetPath: string | null = null;
@@ -322,8 +335,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Dual pane quick send from local to remote
   const handleSendToRemote = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
     const { currentPath: remoteCurrentPath } = useOrbitStore.getState();
+    if (file.is_dir) {
+      await enqueueFolder({ direction: 'upload', sourcePath: file.path, destDir: remoteCurrentPath, name: file.name });
+      return;
+    }
     const remoteTarget =
       remoteCurrentPath === '/'
         ? `/${file.name}`
@@ -334,8 +350,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Dual pane quick download from remote to local
   const handleDownloadToLocal = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
     const { localPath: storeLocalPath } = useOrbitStore.getState();
+    if (file.is_dir) {
+      await enqueueFolder({ direction: 'download', sourcePath: file.path, destDir: storeLocalPath, name: file.name });
+      return;
+    }
     const target = `${storeLocalPath.replace(/[/\\]+$/, '')}/${file.name}`;
     await downloadFile(file.path, target, file.name);
   };
@@ -416,7 +435,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleRowPointerDown = (e: React.PointerEvent, file: FileEntry) => {
     // Only proceed on main left-click, and don't initiate drag if modifier keys are pressed (let click handle multi-select toggle)
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
-    if (file.is_dir) return;
 
     const startX = e.clientX;
     const startY = e.clientY;
@@ -425,7 +443,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     // Determine files to drag
     let dragFiles: FileEntry[];
     if (selectedPaths.includes(file.path)) {
-      dragFiles = files.filter((f) => selectedPaths.includes(f.path) && !f.is_dir);
+      dragFiles = files.filter((f) => selectedPaths.includes(f.path));
       if (dragFiles.length === 0) dragFiles = [file];
     } else {
       onSelect(file.path, false);
@@ -511,7 +529,14 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
         const requests: TransferRequest[] = [];
         for (const item of dragFiles) {
-          if (isLocal && targetPane === 'remote') {
+          if (item.is_dir) {
+            await store.enqueueFolder({
+              direction: isLocal ? 'upload' : 'download',
+              sourcePath: item.path,
+              destDir: targetBaseDir,
+              name: item.name,
+            });
+          } else if (isLocal && targetPane === 'remote') {
             const remoteTarget =
               targetBaseDir === '/'
                 ? `/${item.name}`
@@ -925,7 +950,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               )}
 
               {/* Dual-Pane Quick Send / Download */}
-              {isDualPane && isLocal && !contextMenu.file.is_dir && (
+              {isDualPane && isLocal && (
                 <button
                   type="button"
                   onClick={() => handleSendToRemote(contextMenu.file!)}
@@ -936,7 +961,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {isDualPane && !isLocal && !contextMenu.file.is_dir && (
+              {isDualPane && !isLocal && (
                 <button
                   type="button"
                   onClick={() => handleDownloadToLocal(contextMenu.file!)}
@@ -948,14 +973,14 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               )}
 
               {/* Download (Remote only) */}
-              {!contextMenu.file.is_dir && !isLocal && (
+              {!isLocal && (
                 <button
                   type="button"
                   onClick={() => handleDownload(contextMenu.file!)}
                   className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
                 >
                   <Download className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Télécharger sous...</span>
+                  <span>{contextMenu.file.is_dir ? 'Télécharger le dossier dans...' : 'Télécharger sous...'}</span>
                 </button>
               )}
 

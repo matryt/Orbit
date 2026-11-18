@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, S3ConnectParams, SftpSessionInfo, UpdateCheckResult } from '../types';
+import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -336,6 +336,27 @@ export const storageApi = {
   async cancelTransfer(transferId: string): Promise<void> {
     if (!isTauri()) return;
     await invoke('transfer_cancel', { transferId });
+  },
+
+  async walkRemote(profileId: string | undefined, path: string): Promise<WalkEntry[]> {
+    if (!isTauri()) return [];
+    return await invoke<WalkEntry[]>('storage_walk', { profileId: profileId || null, path });
+  },
+
+  async ensureRemoteDir(profileId: string | undefined, path: string): Promise<void> {
+    if (!isTauri()) return;
+    await invoke('storage_ensure_dir', { profileId: profileId || null, path });
+  },
+
+  async localIsDir(path: string): Promise<boolean> {
+    if (!isTauri()) return false;
+    return await invoke<boolean>('local_is_dir', { path });
+  },
+
+  async walkLocal(path: string): Promise<{ isDir: boolean; entries: WalkEntry[] }> {
+    if (!isTauri()) return { isDir: false, entries: [] };
+    const res = await invoke<{ is_dir: boolean; entries: WalkEntry[] }>('local_walk', { path });
+    return { isDir: res.is_dir, entries: res.entries };
   },
 
   async listLocalDir(path?: string): Promise<{ currentPath: string; entries: FileEntry[] }> {

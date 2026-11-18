@@ -107,12 +107,12 @@ export interface PlanDeps {
  * Resolves destination conflicts for a batch, asking the user when needed.
  * Returns the requests to enqueue (possibly renamed), or `null` if the batch was cancelled.
  */
-export async function planTransferBatch(
-  requests: TransferRequest[],
+export async function planTransferBatch<T extends TransferRequest>(
+  requests: T[],
   deps: PlanDeps
-): Promise<TransferRequest[] | null> {
+): Promise<T[] | null> {
   const takenByDir = new Map<string, NameSet>();
-  const keyOf = (r: TransferRequest) => `${r.direction}:${splitDestination(r).dir}`;
+  const keyOf = (r: T) => `${r.direction}:${splitDestination(r).dir}`;
   for (const r of requests) {
     const key = keyOf(r);
     if (!takenByDir.has(key)) {
@@ -135,7 +135,7 @@ export async function planTransferBatch(
     return count;
   };
 
-  const planned: TransferRequest[] = [];
+  const planned: T[] = [];
   let choiceForAll: ConflictChoice | null = null;
 
   for (let i = 0; i < requests.length; i++) {
