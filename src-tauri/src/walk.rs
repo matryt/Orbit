@@ -140,7 +140,7 @@ pub fn walk_local(root: &Path) -> Result<LocalWalkResult, AppError> {
                         return Err(AppError::Io(format!(
                             "Lien symbolique illisible « {} » : {}",
                             relative_path, e
-                        )))
+                        )));
                     }
                 }
             } else if file_type.is_dir() {
@@ -270,7 +270,11 @@ mod tests {
         std::os::unix::fs::symlink(root.join("missing"), root.join("broken")).unwrap();
 
         let result = walk_local(&root).unwrap();
-        let paths: Vec<_> = result.entries.into_iter().map(|e| e.relative_path).collect();
+        let paths: Vec<_> = result
+            .entries
+            .into_iter()
+            .map(|e| e.relative_path)
+            .collect();
         assert_eq!(paths, vec!["f.txt"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -285,13 +289,15 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::os::unix::fs::symlink(root.join("locked/secret.txt"), root.join("src/link")).unwrap();
         // Without search permission on `locked`, stat on the link target fails with EACCES.
-        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
 
         let result = walk_local(&root.join("src"));
-        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::fs::remove_dir_all(&root).unwrap();
-        // Root ignores permission bits: the target is then readable and the walk succeeds.
-        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
+        // Root (effective uid 0) ignores permission bits: the target is then readable and the walk succeeds.
+        let is_root = unsafe { libc::geteuid() == 0 };
         if !is_root {
             assert!(result.is_err());
         }

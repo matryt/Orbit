@@ -107,6 +107,25 @@ describe('planTransferBatch', () => {
     assert.deepEqual(res?.map((r) => r.localPath), ['/dst/A/x.txt']);
   });
 
+  it('loads existing files across distinct case spellings of destination directories', async () => {
+    const existingByDir = new Map<string, string[]>([
+      ['/dst/A', []],
+      ['/dst/a', ['x.txt']],
+    ]);
+    const prompts: ConflictPrompt[] = [];
+    const d: PlanDeps = {
+      loadTaken: async (_dirMode, dir) => new NameSet(true, existingByDir.get(dir) ?? []),
+      ask: async (p) => {
+        prompts.push(p);
+        return { choice: 'skip', applyToAll: false };
+      },
+    };
+    const res = await planTransferBatch([down('A/y.txt'), down('a/x.txt')], d);
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0].fileName, 'x.txt');
+    assert.deepEqual(res?.map((r) => r.localPath), ['/dst/A/y.txt']);
+  });
+
   it('keeps uploads whose parent folders differ only by case apart (case-sensitive remote)', async () => {
     const { deps: d, prompts } = deps([], []);
     const res = await planTransferBatch([up('x.txt', '/srv/A'), up('x.txt', '/srv/a')], d);

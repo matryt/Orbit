@@ -67,6 +67,12 @@ export class NameSet {
     this.names.add(this.key(name));
   }
 
+  merge(other: NameSet): void {
+    for (const n of other.names) {
+      this.names.add(n);
+    }
+  }
+
   clone(): NameSet {
     const copy = new NameSet(this.caseInsensitive);
     for (const n of this.names) copy.names.add(n);
@@ -111,16 +117,40 @@ export async function planTransferBatch<T extends TransferRequest>(
   requests: T[],
   deps: PlanDeps
 ): Promise<T[] | null> {
-  const takenByDir = new Map<string, NameSet>();
   // Local disks are case-insensitive (see NameSet): `A/` and `a/` are the same download folder.
   const keyOf = (r: T) => {
     const { dir } = splitDestination(r);
     return `${r.direction}:${r.direction === 'download' ? dir.toLowerCase() : dir}`;
   };
+
+  // 1. Load existing names for every distinct raw directory spelling so case-sensitive
+  // filesystems (or differing paths) never miss existing files in another spelling.
+  const loadedByRawDir = new Map<string, NameSet>();
+  for (const r of requests) {
+    const { dir } = splitDestination(r);
+    const rawKey = `${r.direction}:${dir}`;
+    if (!loadedByRawDir.has(rawKey)) {
+      loadedByRawDir.set(rawKey, await deps.loadTaken(r.direction, dir));
+    }
+  }
+
+  // 2. Group into reservation sets keyed by keyOf, merging existing files from all spellings
+  // that resolve to the same normalized directory on case-insensitive destinations.
+  const takenByDir = new Map<string, NameSet>();
   for (const r of requests) {
     const key = keyOf(r);
     if (!takenByDir.has(key)) {
-      takenByDir.set(key, await deps.loadTaken(r.direction, splitDestination(r).dir));
+      const merged = new NameSet(r.direction === 'download');
+      for (const [rawKey, set] of loadedByRawDir.entries()) {
+        const sepIdx = rawKey.indexOf(':');
+        const direction = rawKey.slice(0, sepIdx);
+        const dir = rawKey.slice(sepIdx + 1);
+        const candidateKey = `${direction}:${direction === 'download' ? dir.toLowerCase() : dir}`;
+        if (candidateKey === key) {
+          merged.merge(set);
+        }
+      }
+      takenByDir.set(key, merged);
     }
   }
 
