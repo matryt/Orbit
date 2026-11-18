@@ -18,6 +18,8 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-release:
@@ -92,32 +94,121 @@ jobs:
           args: ${{ matrix.platform.args }}
 
   finalize-release:
-    name: Finalize Release Notes
+    name: Finalize Release (Checksums & Attestations)
     needs: build-release
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - name: Append Generated Release Notes
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          echo "Generating release notes for tag $TAG..."
-          
-          # 1. Fetch auto-generated changelog
-          CHANGELOG=$(gh api "repos/${{ github.repository }}/releases/generate-notes" -f tag_name="$TAG" --jq .body)
-          
-          # 2. Fetch current release id and body
-          RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .id)
-          CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .body)
-          
-          # 3. Concatenate and update release
-          NEW_BODY="${CURRENT_BODY}
+          mkdir -p release-assets
+          gh release download "$TAG" --dir release-assets
+          echo "=== Downloaded release assets ==="
+          ls -lh release-assets
 
-          ---
-          ${CHANGELOG}"
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd release-assets
+          rm -f SHA256SUMS.txt checksum_table.md
           
-          gh api -X PATCH "repos/${{ github.repository }}/releases/$RELEASE_ID" -f body="$NEW_BODY"
+          # Compute sha256 for all binary assets
+          sha256sum * > SHA256SUMS.txt
+          
+          echo "=== Generated SHA256SUMS.txt ==="
+          cat SHA256SUMS.txt
+          
+          # Build a formatted Markdown table
+          TABLE="| Fichier | Empreinte SHA-256 |"$'\n'"| :--- | :--- |"
+          while IFS= read -r line; do
+            HASH=$(echo "$line" | awk '{print $1}')
+            FILE=$(echo "$line" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//')
+            if [[ "$FILE" != "SHA256SUMS.txt" ]]; then
+              TABLE="${TABLE}"$'\n'"| \`${FILE}\` | \`${HASH}\` |"
+            fi
+          done < SHA256SUMS.txt
+          
+          echo "$TABLE" > checksum_table.md
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'release-assets/*'
+
+      - name: Upload SHA256SUMS to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release upload "$TAG" release-assets/SHA256SUMS.txt --clobber
+          echo "SHA256SUMS.txt uploaded to release $TAG"
+
+      - name: Commit SHA256SUMS to Repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          mkdir -p checksums
+          cp release-assets/SHA256SUMS.txt "checksums/${TAG}.sha256"
+          cp release-assets/SHA256SUMS.txt SHA256SUMS.txt
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add checksums/${TAG}.sha256 SHA256SUMS.txt
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(release): record sha256 checksums for ${TAG} [skip ci]"
+            git push origin HEAD:develop || git push origin HEAD:main || echo "Protected branch prevented direct push, skipping git push."
+          fi
+
+      - name: Append Checksums and Notes to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "Updating release description for tag $TAG..."
+          
+          # 1. Fetch current release notes
+          gh release view "$TAG" --json body --jq .body > current_body.md
+          
+          # 2. Fetch auto-generated changelog
+          gh api "repos/${{ github.repository }}/releases/generate-notes" -f tag_name="$TAG" --jq .body > changelog.md
+          
+          # 3. Build security & integrity section
+          cat << 'EOF' > security_section.md
+
+          ### 🔒 Intégrité & Sécurité (SHA-256 & Attestations)
+
+          EOF
+          cat release-assets/checksum_table.md >> security_section.md
+          cat << EOF >> security_section.md
+
+          > [!TIP]
+          > **Vérifier l'intégrité locale :**
+          > * **macOS / Linux** : \`shasum -a 256 <fichier>\`
+          > * **Windows (PowerShell)** : \`Get-FileHash <fichier> -Algorithm SHA256\`
+          > * **Vérifier l'attestation officielle GitHub (Sigstore / SLSA)** :
+          >   \`gh attestation verify <fichier> --owner ${{ github.repository_owner }}\`
+          EOF
+          
+          # 4. Assemble complete release notes
+          cat current_body.md > final_release_notes.md
+          echo "" >> final_release_notes.md
+          cat security_section.md >> final_release_notes.md
+          echo "" >> final_release_notes.md
+          echo "---" >> final_release_notes.md
+          echo "" >> final_release_notes.md
+          cat changelog.md >> final_release_notes.md
+          
+          # 5. Update release with the combined notes
+          gh release edit "$TAG" --notes-file final_release_notes.md
           echo "Release notes successfully updated!"

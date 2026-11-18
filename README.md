@@ -58,6 +58,18 @@ xattr -cr /Applications/Orbit.app
 1. Download the Windows installer (`Orbit_x.x.x_x64-setup.exe` or `.msi`).
 2. Run the installer and launch Orbit from the Start menu.
 
+### 🛡️ Verify Download Integrity & Provenance
+
+Orbit releases include cryptographic SHA-256 checksums and GitHub Artifact Attestations (Sigstore / SLSA) to ensure download integrity:
+
+* **SHA-256 Checksum**: Compare with `SHA256SUMS.txt` on the release:
+  * macOS: `shasum -a 256 Orbit_*.dmg`
+  * Windows (PowerShell): `Get-FileHash Orbit_*_setup.exe -Algorithm SHA256`
+* **GitHub Artifact Attestation**: Verify the binary was built by the official CI:
+  ```bash
+  gh attestation verify Orbit_* --owner matryt
+  ```
+
 ---
 
 ## 🛠️ Architecture & Tech Stack

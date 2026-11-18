@@ -1,0 +1,12 @@
+# Orbit Release Checksums (SHA-256)
+# Format: <hash>  <filename>
+#
+# Checksums for official releases are automatically computed and published
+# here, in checksums/<tag>.sha256, and attached to each GitHub Release.
+#
+# To verify a downloaded binary:
+#   macOS / Linux:  shasum -a 256 <file>
+#   Windows (PS):   Get-FileHash <file> -Algorithm SHA256
+#
+# To verify GitHub Artifact Attestation (Sigstore / SLSA):
+#   gh attestation verify <file> --owner matryt

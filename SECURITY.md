@@ -48,3 +48,28 @@ To help us triage and resolve the issue quickly, please provide:
 * **Zero Plain-Text Secrets**: Orbit never writes SSH passwords, private key passphrases, or S3 secret keys in plain text to disk. All credentials are stored strictly in the operating system's native keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
 * **Strict Memory Safety**: The core protocol engine and IPC command handlers are implemented in pure **Rust**, eliminating memory corruption vulnerabilities (e.g., use-after-free, buffer overflows).
 * **Least Privilege**: The Tauri desktop bridge exposes minimal native capabilities, and web content security policies restrict unauthorized external script execution.
+
+---
+
+## Release Integrity & Artifact Verification
+
+Orbit implements multiple layers of cryptographic verification to guarantee that distributed binaries are authentic, untampered with, and originate from the official build pipeline:
+
+### 1. Cryptographic SHA-256 Checksums
+* Every release includes an official `SHA256SUMS.txt` asset and an integrity table directly in the release notes.
+* Release checksums are also archived in the [`checksums/`](checksums/) directory of this repository and at [`SHA256SUMS.txt`](SHA256SUMS.txt).
+* **macOS / Linux**:
+  ```bash
+  shasum -a 256 <downloaded-file>
+  ```
+* **Windows (PowerShell)**:
+  ```powershell
+  Get-FileHash <downloaded-file> -Algorithm SHA256
+  ```
+
+### 2. GitHub Artifact Attestations (Sigstore / SLSA Provenance)
+* All release binaries are signed cryptographically with GitHub's Artifact Attestation infrastructure (`actions/attest-build-provenance`).
+* You can verify that a binary was produced by the official GitHub Actions workflow from this repository:
+  ```bash
+  gh attestation verify <downloaded-file> --owner matryt
+  ```
