@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { useOrbitStore } from '../../store/useOrbitStore';
+import { useOrbitStore, TransferRequest } from '../../store/useOrbitStore';
 import { FileIcon } from './FileIcon';
 import { formatBytes, formatDate } from '../../lib/utils';
 import { FileEntry } from '../../types';
@@ -26,7 +26,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { isTauri } from '../../services/storageApi';
+import { isTauri, storageApi } from '../../services/storageApi';
 import {
   SortColumn,
   SortDirection,
@@ -75,6 +75,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     refreshLocal,
     downloadFile,
     uploadFile,
+    enqueueTransfers,
+    enqueueFolder,
     isDualPane,
     isNewFolderModalOpen,
     setNewFolderModalOpen,
@@ -130,6 +132,33 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const [renameInput, setRenameInput] = useState('');
 
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  const [deleteItemCount, setDeleteItemCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!deleteTarget || !deleteTarget.is_dir) {
+      setDeleteItemCount(null);
+      return;
+    }
+    let active = true;
+    const check = async () => {
+      try {
+        if (isLocal) {
+          const res = await storageApi.listLocalDir(deleteTarget.path);
+          if (active) setDeleteItemCount(res.entries.length);
+        } else {
+          const profileId = useOrbitStore.getState().activeProfileId;
+          const entries = await storageApi.listDir(profileId, deleteTarget.path);
+          if (active) setDeleteItemCount(entries.length);
+        }
+      } catch {
+        if (active) setDeleteItemCount(null);
+      }
+    };
+    check();
+    return () => {
+      active = false;
+    };
+  }, [deleteTarget, isLocal]);
 
   const [newFolderNameInput, setNewFolderNameInput] = useState('');
   const [modalError, setModalError] = useState<string | null>(null);
@@ -268,7 +297,19 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Trigger download with native Save dialog
   const handleDownload = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
+
+    if (file.is_dir) {
+      try {
+        if (!isTauri()) return;
+        const destDir = await open({ directory: true, multiple: false, title: `Télécharger « ${file.name} » dans…` });
+        if (typeof destDir === 'string') {
+          await enqueueFolder({ direction: 'download', sourcePath: file.path, destDir, name: file.name });
+        }
+      } catch (err: any) {
+        console.error('Folder download prompt failed:', err);
+      }
+      return;
+    }
 
     try {
       let targetPath: string | null = null;
@@ -279,7 +320,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       }
 
       if (targetPath) {
-        await downloadFile(file.path, targetPath, file.name);
+        // The native save dialog already asked about overwriting an existing file.
+        await enqueueTransfers(
+          [{ direction: 'download', localPath: targetPath, remotePath: file.path, fileName: file.name }],
+          { checkConflicts: false }
+        );
       }
     } catch (err: any) {
       console.error('Download prompt failed:', err);
@@ -297,14 +342,16 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
         });
         if (selected) {
           const filePaths = Array.isArray(selected) ? selected : [selected];
-          for (const filePath of filePaths) {
-            const fileName = filePath.split(/[/\\]/).pop() || 'file';
-            const remoteTarget =
-              currentPath === '/'
-                ? `/${fileName}`
-                : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
-            await uploadFile(filePath, remoteTarget, fileName);
-          }
+          await enqueueTransfers(
+            filePaths.map((filePath) => {
+              const fileName = filePath.split(/[/\\]/).pop() || 'file';
+              const remoteTarget =
+                currentPath === '/'
+                  ? `/${fileName}`
+                  : `${currentPath.replace(/\/+$/, '')}/${fileName}`;
+              return { direction: 'upload' as const, localPath: filePath, remotePath: remoteTarget, fileName };
+            })
+          );
         }
       }
     } catch (err: any) {
@@ -315,8 +362,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Dual pane quick send from local to remote
   const handleSendToRemote = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
     const { currentPath: remoteCurrentPath } = useOrbitStore.getState();
+    if (file.is_dir) {
+      await enqueueFolder({ direction: 'upload', sourcePath: file.path, destDir: remoteCurrentPath, name: file.name });
+      return;
+    }
     const remoteTarget =
       remoteCurrentPath === '/'
         ? `/${file.name}`
@@ -327,8 +377,11 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Dual pane quick download from remote to local
   const handleDownloadToLocal = async (file: FileEntry) => {
     setContextMenu(null);
-    if (file.is_dir) return;
     const { localPath: storeLocalPath } = useOrbitStore.getState();
+    if (file.is_dir) {
+      await enqueueFolder({ direction: 'download', sourcePath: file.path, destDir: storeLocalPath, name: file.name });
+      return;
+    }
     const target = `${storeLocalPath.replace(/[/\\]+$/, '')}/${file.name}`;
     await downloadFile(file.path, target, file.name);
   };
@@ -409,7 +462,6 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   const handleRowPointerDown = (e: React.PointerEvent, file: FileEntry) => {
     // Only proceed on main left-click, and don't initiate drag if modifier keys are pressed (let click handle multi-select toggle)
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
-    if (file.is_dir) return;
 
     const startX = e.clientX;
     const startY = e.clientY;
@@ -418,7 +470,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     // Determine files to drag
     let dragFiles: FileEntry[];
     if (selectedPaths.includes(file.path)) {
-      dragFiles = files.filter((f) => selectedPaths.includes(f.path) && !f.is_dir);
+      dragFiles = files.filter((f) => selectedPaths.includes(f.path));
       if (dragFiles.length === 0) dragFiles = [file];
     } else {
       onSelect(file.path, false);
@@ -498,22 +550,35 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       // Only execute transfer if released on the opposite pane
       if (targetPane && targetPane !== (isLocal ? 'local' : 'remote')) {
         const store = useOrbitStore.getState();
+        // Pin the profile for the whole drop: the loop awaits folder scans, during which the
+        // user may switch profiles.
+        const profileId = store.activeProfileId;
         const targetBaseDir =
           targetFolder ||
           (targetPane === 'remote' ? store.currentPath : store.localPath);
 
+        const requests: TransferRequest[] = [];
         for (const item of dragFiles) {
-          if (isLocal && targetPane === 'remote') {
+          if (item.is_dir) {
+            await store.enqueueFolder({
+              direction: isLocal ? 'upload' : 'download',
+              sourcePath: item.path,
+              destDir: targetBaseDir,
+              name: item.name,
+              profileId,
+            });
+          } else if (isLocal && targetPane === 'remote') {
             const remoteTarget =
               targetBaseDir === '/'
                 ? `/${item.name}`
                 : `${targetBaseDir.replace(/\/+$/, '')}/${item.name}`;
-            await store.uploadFile(item.path, remoteTarget, item.name);
+            requests.push({ direction: 'upload', localPath: item.path, remotePath: remoteTarget, fileName: item.name });
           } else if (!isLocal && targetPane === 'local') {
             const localTarget = `${targetBaseDir.replace(/[/\\]+$/, '')}/${item.name}`;
-            await store.downloadFile(item.path, localTarget, item.name);
+            requests.push({ direction: 'download', localPath: localTarget, remotePath: item.path, fileName: item.name });
           }
         }
+        await store.enqueueTransfers(requests, { profileId });
       }
     };
 
@@ -568,9 +633,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                   <button
                     type="button"
                     onClick={() => handlePaneBreadcrumbClick(idx)}
-                    className={`hover:text-white transition-colors truncate max-w-[100px] flex-shrink-0 ${
-                      idx === paneSegments.length - 1 ? 'text-zinc-200 font-semibold' : 'text-zinc-400'
-                    }`}
+                    className={`hover:text-white transition-colors truncate max-w-[100px] flex-shrink-0 ${idx === paneSegments.length - 1 ? 'text-zinc-200 font-semibold' : 'text-zinc-400'
+                      }`}
                     title={segment}
                   >
                     {segment}
@@ -826,13 +890,12 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 onClick={(e) => onSelect(file.path, e.metaKey || e.ctrlKey)}
                 onDoubleClick={() => handleRowDoubleClick(file)}
                 onContextMenu={(e) => handleRowContextMenu(e, file)}
-                className={`grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors select-none ${
-                  isHoveredTarget
+                className={`grid grid-cols-12 gap-x-3 px-3 py-1.5 rounded text-xs items-center cursor-pointer transition-colors select-none ${isHoveredTarget
                     ? 'ring-2 ring-indigo-500 bg-indigo-500/25 text-white font-medium'
                     : isSelected
-                    ? 'bg-indigo-600/20 text-white border border-indigo-500/30 font-medium'
-                    : 'text-zinc-300 hover:bg-surface-hover hover:text-white'
-                }`}
+                      ? 'bg-indigo-600/20 text-white border border-indigo-500/30 font-medium'
+                      : 'text-zinc-300 hover:bg-surface-hover hover:text-white'
+                  }`}
               >
                 {/* Name */}
                 <div className="col-span-5 flex items-center gap-2.5 min-w-0 pr-2">
@@ -916,7 +979,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               )}
 
               {/* Dual-Pane Quick Send / Download */}
-              {isDualPane && isLocal && !contextMenu.file.is_dir && (
+              {isDualPane && isLocal && (
                 <button
                   type="button"
                   onClick={() => handleSendToRemote(contextMenu.file!)}
@@ -927,7 +990,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {isDualPane && !isLocal && !contextMenu.file.is_dir && (
+              {isDualPane && !isLocal && (
                 <button
                   type="button"
                   onClick={() => handleDownloadToLocal(contextMenu.file!)}
@@ -938,15 +1001,15 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
-              {/* Download (Remote only) */}
-              {!contextMenu.file.is_dir && !isLocal && (
+              {/* Download (Remote only; folders need the native directory picker) */}
+              {!isLocal && (!contextMenu.file.is_dir || isTauri()) && (
                 <button
                   type="button"
                   onClick={() => handleDownload(contextMenu.file!)}
                   className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
                 >
                   <Download className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Télécharger sous...</span>
+                  <span>{contextMenu.file.is_dir ? 'Télécharger le dossier dans...' : 'Télécharger sous...'}</span>
                 </button>
               )}
 
@@ -1219,9 +1282,32 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               </div>
             </div>
 
-            <p className="text-xs text-zinc-400 mb-4 bg-white/5 p-2.5 rounded-lg border border-white/5">
-              Cette action est <span className="text-red-400 font-medium">définitive et irréversible</span>. {deleteTarget.is_dir ? 'Tout le contenu de ce dossier sera supprimé sur le serveur.' : 'Le fichier sera effacé du serveur distant.'}
-            </p>
+            {deleteTarget.is_dir ? (
+              <div className="mb-4 bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg text-xs space-y-1.5">
+                <div className="flex items-center gap-1.5 font-medium text-amber-300">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                  <span>Suppression récursive du dossier</span>
+                </div>
+                {deleteItemCount !== null && (
+                  <p className="text-[11px] text-zinc-300">
+                    {deleteItemCount === 0 ? (
+                      <span className="text-zinc-400">Le dossier est actuellement vide.</span>
+                    ) : (
+                      <span className="text-amber-200">
+                        Ce dossier contient au moins <strong className="font-semibold text-white">{deleteItemCount}</strong> élément{deleteItemCount > 1 ? 's' : ''}.
+                      </span>
+                    )}
+                  </p>
+                )}
+                <p className="text-zinc-400 text-[11px] leading-relaxed">
+                  Cette action est <span className="text-red-400 font-medium">définitive et irréversible</span>. Le dossier ainsi que tous les fichiers et sous-dossiers qu'il contient seront définitivement supprimés.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-400 mb-4 bg-white/5 p-2.5 rounded-lg border border-white/5">
+                Cette action est <span className="text-red-400 font-medium">définitive et irréversible</span>. Le fichier sera effacé du serveur distant.
+              </p>
+            )}
 
             {modalError && (
               <div className="mb-3 p-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center gap-2">

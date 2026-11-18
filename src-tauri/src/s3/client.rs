@@ -1,6 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use aws_config::Region;
@@ -8,12 +7,13 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
-use tauri::ipc::Channel;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::models::{FileEntry, S3ConnectConfig, TransferProgress};
+use crate::models::{FileEntry, S3ConnectConfig};
 use crate::provider::StorageProvider;
+use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
+use crate::walk::{MAX_WALK_ENTRIES, WalkEntry, is_safe_relative_path, too_many_entries};
 
 pub struct S3Provider {
     client: Client,
@@ -530,22 +530,97 @@ impl StorageProvider for S3Provider {
         Ok(data.into_bytes().to_vec())
     }
 
+    async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, AppError> {
+        let prefix = Self::normalize_prefix(root);
+        let mut files = Vec::new();
+        let mut dirs = BTreeSet::new();
+        let mut continuation_token = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix);
+            if let Some(token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+            let resp = req.send().await.map_err(|e| {
+                AppError::S3(format!(
+                    "Erreur lors du listage récursif de '{}' : {}",
+                    prefix, e
+                ))
+            })?;
+
+            for obj in resp.contents() {
+                let Some(key) = obj.key() else { continue };
+                let Some(relative) = key.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                if relative.is_empty() {
+                    continue; // marker of the root itself
+                }
+                if !is_safe_relative_path(relative.trim_end_matches('/')) {
+                    continue;
+                }
+                // Every intermediate prefix is a (virtual) directory.
+                let segments: Vec<&str> = relative.trim_end_matches('/').split('/').collect();
+                for depth in 1..segments.len() {
+                    dirs.insert(segments[..depth].join("/"));
+                }
+                if relative.ends_with('/') {
+                    dirs.insert(relative.trim_end_matches('/').to_string());
+                } else {
+                    files.push(WalkEntry {
+                        relative_path: relative.to_string(),
+                        is_dir: false,
+                        size: obj.size().unwrap_or(0).max(0) as u64,
+                    });
+                }
+                if files.len() + dirs.len() > MAX_WALK_ENTRIES {
+                    return Err(too_many_entries());
+                }
+            }
+
+            match resp.next_continuation_token() {
+                Some(token) if resp.is_truncated() == Some(true) => {
+                    continuation_token = Some(token.to_string());
+                }
+                _ => break,
+            }
+        }
+
+        let mut entries: Vec<WalkEntry> = dirs
+            .into_iter()
+            .map(|relative_path| WalkEntry {
+                relative_path,
+                is_dir: true,
+                size: 0,
+            })
+            .collect();
+        entries.extend(files);
+        Ok(entries)
+    }
+
     async fn download_file(
         &self,
         remote_path: String,
         local_path: PathBuf,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError> {
         let key = Self::normalize_key(&remote_path);
 
-        let resp = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| AppError::S3(format!("Erreur de téléchargement S3 : {}", e)))?;
+        let resp = transfer
+            .guard(async {
+                self.client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::S3(format!("Erreur de téléchargement S3 : {}", e)))
+            })
+            .await?;
 
         let total_bytes = resp.content_length().unwrap_or(0) as u64;
 
@@ -553,49 +628,42 @@ impl StorageProvider for S3Provider {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut file = tokio::fs::File::create(&local_path).await?;
+        let partial_path = partial_download_path(&local_path, transfer.id());
+        let mut file = tokio::fs::File::create(&partial_path).await?;
         let mut body = resp.body;
 
-        let transfer_id = format!("dl-s3-{}", uuid_or_timestamp());
-        let mut bytes_transferred: u64 = 0;
-        let start_time = Instant::now();
-        let mut last_progress_emit = Instant::now();
+        transfer.start(total_bytes);
 
-        while let Some(chunk_res) = body.next().await {
-            let chunk =
-                chunk_res.map_err(|e| AppError::S3(format!("Erreur de flux S3 : {}", e)))?;
-            file.write_all(&chunk).await?;
-            bytes_transferred += chunk.len() as u64;
+        let copy_result: Result<(), AppError> = async {
+            loop {
+                transfer.checkpoint().await?;
 
-            if last_progress_emit.elapsed().as_millis() >= 150 {
-                let elapsed_secs = start_time.elapsed().as_secs_f64();
-                let speed_bps = if elapsed_secs > 0.0 {
-                    (bytes_transferred as f64 / elapsed_secs) as u64
-                } else {
-                    0
-                };
+                let next = transfer
+                    .guard(async {
+                        body.next()
+                            .await
+                            .transpose()
+                            .map_err(|e| AppError::S3(format!("Erreur de flux S3 : {}", e)))
+                    })
+                    .await?;
+                let Some(chunk) = next else { break };
 
-                let _ = progress_tx.send(TransferProgress {
-                    transfer_id: transfer_id.clone(),
-                    bytes_transferred,
-                    total_bytes,
-                    speed_bps,
-                    status: "transferring".to_string(),
-                });
-                last_progress_emit = Instant::now();
+                file.write_all(&chunk).await?;
+                transfer.advance(chunk.len() as u64);
             }
+            file.flush().await?;
+            Ok(())
         }
+        .await;
 
-        file.flush().await?;
+        drop(file);
+        if let Err(err) = copy_result {
+            let _ = tokio::fs::remove_file(&partial_path).await;
+            return Err(err);
+        }
+        finalize_partial_download(&partial_path, &local_path).await?;
 
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id,
-            bytes_transferred,
-            total_bytes,
-            speed_bps: 0,
-            status: "completed".to_string(),
-        });
-
+        transfer.complete();
         Ok(())
     }
 
@@ -603,59 +671,55 @@ impl StorageProvider for S3Provider {
         &self,
         local_path: PathBuf,
         remote_path: String,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError> {
         let key = Self::normalize_key(&remote_path);
 
         let metadata = tokio::fs::metadata(&local_path).await?;
         let total_bytes = metadata.len();
 
-        let transfer_id = format!("ul-s3-{}", uuid_or_timestamp());
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id: transfer_id.clone(),
-            bytes_transferred: 0,
-            total_bytes,
-            speed_bps: 0,
-            status: "transferring".to_string(),
-        });
+        transfer.start(total_bytes);
 
         const MULTIPART_THRESHOLD: u64 = 32 * 1024 * 1024; // 32 MB
         const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
 
         if total_bytes > MULTIPART_THRESHOLD {
-            let multipart = self
-                .client
-                .create_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&key)
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!(
-                        "[Orbit S3] ❌ multipart init failed for key='{}' in bucket='{}': {}",
-                        key, self.bucket, e
-                    );
-                    AppError::S3(format!("Erreur d'initialisation multipart S3 : {}", e))
-                })?;
+            let multipart = transfer
+                .guard(async {
+                    self.client
+                        .create_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            eprintln!(
+                                "[Orbit S3] ❌ multipart init failed for key='{}' in bucket='{}': {}",
+                                key, self.bucket, e
+                            );
+                            AppError::S3(format!("Erreur d'initialisation multipart S3 : {}", e))
+                        })
+                })
+                .await?;
 
             let upload_id = multipart.upload_id().ok_or_else(|| {
                 AppError::S3("UploadId manquant dans la réponse multipart".into())
             })?;
 
-            let mut file = tokio::fs::File::open(&local_path).await.map_err(|e| {
-                AppError::Io(format!("Erreur d'ouverture du fichier local : {}", e))
-            })?;
-
-            let mut part_number = 1;
-            let mut completed_parts = Vec::new();
-            let mut bytes_sent = 0u64;
-            let mut buffer = vec![0u8; CHUNK_SIZE];
-            let start_time = Instant::now();
-            let mut last_progress_emit = Instant::now();
-
             let upload_result: Result<(), AppError> = async {
                 use tokio::io::AsyncReadExt;
+
+                let mut file = tokio::fs::File::open(&local_path).await.map_err(|e| {
+                    AppError::Io(format!("Erreur d'ouverture du fichier local : {}", e))
+                })?;
+
+                let mut part_number = 1;
+                let mut completed_parts = Vec::new();
+                let mut buffer = vec![0u8; CHUNK_SIZE];
+
                 loop {
+                    transfer.checkpoint().await?;
+
                     let mut bytes_read_total = 0;
                     while bytes_read_total < CHUNK_SIZE {
                         let n = file
@@ -673,26 +737,29 @@ impl StorageProvider for S3Provider {
                     }
 
                     let part_body = ByteStream::from(buffer[..bytes_read_total].to_vec());
-                    let part_resp = self
-                        .client
-                        .upload_part()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .upload_id(upload_id)
-                        .part_number(part_number)
-                        .body(part_body)
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            eprintln!(
-                                "[Orbit S3] ❌ upload_part {} failed for key='{}': {}",
-                                part_number, key, e
-                            );
-                            AppError::S3(format!(
-                                "Erreur d'envoi de la part {} : {}",
-                                part_number, e
-                            ))
-                        })?;
+                    let part_resp = transfer
+                        .guard(async {
+                            self.client
+                                .upload_part()
+                                .bucket(&self.bucket)
+                                .key(&key)
+                                .upload_id(upload_id)
+                                .part_number(part_number)
+                                .body(part_body)
+                                .send()
+                                .await
+                                .map_err(|e| {
+                                    eprintln!(
+                                        "[Orbit S3] ❌ upload_part {} failed for key='{}': {}",
+                                        part_number, key, e
+                                    );
+                                    AppError::S3(format!(
+                                        "Erreur d'envoi de la part {} : {}",
+                                        part_number, e
+                                    ))
+                                })
+                        })
+                        .await?;
 
                     let etag = part_resp.e_tag().map(String::from);
                     completed_parts.push(
@@ -702,32 +769,41 @@ impl StorageProvider for S3Provider {
                             .build(),
                     );
 
-                    bytes_sent += bytes_read_total as u64;
                     part_number += 1;
-
-                    if last_progress_emit.elapsed().as_millis() >= 150 {
-                        let elapsed_secs = start_time.elapsed().as_secs_f64();
-                        let speed_bps = if elapsed_secs > 0.0 {
-                            (bytes_sent as f64 / elapsed_secs) as u64
-                        } else {
-                            0
-                        };
-
-                        let _ = progress_tx.send(TransferProgress {
-                            transfer_id: transfer_id.clone(),
-                            bytes_transferred: bytes_sent,
-                            total_bytes,
-                            speed_bps,
-                            status: "transferring".to_string(),
-                        });
-                        last_progress_emit = Instant::now();
-                    }
+                    transfer.advance(bytes_read_total as u64);
                 }
+
+                transfer.checkpoint().await?;
+
+                let completed_upload = CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed_parts))
+                    .build();
+
+                transfer
+                    .guard(async {
+                        self.client
+                            .complete_multipart_upload()
+                            .bucket(&self.bucket)
+                            .key(&key)
+                            .upload_id(upload_id)
+                            .multipart_upload(completed_upload)
+                            .send()
+                            .await
+                            .map_err(|e| {
+                                eprintln!(
+                                    "[Orbit S3] ❌ complete_multipart failed for key='{}': {}",
+                                    key, e
+                                );
+                                AppError::S3(format!("Erreur de finalisation multipart : {}", e))
+                            })
+                    })
+                    .await?;
                 Ok(())
             }
             .await;
 
             if let Err(err) = upload_result {
+                // Release already-uploaded parts (otherwise the provider keeps billing for them).
                 let _ = self
                     .client
                     .abort_multipart_upload()
@@ -738,66 +814,37 @@ impl StorageProvider for S3Provider {
                     .await;
                 return Err(err);
             }
-
-            let completed_upload = CompletedMultipartUpload::builder()
-                .set_parts(Some(completed_parts))
-                .build();
-
-            self.client
-                .complete_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&key)
-                .upload_id(upload_id)
-                .multipart_upload(completed_upload)
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!(
-                        "[Orbit S3] ❌ complete_multipart failed for key='{}': {}",
-                        key, e
-                    );
-                    AppError::S3(format!("Erreur de finalisation multipart : {}", e))
-                })?;
         } else {
             let data = tokio::fs::read(&local_path)
                 .await
                 .map_err(|e| AppError::Io(format!("Erreur de lecture du fichier local : {}", e)))?;
             let body = ByteStream::from(data);
 
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .content_length(total_bytes as i64)
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!(
-                        "[Orbit S3] ❌ put_object failed for key='{}' in bucket='{}': {}",
-                        key, self.bucket, e
-                    );
-                    AppError::S3(format!("Erreur d'envoi vers S3 : {}", e))
-                })?;
+            transfer.checkpoint().await?;
+            transfer
+                .guard(async {
+                    self.client
+                        .put_object()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .content_length(total_bytes as i64)
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            eprintln!(
+                                "[Orbit S3] ❌ put_object failed for key='{}' in bucket='{}': {}",
+                                key, self.bucket, e
+                            );
+                            AppError::S3(format!("Erreur d'envoi vers S3 : {}", e))
+                        })
+                })
+                .await?;
         }
 
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id,
-            bytes_transferred: total_bytes,
-            total_bytes,
-            speed_bps: 0,
-            status: "completed".to_string(),
-        });
-
+        transfer.complete();
         Ok(())
     }
-}
-
-fn uuid_or_timestamp() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 #[cfg(test)]

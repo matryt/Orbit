@@ -10,7 +10,9 @@ pub mod provider;
 pub mod s3;
 pub mod session;
 pub mod sftp;
+pub mod transfer;
 pub mod updater;
+pub mod walk;
 
 use std::sync::Arc;
 
@@ -26,6 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionManager::new())
+        .manage(transfer::TransferManager::new())
         .manage(Arc::new(HostKeyPromptManager::new()))
         .setup(|_app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -63,6 +66,13 @@ pub fn run() {
             commands::storage_read_preview,
             commands::storage_upload_file,
             commands::storage_download_file,
+            commands::transfer_pause,
+            commands::storage_walk,
+            commands::storage_ensure_dir,
+            commands::local_walk,
+            commands::local_is_dir,
+            commands::transfer_resume,
+            commands::transfer_cancel,
             commands::save_secret,
             commands::get_secret,
             commands::delete_secret,

@@ -15,6 +15,8 @@ use crate::s3::client::S3Provider;
 use crate::session::SessionManager;
 use crate::sftp::client::SftpProvider;
 use crate::sftp::host_key::{HostKeyPromptManager, TauriHostKeyPromptHandler};
+use crate::transfer::{TransferHandle, TransferManager};
+use crate::walk::{LocalWalkResult, WalkEntry};
 
 #[tauri::command]
 pub async fn respond_host_key_prompt(
@@ -239,7 +241,9 @@ pub async fn get_session_info(
 pub async fn disconnect(
     profile_id: String,
     state: State<'_, SessionManager>,
+    transfers: State<'_, TransferManager>,
 ) -> Result<(), AppError> {
+    transfers.cancel_for_profile(&profile_id).await;
     state.remove_provider(&profile_id).await;
     Ok(())
 }
@@ -300,35 +304,98 @@ pub async fn storage_read_preview(
 #[tauri::command]
 pub async fn storage_upload_file(
     profile_id: Option<String>,
+    transfer_id: String,
     local_path: String,
     remote_path: String,
     progress_tx: Channel<TransferProgress>,
     state: State<'_, SessionManager>,
+    transfers: State<'_, TransferManager>,
 ) -> Result<(), AppError> {
     let provider = state.get_provider(profile_id.as_deref()).await?;
-    let path_buf = PathBuf::from(local_path);
-    provider
-        .upload_file(path_buf, remote_path, progress_tx)
-        .await
-        .map_err(|e| {
-            eprintln!("[Tauri Command] ❌ storage_upload_file error: {:?}", e);
-            e
-        })
+    let control = transfers.register(&transfer_id, profile_id).await?;
+    let mut handle = TransferHandle::new(transfer_id.clone(), control, progress_tx);
+    let result = provider
+        .upload_file(PathBuf::from(local_path), remote_path, &mut handle)
+        .await;
+    transfers.unregister(&transfer_id).await;
+    result
 }
 
 #[tauri::command]
 pub async fn storage_download_file(
     profile_id: Option<String>,
+    transfer_id: String,
     remote_path: String,
     local_path: String,
     progress_tx: Channel<TransferProgress>,
     state: State<'_, SessionManager>,
+    transfers: State<'_, TransferManager>,
 ) -> Result<(), AppError> {
     let provider = state.get_provider(profile_id.as_deref()).await?;
-    let path_buf = PathBuf::from(local_path);
-    provider
-        .download_file(remote_path, path_buf, progress_tx)
+    let control = transfers.register(&transfer_id, profile_id).await?;
+    let mut handle = TransferHandle::new(transfer_id.clone(), control, progress_tx);
+    let result = provider
+        .download_file(remote_path, PathBuf::from(local_path), &mut handle)
+        .await;
+    transfers.unregister(&transfer_id).await;
+    result
+}
+
+#[tauri::command]
+pub async fn storage_walk(
+    profile_id: Option<String>,
+    path: String,
+    state: State<'_, SessionManager>,
+) -> Result<Vec<WalkEntry>, AppError> {
+    let provider = state.get_provider(profile_id.as_deref()).await?;
+    provider.walk(&path).await
+}
+
+#[tauri::command]
+pub async fn storage_ensure_dir(
+    profile_id: Option<String>,
+    path: String,
+    state: State<'_, SessionManager>,
+) -> Result<(), AppError> {
+    let provider = state.get_provider(profile_id.as_deref()).await?;
+    provider.ensure_dir(&path).await
+}
+
+/// True when `path` is a directory (symlinks are followed, like a Finder/Explorer drop).
+#[tauri::command]
+pub async fn local_is_dir(path: String) -> Result<bool, AppError> {
+    Ok(tokio::fs::metadata(&path).await?.is_dir())
+}
+
+#[tauri::command]
+pub async fn local_walk(path: String) -> Result<LocalWalkResult, AppError> {
+    tokio::task::spawn_blocking(move || crate::walk::walk_local(std::path::Path::new(&path)))
         .await
+        .map_err(|e| AppError::Io(format!("Local walk task failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn transfer_pause(
+    transfer_id: String,
+    transfers: State<'_, TransferManager>,
+) -> Result<(), AppError> {
+    transfers.pause(&transfer_id).await
+}
+
+#[tauri::command]
+pub async fn transfer_resume(
+    transfer_id: String,
+    transfers: State<'_, TransferManager>,
+) -> Result<(), AppError> {
+    transfers.resume(&transfer_id).await
+}
+
+#[tauri::command]
+pub async fn transfer_cancel(
+    transfer_id: String,
+    transfers: State<'_, TransferManager>,
+) -> Result<(), AppError> {
+    transfers.cancel(&transfer_id).await
 }
 
 #[tauri::command]

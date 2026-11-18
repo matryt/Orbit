@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useOrbitStore } from './store/useOrbitStore';
-import { isTauri } from './services/storageApi';
+import { isTauri, storageApi } from './services/storageApi';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { WindowsTitlebar } from './components/layout/WindowsTitlebar';
@@ -11,6 +11,7 @@ import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
 import { UpdateModal } from './components/modals/UpdateModal';
+import { TransferConflictModal } from './components/modals/TransferConflictModal';
 
 export function App() {
   const {
@@ -53,7 +54,9 @@ export function App() {
               if (!paths || paths.length === 0) return;
 
               const store = useOrbitStore.getState();
-              const { currentPath, uploadFile } = store;
+              // Pin the profile with the remote path: the loop below awaits folder scans, during
+              // which the user may switch profiles.
+              const { currentPath, activeProfileId: profileId, enqueueTransfers, enqueueFolder } = store;
 
               // Determine if drop happened over a specific folder element
               let targetDir = currentPath;
@@ -73,14 +76,30 @@ export function App() {
                 }
               }
 
+              const files: { path: string; name: string }[] = [];
               for (const filePath of paths) {
-                const fileName = filePath.split(/[/\\]/).pop() || 'file';
-                const remoteTarget =
-                  targetDir === '/'
-                    ? `/${fileName}`
-                    : `${targetDir.replace(/\/+$/, '')}/${fileName}`;
-                await uploadFile(filePath, remoteTarget, fileName);
+                const name = filePath.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || 'file';
+                let isDir = false;
+                try {
+                  isDir = await storageApi.localIsDir(filePath);
+                } catch {
+                  // Unreadable path: let the upload report the error.
+                }
+                if (isDir) {
+                  await enqueueFolder({ direction: 'upload', sourcePath: filePath, destDir: targetDir, name, profileId });
+                } else {
+                  files.push({ path: filePath, name });
+                }
               }
+              await enqueueTransfers(
+                files.map(({ path, name }) => ({
+                  direction: 'upload' as const,
+                  localPath: path,
+                  remotePath: targetDir === '/' ? `/${name}` : `${targetDir.replace(/\/+$/, '')}/${name}`,
+                  fileName: name,
+                })),
+                { profileId }
+              );
             }
           }
         );
@@ -163,6 +182,7 @@ export function App() {
       {isExportModalOpen && <ExportProfilesModal />}
       <HostKeyVerificationModal />
       <UpdateModal />
+      <TransferConflictModal />
     </div>
   );
 }

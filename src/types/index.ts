@@ -32,6 +32,8 @@ export interface FileEntry {
 
 export interface TransferItem {
   id: string;
+  /** Profile the transfer was started on (frozen when enqueued). */
+  profileId?: string | null;
   serverName?: string;
   serverType?: StorageType;
   fileName: string;
@@ -42,6 +44,13 @@ export interface TransferItem {
   totalBytes: number;
   speedBps: number;
   status: 'queued' | 'transferring' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  /**
+   * True while the backend call is running. It can outlive a `cancelled` status: the Rust
+   * side still has to stop and clean up, so the destination stays reserved until then.
+   */
+  inFlight?: boolean;
+  /** Folder transfer this file belongs to, if any. */
+  groupId?: string;
   error?: string;
 }
 
@@ -100,3 +109,23 @@ export interface NavigationError {
   isPermissionDenied: boolean;
 }
 
+
+/** Entry of a recursive walk; `relative_path` is `/`-separated and relative to the walked root. */
+export interface WalkEntry {
+  relative_path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+/** A folder transfer: one row in the drawer, backed by one TransferItem per file. */
+export interface TransferGroup {
+  id: string;
+  name: string;
+  direction: 'upload' | 'download';
+  profileId: string;
+  serverName?: string;
+  serverType?: StorageType;
+  /** scanning: walking the source tree; ready: files enqueued; failed/cancelled before enqueuing. */
+  phase: 'scanning' | 'ready' | 'failed' | 'cancelled';
+  error?: string;
+}

@@ -9,22 +9,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use tauri::ipc::Channel;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
     FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, SudoCapability,
-    TransferProgress,
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
     HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
 };
+use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
+/// Chunk size used for SFTP reads/writes during transfers.
+const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
+
 static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Vérifie si un certificat OpenSSH est validé par une autorité @cert-authority déclarée dans ~/.ssh/known_hosts.
@@ -1297,6 +1299,49 @@ pub fn validate_local_path_safety(path: &std::path::Path) -> Result<(), AppError
     Ok(())
 }
 
+async fn remove_dir_all_sftp(session: &SftpSession, path: &str) -> Result<(), AppError> {
+    validate_path_safety(path)?;
+    let read_dir = session.read_dir(path).await.map_err(|e| {
+        AppError::Sftp(format!("Failed to read directory {path} for deletion: {e}"))
+    })?;
+
+    for entry in read_dir {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        validate_path_safety(&name)?;
+
+        let child_path = if path.ends_with('/') {
+            format!("{path}{name}")
+        } else {
+            format!("{path}/{name}")
+        };
+
+        let file_type = entry.file_type();
+        if file_type.is_symlink() {
+            // Never follow symlinks when deleting! A symlink (even to a directory) is removed with remove_file.
+            session.remove_file(&child_path).await.map_err(|e| {
+                AppError::Sftp(format!("Failed to remove symlink {child_path}: {e}"))
+            })?;
+        } else if file_type.is_dir() {
+            Box::pin(remove_dir_all_sftp(session, &child_path)).await?;
+        } else {
+            session
+                .remove_file(&child_path)
+                .await
+                .map_err(|e| AppError::Sftp(format!("Failed to remove file {child_path}: {e}")))?;
+        }
+    }
+
+    session
+        .remove_dir(path)
+        .await
+        .map_err(|e| AppError::Sftp(format!("Failed to remove directory {path}: {e}")))?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl StorageProvider for SftpProvider {
     async fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, AppError> {
@@ -1383,17 +1428,14 @@ impl StorageProvider for SftpProvider {
     async fn delete(&self, path: &str, is_dir: bool) -> Result<(), AppError> {
         validate_path_safety(path)?;
         if is_dir {
-            self.session
-                .remove_dir(path)
-                .await
-                .map_err(|e| AppError::Sftp(format!("Failed to remove directory {path}: {e}")))?;
+            remove_dir_all_sftp(&self.session, path).await
         } else {
             self.session
                 .remove_file(path)
                 .await
                 .map_err(|e| AppError::Sftp(format!("Failed to remove file {path}: {e}")))?;
+            Ok(())
         }
-        Ok(())
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), AppError> {
@@ -1427,7 +1469,7 @@ impl StorageProvider for SftpProvider {
         &self,
         local_path: PathBuf,
         remote_path: String,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError> {
         validate_local_path_safety(&local_path)?;
         validate_path_safety(&remote_path)?;
@@ -1445,71 +1487,65 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
+        // No `guard` here: aborting `create` after the server has received the OPEN would
+        // leave an empty/truncated remote file with no cleanup. Let the open complete; a
+        // cancellation is then picked up by the first `checkpoint` in the copy loop, which
+        // goes through the cleanup below.
         let mut remote_file =
             self.session.create(&remote_path).await.map_err(|e| {
                 AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
             })?;
 
-        let mut buffer = [0u8; 64 * 1024]; // 64 KiB chunks
-        let mut bytes_transferred = 0u64;
-        let mut last_emit = Instant::now();
-        let mut last_bytes = 0u64;
-        let transfer_id = format!("tx-{}", Utc::now().timestamp_millis());
+        transfer.start(total_bytes);
 
-        loop {
-            let n = local_file
-                .read(&mut buffer)
-                .await
-                .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
+        let copy_result: Result<(), AppError> = async {
+            let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
+            loop {
+                transfer.checkpoint().await?;
 
-            if n == 0 {
-                break;
+                let n = local_file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+
+                transfer
+                    .guard(async {
+                        remote_file
+                            .write_all(&buffer[..n])
+                            .await
+                            .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))
+                    })
+                    .await?;
+
+                transfer.advance(n as u64);
             }
 
-            remote_file
-                .write_all(&buffer[..n])
+            transfer
+                .guard(async {
+                    remote_file
+                        .close()
+                        .await
+                        .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))
+                })
                 .await
-                .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))?;
+        }
+        .await;
 
-            bytes_transferred += n as u64;
-
-            // Emit progress every ~150ms
-            let elapsed = last_emit.elapsed();
-            if elapsed >= Duration::from_millis(150) {
-                let delta_bytes = bytes_transferred - last_bytes;
-                let speed_bps = if elapsed.as_secs_f64() > 0.0 {
-                    (delta_bytes as f64 / elapsed.as_secs_f64()) as u64
-                } else {
-                    0
-                };
-
-                let _ = progress_tx.send(TransferProgress {
-                    transfer_id: transfer_id.clone(),
-                    bytes_transferred,
-                    total_bytes,
-                    speed_bps,
-                    status: "transferring".into(),
-                });
-
-                last_emit = Instant::now();
-                last_bytes = bytes_transferred;
+        if let Err(err) = copy_result {
+            // Don't leave a truncated remote file behind an interrupted transfer
+            // (the remote handle was already released when the copy block exited).
+            if let Err(rm_err) = self.session.remove_file(&remote_path).await {
+                eprintln!(
+                    "[Orbit SFTP] ⚠️ Could not remove partial remote file {remote_path}: {rm_err}"
+                );
             }
+            return Err(err);
         }
 
-        remote_file
-            .close()
-            .await
-            .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))?;
-
-        // Final 100% notification
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id,
-            bytes_transferred: total_bytes,
-            total_bytes,
-            speed_bps: 0,
-            status: "completed".into(),
-        });
-
+        transfer.complete();
         Ok(())
     }
 
@@ -1517,89 +1553,79 @@ impl StorageProvider for SftpProvider {
         &self,
         remote_path: String,
         local_path: PathBuf,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError> {
         validate_path_safety(&remote_path)?;
         validate_local_path_safety(&local_path)?;
 
-        let mut remote_file =
-            self.session.open(&remote_path).await.map_err(|e| {
-                AppError::Sftp(format!("Cannot open remote file {remote_path}: {e}"))
-            })?;
+        let mut remote_file = transfer
+            .guard(async {
+                self.session.open(&remote_path).await.map_err(|e| {
+                    AppError::Sftp(format!("Cannot open remote file {remote_path}: {e}"))
+                })
+            })
+            .await?;
 
-        let meta = remote_file
-            .metadata()
-            .await
-            .map_err(|e| AppError::Sftp(format!("Cannot get remote file metadata: {e}")))?;
+        let meta = transfer
+            .guard(async {
+                remote_file
+                    .metadata()
+                    .await
+                    .map_err(|e| AppError::Sftp(format!("Cannot get remote file metadata: {e}")))
+            })
+            .await?;
         let total_bytes = meta.size.unwrap_or(0);
 
-        let mut local_file = tokio::fs::File::create(&local_path).await.map_err(|e| {
+        let partial_path = partial_download_path(&local_path, transfer.id());
+        let mut local_file = tokio::fs::File::create(&partial_path).await.map_err(|e| {
             AppError::Io(format!(
                 "Cannot create local file {}: {e}",
-                local_path.display()
+                partial_path.display()
             ))
         })?;
 
-        let mut buffer = [0u8; 64 * 1024]; // 64 KiB chunks
-        let mut bytes_transferred = 0u64;
-        let mut last_emit = Instant::now();
-        let mut last_bytes = 0u64;
-        let transfer_id = format!("tx-{}", Utc::now().timestamp_millis());
+        transfer.start(total_bytes);
 
-        loop {
-            let n = remote_file
-                .read(&mut buffer)
-                .await
-                .map_err(|e| AppError::Sftp(format!("Error reading from SFTP: {e}")))?;
+        let copy_result: Result<(), AppError> = async {
+            let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
+            loop {
+                transfer.checkpoint().await?;
 
-            if n == 0 {
-                break;
+                let n = transfer
+                    .guard(async {
+                        remote_file
+                            .read(&mut buffer)
+                            .await
+                            .map_err(|e| AppError::Sftp(format!("Error reading from SFTP: {e}")))
+                    })
+                    .await?;
+                if n == 0 {
+                    break;
+                }
+
+                local_file
+                    .write_all(&buffer[..n])
+                    .await
+                    .map_err(|e| AppError::Io(format!("Error writing to local file: {e}")))?;
+
+                transfer.advance(n as u64);
             }
 
             local_file
-                .write_all(&buffer[..n])
+                .flush()
                 .await
-                .map_err(|e| AppError::Io(format!("Error writing to local file: {e}")))?;
-
-            bytes_transferred += n as u64;
-
-            // Emit progress every ~150ms
-            let elapsed = last_emit.elapsed();
-            if elapsed >= Duration::from_millis(150) {
-                let delta_bytes = bytes_transferred - last_bytes;
-                let speed_bps = if elapsed.as_secs_f64() > 0.0 {
-                    (delta_bytes as f64 / elapsed.as_secs_f64()) as u64
-                } else {
-                    0
-                };
-
-                let _ = progress_tx.send(TransferProgress {
-                    transfer_id: transfer_id.clone(),
-                    bytes_transferred,
-                    total_bytes,
-                    speed_bps,
-                    status: "transferring".into(),
-                });
-
-                last_emit = Instant::now();
-                last_bytes = bytes_transferred;
-            }
+                .map_err(|e| AppError::Io(format!("Error flushing local file: {e}")))
         }
+        .await;
 
-        local_file
-            .flush()
-            .await
-            .map_err(|e| AppError::Io(format!("Error flushing local file: {e}")))?;
+        drop(local_file);
+        if let Err(err) = copy_result {
+            let _ = tokio::fs::remove_file(&partial_path).await;
+            return Err(err);
+        }
+        finalize_partial_download(&partial_path, &local_path).await?;
 
-        // Final 100% notification
-        let _ = progress_tx.send(TransferProgress {
-            transfer_id,
-            bytes_transferred: total_bytes,
-            total_bytes,
-            speed_bps: 0,
-            status: "completed".into(),
-        });
-
+        transfer.complete();
         Ok(())
     }
 

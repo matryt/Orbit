@@ -1,4 +1,4 @@
-import { ConnectionProfile, FileEntry, TransferItem } from '../types';
+import { ConnectionProfile, FileEntry } from '../types';
 
 export const MOCK_PROFILES: ConnectionProfile[] = [];
 
@@ -14,8 +14,6 @@ export const MOCK_LOCAL_FILES: FileEntry[] = [
   { name: 'export-data.csv', path: '/Users/mac/export-data.csv', is_dir: false, size: 684200, modified_at: '2026-11-13T14:40:00Z' },
   { name: 'screenshot-2026.png', path: '/Users/mac/screenshot-2026.png', is_dir: false, size: 840500, modified_at: '2026-11-13T19:05:00Z' },
 ];
-
-export const MOCK_TRANSFERS: TransferItem[] = [];
 
 export const MOCK_PREVIEWS: Record<string, string> = {
   '/app-config.json': JSON.stringify({

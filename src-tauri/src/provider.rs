@@ -1,8 +1,9 @@
 use crate::error::AppError;
-use crate::models::{FileEntry, SudoCapability, TransferProgress};
+use crate::models::{FileEntry, SudoCapability};
+use crate::transfer::TransferHandle;
+use crate::walk::WalkEntry;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tauri::ipc::Channel;
 
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
@@ -15,14 +16,30 @@ pub trait StorageProvider: Send + Sync {
         &self,
         local_path: PathBuf,
         remote_path: String,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError>;
     async fn download_file(
         &self,
         remote_path: String,
         local_path: PathBuf,
-        progress_tx: Channel<TransferProgress>,
+        transfer: &mut TransferHandle,
     ) -> Result<(), AppError>;
+
+    /// Recursively lists `root`. Paths are relative to `root` and `/`-separated.
+    async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, AppError> {
+        crate::walk::walk_remote(self, root).await
+    }
+
+    /// Creates `path` if needed; succeeds when it already exists as a directory.
+    async fn ensure_dir(&self, path: &str) -> Result<(), AppError> {
+        match self.create_dir(path).await {
+            Ok(()) => Ok(()),
+            Err(err) => match self.list_dir(path).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(err),
+            },
+        }
+    }
 
     fn is_elevated(&self) -> bool {
         false
