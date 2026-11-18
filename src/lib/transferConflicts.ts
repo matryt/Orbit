@@ -134,24 +134,21 @@ export async function planTransferBatch<T extends TransferRequest>(
     }
   }
 
-  // 2. Group into reservation sets keyed by keyOf, merging existing files from all spellings
-  // that resolve to the same normalized directory on case-insensitive destinations.
+  // 2. Group into reservation sets keyed by normalized key, merging existing files in a single
+  // linear pass (O(N)) across all loaded directory spellings.
   const takenByDir = new Map<string, NameSet>();
-  for (const r of requests) {
-    const key = keyOf(r);
-    if (!takenByDir.has(key)) {
-      const merged = new NameSet(r.direction === 'download');
-      for (const [rawKey, set] of loadedByRawDir.entries()) {
-        const sepIdx = rawKey.indexOf(':');
-        const direction = rawKey.slice(0, sepIdx);
-        const dir = rawKey.slice(sepIdx + 1);
-        const candidateKey = `${direction}:${direction === 'download' ? dir.toLowerCase() : dir}`;
-        if (candidateKey === key) {
-          merged.merge(set);
-        }
-      }
-      takenByDir.set(key, merged);
+  for (const [rawKey, set] of loadedByRawDir.entries()) {
+    const sepIdx = rawKey.indexOf(':');
+    const direction = rawKey.slice(0, sepIdx) as TransferRequest['direction'];
+    const dir = rawKey.slice(sepIdx + 1);
+    const normalizedKey = `${direction}:${direction === 'download' ? dir.toLowerCase() : dir}`;
+
+    let existing = takenByDir.get(normalizedKey);
+    if (!existing) {
+      existing = new NameSet(direction === 'download');
+      takenByDir.set(normalizedKey, existing);
     }
+    existing.merge(set);
   }
 
   /** Conflicts left in `requests[from..]`, including collisions between those requests. */
