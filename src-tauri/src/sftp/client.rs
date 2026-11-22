@@ -1897,7 +1897,9 @@ impl StorageProvider for SftpProvider {
                         );
                         let _ = self.session.remove_file(&tmp_path).await;
                         if let Err(seek_err) = local_file.rewind().await {
-                            return Err(AppError::Io(format!("Cannot rewind local file: {seek_err}")));
+                            return Err(AppError::Io(format!(
+                                "Cannot rewind local file: {seek_err}"
+                            )));
                         }
                         transfer.start(total_bytes);
                     }
@@ -1911,9 +1913,10 @@ impl StorageProvider for SftpProvider {
         }
 
         // Direct upload fallback (if temp file or rename is forbidden by server)
-        let remote_file = self.session.create(&remote_path).await.map_err(|e| {
-            AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
-        })?;
+        let remote_file =
+            self.session.create(&remote_path).await.map_err(|e| {
+                AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
+            })?;
 
         let copy_result = self
             .stream_upload(&mut local_file, remote_file, transfer)

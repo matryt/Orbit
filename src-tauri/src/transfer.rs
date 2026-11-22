@@ -206,7 +206,9 @@ pub async fn create_partial_download_file(path: &Path) -> Result<tokio::fs::File
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await {
+        if let Err(e) =
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+        {
             let _ = tokio::fs::remove_file(path).await;
             return Err(AppError::Io(format!(
                 "Cannot enforce 0600 permissions on partial file {}: {e}",
@@ -503,8 +505,16 @@ mod tests {
 
         let mode = std::fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(mode & 0o077, 0, "Group and others must not have any permissions");
-        assert_eq!(mode & 0o600, 0o600, "Owner must have read and write permissions");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "Group and others must not have any permissions"
+        );
+        assert_eq!(
+            mode & 0o600,
+            0o600,
+            "Owner must have read and write permissions"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
