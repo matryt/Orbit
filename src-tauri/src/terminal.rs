@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::models::{BastionConfig, ConnectionProfile};
@@ -83,13 +83,16 @@ pub fn build_bastion_routing(
     };
 
     // Si une clé privée spécifique est requise pour le bastion, passer par ProxyCommand
+    // OpenSSH développe les tokens `%h`, `%p`, etc. Les `%` littéraux dans les chemins/hôtes doivent être doublés (`%%`).
     if let Some(kp) = key_path {
         let resolved_key = resolve_home_path(kp);
+        let escaped_key = escape_single_quotes(&resolved_key).replace('%', "%%");
         let target = match user {
             Some(u) => format!("{u}@{host_bracketed}"),
             None => host_bracketed,
         };
-        let proxy_cmd = format!("ssh -W %h:%p -i '{resolved_key}' -p {port} {target}");
+        let escaped_target = escape_single_quotes(&target).replace('%', "%%");
+        let proxy_cmd = format!("ssh -W %h:%p -i '{escaped_key}' -p {port} {escaped_target}");
         return Ok(Some(BastionRouting::ProxyCommand(proxy_cmd)));
     }
 
@@ -253,7 +256,7 @@ pub fn launch_terminal(
 // ---------------------------------------------------------------------------
 #[cfg(target_os = "macos")]
 fn launch_macos(ssh_args: &[String]) -> Result<(), String> {
-    let iterm_available = Path::new("/Applications/iTerm.app").exists()
+    let iterm_available = PathBuf::from("/Applications/iTerm.app").exists()
         || dirs::home_dir()
             .map(|h| h.join("Applications/iTerm.app").exists())
             .unwrap_or(false);
@@ -424,7 +427,7 @@ fn launch_windows(
         }
     }
 
-    // Fallback 1 : PowerShell avec arguments littéraux (évite l'expansion locale de $SHELL)
+    // Fallback : PowerShell avec arguments littéraux (évite l'expansion locale de $SHELL)
     let ps_cmd = format_powershell_command_line(ssh_args);
     if Command::new("powershell.exe")
         .args(["-NoExit", "-Command", &ps_cmd])
@@ -434,14 +437,10 @@ fn launch_windows(
         return Ok(());
     }
 
-    // Fallback 2 : cmd.exe
-    let posix_cmd = format_posix_command_line(ssh_args);
-    Command::new("cmd.exe")
-        .args(["/c", "start", "cmd.exe", "/k", &posix_cmd])
-        .spawn()
-        .map_err(|e| format!("Échec du lancement du terminal sous Windows: {e}"))?;
-
-    Ok(())
+    Err(
+        "Impossible de lancer un terminal compatible sous Windows (Windows Terminal, PuTTY ou PowerShell requis)."
+            .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +692,41 @@ mod tests {
     }
 
     #[test]
+    fn test_build_ssh_args_bastion_with_percent_in_key_path() {
+        let mut prof = create_dummy_profile(
+            "p5_percent",
+            "sftp",
+            Some("target.internal"),
+            Some(22),
+            Some("root"),
+            None,
+        );
+        prof.bastion = Some(BastionConfig {
+            enabled: true,
+            profile_id: None,
+            host: Some("jump%host.example.com".to_string()),
+            port: Some(2222),
+            username: Some("jumpuser".to_string()),
+            auth_type: Some("key".to_string()),
+            key_path: Some("/tmp/100%jump/key".to_string()),
+            password: None,
+            passphrase: None,
+        });
+
+        let args = build_ssh_args(&prof, &[], None).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "22",
+                "-o",
+                "ProxyCommand=ssh -W %h:%p -i '/tmp/100%%jump/key' -p 2222 jumpuser@jump%%host.example.com",
+                "root@target.internal"
+            ]
+        );
+    }
+
+    #[test]
     fn test_build_ssh_args_invalid_bastion_returns_error() {
         let mut prof = create_dummy_profile(
             "p6",
@@ -801,21 +835,39 @@ mod tests {
         for payload in attack_payloads {
             let args = build_ssh_args(&prof, &[], Some(payload)).expect("Should build args safely");
 
-            // 1. Vérifier que chaque argument individuel est correctement POSIX-quoted
+            // 1. Vérifier que chaque argument individuel est correctement POSIX-quoted et préserve fidèlement la valeur
             for arg in &args {
                 let q = posix_quote(arg);
                 assert!(q.starts_with('\''), "Must start with single quote");
                 assert!(q.ends_with('\''), "Must end with single quote");
+                // Décodage POSIX strict : strip quotes de début/fin et substitution de '\'' par '
+                let inner = &q[1..q.len() - 1];
+                let unquoted = inner.replace("'\\''", "'");
+                assert_eq!(
+                    &unquoted, arg,
+                    "Decoded POSIX argument must match original value"
+                );
             }
 
             // 2. Vérifier que la commande POSIX pour le script local ne contient aucun appel non échappé
             let posix_cmd = format_posix_command_line(&args);
             assert!(posix_cmd.starts_with("ssh "));
 
-            // 3. Vérifier que la commande PowerShell n'utilise pas de syntaxe interpolée
+            // 3. Vérifier que la commande PowerShell n'utilise pas de syntaxe interpolée et préserve les valeurs
             let ps_cmd = format_powershell_command_line(&args);
             assert!(ps_cmd.starts_with("& ssh @("));
             assert!(ps_cmd.ends_with(')'));
+            for arg in &args {
+                let pq = powershell_quote(arg);
+                assert!(pq.starts_with('\''));
+                assert!(pq.ends_with('\''));
+                let inner = &pq[1..pq.len() - 1];
+                let unquoted = inner.replace("''", "'");
+                assert_eq!(
+                    &unquoted, arg,
+                    "Decoded PowerShell argument must match original value"
+                );
+            }
         }
     }
 
@@ -874,34 +926,60 @@ mod tests {
             let quoted = posix_quote(case);
             assert!(quoted.starts_with('\''), "Must start with single quote");
             assert!(quoted.ends_with('\''), "Must end with single quote");
-            // Dans une chaîne POSIX '...', aucune substitution de variable ou de commande n'est possible
+            let inner = &quoted[1..quoted.len() - 1];
+            let unquoted = inner.replace("'\\''", "'");
+            assert_eq!(
+                &unquoted, case,
+                "Decoded quoted string must round-trip exactly"
+            );
         }
     }
 
     #[test]
     fn test_security_macos_temp_script_exclusive_creation() {
         // Vérifie que create_new(true) échoue si un fichier préexiste (protection contre symlink race)
-        let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join(format!("orbit-sec-test-{}.tmp", std::process::id()));
+        let unique_name = format!(
+            "orbit-sec-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let isolated_dir = std::env::temp_dir().join(&unique_name);
+        std::fs::create_dir_all(&isolated_dir).unwrap();
+        let test_file = isolated_dir.join("test.command");
 
-        // Créer le fichier
-        std::fs::write(&test_file, b"initial").unwrap();
+        struct DirCleanup(PathBuf);
+        impl Drop for DirCleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = DirCleanup(isolated_dir);
 
-        // Tenter d'ouvrir avec create_new(true)
-        let result = std::fs::OpenOptions::new()
+        // 1. Créer le fichier initialement avec create_new(true)
+        let initial = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&test_file);
+        assert!(
+            initial.is_ok(),
+            "Initial exclusive file creation must succeed"
+        );
+
+        // 2. Tenter d'ouvrir une seconde fois avec create_new(true)
+        let second = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&test_file);
 
         // Doit échouer avec AlreadyExists
         assert!(
-            result.is_err(),
+            second.is_err(),
             "create_new must fail if file already exists"
         );
-        let err = result.unwrap_err();
+        let err = second.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-
-        // Nettoyage
-        let _ = std::fs::remove_file(test_file);
     }
 }
