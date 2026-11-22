@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -13,6 +13,8 @@ export interface SftpConnectParams {
   passphrase?: string;
   use_sudo?: boolean;
   sudo_password?: string;
+  bastion?: BastionConfig;
+  proxy?: ProxyConfig;
 }
 
 export interface BackendTransferProgress {
@@ -477,5 +479,16 @@ export const storageApi = {
       };
     }
     return await invoke<UpdateCheckResult>('check_app_update');
+  },
+
+  async openInExternalTerminal(profileId: string, remotePath?: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] openInExternalTerminal', profileId, remotePath);
+      return;
+    }
+    await invoke('open_in_external_terminal', {
+      profileId,
+      remotePath: remotePath || null,
+    });
   },
 };

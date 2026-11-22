@@ -1,5 +1,28 @@
 export type StorageType = 's3' | 'sftp';
 
+export type ProxyType = 'socks5' | 'http';
+
+export interface ProxyConfig {
+  enabled: boolean;
+  proxyType?: ProxyType;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+}
+
+export interface BastionConfig {
+  enabled: boolean;
+  profileId?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  authType?: 'password' | 'key';
+  keyPath?: string;
+  password?: string;
+  passphrase?: string;
+}
+
 export interface ConnectionProfile {
   id: string;
   name: string;
@@ -16,6 +39,8 @@ export interface ConnectionProfile {
   status: 'connected' | 'idle' | 'error';
   isFavorite: boolean;
   useSudo?: boolean;
+  bastion?: BastionConfig;
+  proxy?: ProxyConfig;
 }
 
 export interface FileEntry {
@@ -128,4 +153,5 @@ export interface TransferGroup {
   /** scanning: walking the source tree; ready: files enqueued; failed/cancelled before enqueuing. */
   phase: 'scanning' | 'ready' | 'failed' | 'cancelled';
   error?: string;
+  paused?: boolean;
 }

@@ -12,7 +12,9 @@ use tokio::io::AsyncWriteExt;
 use crate::error::AppError;
 use crate::models::{FileEntry, S3ConnectConfig};
 use crate::provider::StorageProvider;
-use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
+use crate::transfer::{
+    TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
+};
 use crate::walk::{MAX_WALK_ENTRIES, WalkEntry, is_safe_relative_path, too_many_entries};
 
 pub struct S3Provider {
@@ -629,7 +631,7 @@ impl StorageProvider for S3Provider {
         }
 
         let partial_path = partial_download_path(&local_path, transfer.id());
-        let mut file = tokio::fs::File::create(&partial_path).await?;
+        let mut file = create_partial_download_file(&partial_path).await?;
         let mut body = resp.body;
 
         transfer.start(total_bytes);

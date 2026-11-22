@@ -10,6 +10,9 @@ pub enum AppError {
     #[error("I/O error: {0}")]
     Io(String),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     #[error("SFTP error: {0}")]
     Sftp(String),
 

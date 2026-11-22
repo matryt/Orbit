@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use russh::ChannelStream;
 use russh::client::{self, Handle, Handler};
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::key::PrivateKeyWithHashAlg;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
@@ -20,7 +21,9 @@ use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
     HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
 };
-use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
+use crate::transfer::{
+    TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
+};
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
@@ -383,6 +386,7 @@ pub struct UserGroupMaps {
 pub struct SftpProvider {
     session: SftpSession,
     _handle: Handle<SshHandler>,
+    _bastion_handle: Option<Handle<SshHandler>>,
     username: String,
     identities: tokio::sync::RwLock<Option<UserGroupMaps>>,
     pub host_key_status: Option<HostKeyStatus>,
@@ -397,6 +401,57 @@ pub fn parse_sudo_probe_output(text: &str) -> SudoCapability {
         SudoCapability::PasswordRequired
     } else {
         SudoCapability::None
+    }
+}
+
+pub enum SshStream {
+    Tcp(tokio::net::TcpStream),
+    Channel(ChannelStream<russh::client::Msg>),
+}
+
+impl tokio::io::AsyncRead for SshStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match *self {
+            SshStream::Tcp(ref mut s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            SshStream::Channel(ref mut s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for SshStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        match *self {
+            SshStream::Tcp(ref mut s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            SshStream::Channel(ref mut s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match *self {
+            SshStream::Tcp(ref mut s) => std::pin::Pin::new(s).poll_flush(cx),
+            SshStream::Channel(ref mut s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match *self {
+            SshStream::Tcp(ref mut s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            SshStream::Channel(ref mut s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
     }
 }
 
@@ -460,55 +515,34 @@ impl SftpProvider {
         Self::connect_with_logs_and_prompt(config, None).await
     }
 
-    pub async fn connect_with_logs_and_prompt(
-        config: SftpConnectConfig,
+    async fn connect_ssh_over_stream(
+        stream: SshStream,
+        host: &str,
+        port: u16,
+        ssh_config: Arc<client::Config>,
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
-    ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
-        let mut logs = Vec::new();
+        target_label: &str,
+        logs: &mut Vec<String>,
+    ) -> Result<
+        (
+            Handle<SshHandler>,
+            Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        ),
+        (AppError, Vec<String>),
+    > {
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
-
-        logs.push(format!(
-            "[{}] Démarrage de la séquence de connexion SFTP...",
-            now()
-        ));
-        logs.push(format!(
-            "[{}] Cible : {}:{}",
-            now(),
-            config.host,
-            config.port
-        ));
-        logs.push(format!(
-            "[{}] Utilisateur SSH : '{}'",
-            now(),
-            config.username
-        ));
-
-        let ssh_config = Arc::new(client::Config {
-            inactivity_timeout: None,
-            keepalive_interval: Some(Duration::from_secs(30)),
-            keepalive_max: 3,
-            nodelay: true,
-            ..Default::default()
-        });
-
-        let addr = format!("{}:{}", config.host, config.port);
-        logs.push(format!(
-            "[{}] 1/4 Connexion TCP socket vers {}...",
-            now(),
-            addr
-        ));
-
+        let addr = format!("{host}:{port}");
         let key_status = Arc::new(tokio::sync::Mutex::new(None));
         let prompt_active = Arc::new(AtomicBool::new(false));
         let handler = SshHandler::with_prompt_tracker(
-            config.host.clone(),
-            config.port,
+            host.to_string(),
+            port,
             Arc::clone(&key_status),
             prompt_handler,
             Arc::clone(&prompt_active),
         );
 
-        let connect_fut = client::connect(ssh_config, &addr, handler);
+        let connect_fut = client::connect_stream(ssh_config, stream, handler);
         tokio::pin!(connect_fut);
 
         let mut network_elapsed = Duration::ZERO;
@@ -531,47 +565,47 @@ impl SftpProvider {
             }
         };
 
-        let mut handle = match connect_res {
+        let handle = match connect_res {
             Ok(Ok(h)) => {
                 logs.push(format!(
-                    "[{}] Connexion TCP socket établie avec succès.",
+                    "[{}] [{target_label}] Connexion SSH établie avec succès vers {addr}.",
                     now()
                 ));
                 let recorded_status = key_status.lock().await.clone();
                 match recorded_status {
                     Some(HostKeyStatus::Verified) => {
                         logs.push(format!(
-                            "[{}] 🛡️ Empreinte de clé d'hôte SSH validée avec succès via ~/.ssh/known_hosts.",
+                            "[{}] [{target_label}] 🛡️ Empreinte de clé d'hôte validée via ~/.ssh/known_hosts.",
                             now()
                         ));
                     }
                     Some(HostKeyStatus::PendingEnrollment(_)) => {
                         logs.push(format!(
-                            "[{}] 🔑 Empreinte de clé d'hôte approuvée par l'utilisateur (sera enregistrée sur disque après authentification).",
+                            "[{}] [{target_label}] 🔑 Empreinte approuvée par l'utilisateur (sera enregistrée sur disque après authentification).",
                             now()
                         ));
                     }
                     Some(HostKeyStatus::PendingReplacement { .. }) => {
                         logs.push(format!(
-                            "[{}] 🔄 Remplacement de l'empreinte approuvé par l'utilisateur (sera appliqué après authentification).",
+                            "[{}] [{target_label}] 🔄 Remplacement de l'empreinte approuvé par l'utilisateur.",
                             now()
                         ));
                     }
                     Some(HostKeyStatus::AcceptedOnce) => {
                         logs.push(format!(
-                            "[{}] ⚠️ Clé d'hôte SSH approuvée pour cette session uniquement (non enregistrée sur le disque).",
+                            "[{}] [{target_label}] ⚠️ Clé d'hôte approuvée pour cette session uniquement.",
                             now()
                         ));
                     }
                     Some(HostKeyStatus::Learned) => {
                         logs.push(format!(
-                            "[{}] 🔑 Nouvel hôte SSH approuvé : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                            "[{}] [{target_label}] 🔑 Nouvel hôte approuvé : clé enregistrée dans ~/.ssh/known_hosts.",
                             now()
                         ));
                     }
                     Some(HostKeyStatus::CheckFailed(reason)) => {
                         logs.push(format!(
-                            "[{}] ⚠️ Avertissement known_hosts : {reason}",
+                            "[{}] [{target_label}] ⚠️ Avertissement known_hosts : {reason}",
                             now()
                         ));
                     }
@@ -582,86 +616,91 @@ impl SftpProvider {
             Ok(Err(e)) => {
                 let recorded_status = key_status.lock().await.clone();
                 if let Some(HostKeyStatus::Rejected(ref reason)) = recorded_status {
-                    logs.push(format!("[{}] ❌ Connexion annulée : {reason}", now()));
-                    return Err((AppError::Ssh(format!("Connexion annulée : {reason}")), logs));
+                    logs.push(format!(
+                        "[{}] [{target_label}] ❌ Connexion annulée : {reason}",
+                        now()
+                    ));
+                    return Err((
+                        AppError::Ssh(format!("Connexion annulée : {reason}")),
+                        logs.clone(),
+                    ));
                 }
 
                 if let Some(HostKeyStatus::Changed { line }) = recorded_status {
-                    let target_spec = if config.port == 22 {
-                        config.host.clone()
+                    let target_spec = if port == 22 {
+                        host.to_string()
                     } else {
-                        format!("[{}]:{}", config.host, config.port)
+                        format!("[{host}]:{port}")
                     };
                     let err_msg = format!(
-                        "ALERTE DE SÉCURITÉ MITM : La clé d'hôte SSH pour {} a CHANGÉ (ligne {} dans ~/.ssh/known_hosts) ! Connexion bloquée.",
-                        addr, line
+                        "ALERTE DE SÉCURITÉ MITM : La clé d'hôte SSH pour {target_label} ({addr}) a CHANGÉ (ligne {line} dans ~/.ssh/known_hosts) ! Connexion bloquée."
                     );
-                    logs.push(format!("[{}] 🚨 {}", now(), err_msg));
+                    logs.push(format!("[{}] [{target_label}] 🚨 {err_msg}", now()));
                     logs.push(format!(
-                        "[{}] ⚠️ Quelqu'un pourrait tenter d'intercepter votre connexion (Man-in-the-Middle) ou la machine distante a été réinstallée.",
+                        "[{}] [{target_label}] ℹ️ Si le serveur a été réinstallé, supprimez l'ancienne clé avec : ssh-keygen -R {target_spec}",
                         now()
                     ));
-                    logs.push(format!(
-                        "[{}] ℹ️ Si le serveur a légitimement été réinstallé, supprimez l'ancienne clé avec la commande : ssh-keygen -R {target_spec}",
-                        now()
-                    ));
-                    return Err((AppError::Ssh(err_msg), logs));
+                    return Err((AppError::Ssh(err_msg), logs.clone()));
                 }
 
                 if let Some(HostKeyStatus::CheckFailed(reason)) = recorded_status {
-                    let err_msg = format!("Échec de vérification de la clé d'hôte SSH : {reason}");
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                    return Err((AppError::Ssh(err_msg), logs));
+                    let err_msg = format!(
+                        "Échec de vérification de la clé d'hôte SSH ({target_label}) : {reason}"
+                    );
+                    logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                    return Err((AppError::Ssh(err_msg), logs.clone()));
                 }
 
-                let err_msg = format!("Échec de connexion réseau vers {addr}: {e}");
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                logs.push(format!(
-                    "[{}] ℹ️ Conseil: Vérifiez l'adresse IP, le port {} et assurez-vous que le serveur SSH est en écoute.",
-                    now(),
-                    config.port
-                ));
-                return Err((AppError::Ssh(err_msg), logs));
+                let err_msg = format!("Échec de connexion SSH vers {target_label} ({addr}): {e}");
+                logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                return Err((AppError::Ssh(err_msg), logs.clone()));
             }
             Err(_) => {
                 let err_msg = format!(
-                    "Délai d'attente dépassé (timeout 15s) lors de la négociation SSH avec {addr}"
+                    "Délai d'attente dépassé (timeout 15s) lors de la négociation SSH avec {target_label} ({addr})"
                 );
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                logs.push(format!(
-                    "[{}] ℹ️ Conseil: Le serveur a accepté la connexion TCP mais n'a pas répondu à l'initialisation du protocole SSH.",
-                    now()
-                ));
-                return Err((AppError::Ssh(err_msg), logs));
+                logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                return Err((AppError::Ssh(err_msg), logs.clone()));
             }
         };
 
+        Ok((handle, key_status))
+    }
+
+    async fn authenticate_session(
+        handle: &mut Handle<SshHandler>,
+        username: &str,
+        key_path: Option<&str>,
+        passphrase: Option<&str>,
+        password: Option<&str>,
+        target_label: &str,
+        logs: &mut Vec<String>,
+    ) -> Result<(), (AppError, Vec<String>)> {
+        let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
         logs.push(format!(
-            "[{}] 2/4 Négociation KEX et algorithmes SSH validés.",
+            "[{}] [{target_label}] Début de l'authentification pour l'utilisateur '{username}'...",
             now()
         ));
-        logs.push(format!("[{}] 3/4 Début de l'authentification...", now()));
 
-        // Authentication: Password or SSH Key
-        if let Some(key_path) = config.key_path {
-            let expanded_path = if key_path.starts_with('~') {
+        if let Some(kp) = key_path.filter(|p| !p.trim().is_empty()) {
+            let expanded_path = if kp.starts_with('~') {
                 if let Some(home) = dirs::home_dir() {
-                    home.join(key_path.trim_start_matches("~/"))
+                    home.join(kp.trim_start_matches("~/"))
                 } else {
-                    PathBuf::from(&key_path)
+                    PathBuf::from(kp)
                 }
             } else {
-                PathBuf::from(&key_path)
+                PathBuf::from(kp)
             };
 
             logs.push(format!(
-                "[{}] Méthode : Clé privée SSH ({})",
+                "[{}] [{target_label}] Méthode : Clé privée SSH ({})",
                 now(),
                 expanded_path.display()
             ));
 
             let p_clone = expanded_path.clone();
-            let pass_clone = config.passphrase.clone();
+            let pass_clone = passphrase.map(String::from);
             let secret_key_res = tokio::task::spawn_blocking(move || {
                 load_secret_key(&p_clone, pass_clone.as_deref())
             })
@@ -676,7 +715,7 @@ impl SftpProvider {
             let secret_key = match secret_key_res {
                 Ok(k) => {
                     logs.push(format!(
-                        "[{}] Clé privée chargée et déchiffrée avec succès (type: {:?}).",
+                        "[{}] [{target_label}] Clé privée chargée et déchiffrée avec succès (type: {:?}).",
                         now(),
                         k.algorithm()
                     ));
@@ -687,20 +726,18 @@ impl SftpProvider {
                         "Impossible de charger la clé {}: {e}",
                         expanded_path.display()
                     );
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
+                    logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                     logs.push(format!(
-                        "[{}] ℹ️ Conseil: Vérifiez le chemin ou saisissez la passphrase si la clé est chiffrée.",
+                        "[{}] [{target_label}] ℹ️ Conseil: Vérifiez le chemin ou saisissez la passphrase si la clé est chiffrée.",
                         now()
                     ));
-                    return Err((AppError::Auth(err_msg), logs));
+                    return Err((AppError::Auth(err_msg), logs.clone()));
                 }
             };
 
             let key_arc = Arc::new(secret_key);
             let mut authenticated = false;
 
-            // Modern OpenSSH servers (Oracle Linux, Ubuntu 22+, Debian 12+, RHEL 9) reject legacy ssh-rsa (SHA-1).
-            // They require rsa-sha2-512 or rsa-sha2-256. For ed25519/ecdsa, hash_alg is ignored.
             let hash_candidates: Vec<(Option<russh::keys::HashAlg>, &str)> =
                 if key_arc.algorithm().is_rsa() {
                     vec![
@@ -714,79 +751,70 @@ impl SftpProvider {
 
             for (hash_alg, alg_name) in hash_candidates {
                 logs.push(format!(
-                    "[{}] Négociation de signature avec l'algorithme : {}...",
-                    now(),
-                    alg_name
+                    "[{}] [{target_label}] Négociation de signature avec l'algorithme : {alg_name}...",
+                    now()
                 ));
                 let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
 
-                match handle
-                    .authenticate_publickey(&config.username, key_with_alg)
-                    .await
-                {
+                match handle.authenticate_publickey(username, key_with_alg).await {
                     Ok(res) if res.success() => {
                         logs.push(format!(
-                            "[{}] Authentification par clé SSH acceptée ({}) !",
-                            now(),
-                            alg_name
+                            "[{}] [{target_label}] Authentification par clé SSH acceptée ({alg_name}) !",
+                            now()
                         ));
                         authenticated = true;
                         break;
                     }
                     Ok(_) => {
                         logs.push(format!(
-                            "[{}] Algorithme {} refusé par le serveur, essai du suivant...",
-                            now(),
-                            alg_name
+                            "[{}] [{target_label}] Algorithme {alg_name} refusé par le serveur, essai du suivant...",
+                            now()
                         ));
                     }
                     Err(e) => {
                         logs.push(format!(
-                            "[{}] Erreur technique avec algorithme {}: {}",
-                            now(),
-                            alg_name,
-                            e
+                            "[{}] [{target_label}] Erreur technique avec algorithme {alg_name}: {e}",
+                            now()
                         ));
                     }
                 }
             }
 
             if !authenticated {
-                let err_msg = "Le serveur SSH a rejeté la clé publique pour tous les algorithmes (SSH_MSG_USERAUTH_FAILURE)".to_string();
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                logs.push(format!(
-                    "[{}] ℹ️ Conseil: Vérifiez que votre clé publique (.pub) est ajoutée dans ~/.ssh/authorized_keys sur le serveur pour l'utilisateur '{}'.",
-                    now(),
-                    config.username
-                ));
-                return Err((AppError::Auth(err_msg), logs));
+                let err_msg = format!(
+                    "Le serveur SSH ({target_label}) a rejeté la clé publique pour tous les algorithmes (SSH_MSG_USERAUTH_FAILURE)"
+                );
+                logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                return Err((AppError::Auth(err_msg), logs.clone()));
             }
-        } else if let Some(password) = config.password {
-            logs.push(format!("[{}] Méthode : Mot de passe", now()));
-            match handle
-                .authenticate_password(&config.username, password)
-                .await
-            {
+        } else if let Some(pwd) = password.filter(|p| !p.is_empty()) {
+            logs.push(format!(
+                "[{}] [{target_label}] Méthode : Mot de passe",
+                now()
+            ));
+            match handle.authenticate_password(username, pwd).await {
                 Ok(res) if res.success() => {
                     logs.push(format!(
-                        "[{}] Authentification par mot de passe acceptée !",
+                        "[{}] [{target_label}] Authentification par mot de passe acceptée !",
                         now()
                     ));
                 }
                 Ok(_) => {
-                    let err_msg = "Nom d'utilisateur ou mot de passe incorrect".to_string();
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                    return Err((AppError::Auth(err_msg), logs));
+                    let err_msg =
+                        format!("Nom d'utilisateur ou mot de passe incorrect sur {target_label}");
+                    logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                    return Err((AppError::Auth(err_msg), logs.clone()));
                 }
                 Err(e) => {
-                    let err_msg = format!("Erreur lors de l'authentification: {e}");
-                    logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                    return Err((AppError::Auth(err_msg), logs));
+                    let err_msg =
+                        format!("Erreur lors de l'authentification sur {target_label}: {e}");
+                    logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                    return Err((AppError::Auth(err_msg), logs.clone()));
                 }
             }
         } else {
             logs.push(format!(
-                "[{}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...",
+                "[{}] [{target_label}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...",
                 now()
             ));
             let mut authenticated = false;
@@ -798,9 +826,13 @@ impl SftpProvider {
                         .await
                         .unwrap_or(false);
                     if exists {
-                        logs.push(format!("[{}] Tentative avec {}", now(), key_p.display()));
+                        logs.push(format!(
+                            "[{}] [{target_label}] Tentative avec {}",
+                            now(),
+                            key_p.display()
+                        ));
                         let p = key_p.clone();
-                        let pass = config.passphrase.clone();
+                        let pass = passphrase.map(String::from);
                         let loaded = tokio::task::spawn_blocking(move || {
                             load_secret_key(&p, pass.as_deref())
                         })
@@ -824,13 +856,12 @@ impl SftpProvider {
                             for hash_alg in hash_candidates {
                                 let key_with_alg =
                                     PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
-                                if let Ok(res) = handle
-                                    .authenticate_publickey(&config.username, key_with_alg)
-                                    .await
+                                if let Ok(res) =
+                                    handle.authenticate_publickey(username, key_with_alg).await
                                 {
                                     if res.success() {
                                         logs.push(format!(
-                                            "[{}] Authentification réussie avec {}",
+                                            "[{}] [{target_label}] Authentification réussie avec {}",
                                             now(),
                                             key_p.display()
                                         ));
@@ -848,14 +879,351 @@ impl SftpProvider {
             }
 
             if !authenticated {
-                let err_msg = "Aucun mot de passe ni clé SSH valide fournie".to_string();
-                logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                return Err((AppError::Auth(err_msg), logs));
+                let err_msg =
+                    format!("Aucun mot de passe ni clé SSH valide fournie pour {target_label}");
+                logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                return Err((AppError::Auth(err_msg), logs.clone()));
             }
         }
 
+        Ok(())
+    }
+
+    async fn persist_host_key(
+        key_status: Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        host: &str,
+        port: u16,
+        target_label: &str,
+        logs: &mut Vec<String>,
+    ) -> Result<(), (AppError, Vec<String>)> {
+        let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
+        let recorded_status = key_status.lock().await.clone();
+        match recorded_status {
+            Some(HostKeyStatus::PendingEnrollment(ref pubkey)) => {
+                let host_s = host.to_string();
+                let pubkey_clone = pubkey.clone();
+                let _lock = KNOWN_HOSTS_LOCK.lock().await;
+                let learn_res = tokio::task::spawn_blocking(move || {
+                    russh::keys::known_hosts::learn_known_hosts(&host_s, port, &pubkey_clone)
+                })
+                .await;
+
+                match learn_res {
+                    Ok(Ok(())) => {
+                        let mut status = key_status.lock().await;
+                        *status = Some(HostKeyStatus::Learned);
+                        logs.push(format!(
+                            "[{}] [{target_label}] 🔑 Nouvel hôte approuvé : clé publique enregistrée dans ~/.ssh/known_hosts.",
+                            now()
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        let err_msg = format!(
+                            "Échec d'enregistrement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}"
+                        );
+                        logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                        return Err((AppError::Io(err_msg), logs.clone()));
+                    }
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Erreur système lors de l'enregistrement de la clé ({target_label}) : {e}"
+                        );
+                        logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                        return Err((AppError::Io(err_msg), logs.clone()));
+                    }
+                }
+            }
+            Some(HostKeyStatus::PendingReplacement { ref pubkey, line }) => {
+                let host_s = host.to_string();
+                let pubkey_clone = pubkey.clone();
+                let _lock = KNOWN_HOSTS_LOCK.lock().await;
+                let replace_res = tokio::task::spawn_blocking(move || {
+                    replace_known_hosts_entry_atomic(&host_s, port, &pubkey_clone, Some(line))
+                })
+                .await;
+
+                match replace_res {
+                    Ok(Ok(())) => {
+                        let mut status = key_status.lock().await;
+                        *status = Some(HostKeyStatus::Learned);
+                        logs.push(format!(
+                            "[{}] [{target_label}] 🔄 Clé d'hôte SSH remplacée atomiquement dans ~/.ssh/known_hosts.",
+                            now()
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        let err_msg = format!(
+                            "Échec du remplacement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}"
+                        );
+                        logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                        return Err((AppError::Io(err_msg), logs.clone()));
+                    }
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Erreur système lors du remplacement de la clé ({target_label}) : {e}"
+                        );
+                        logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                        return Err((AppError::Io(err_msg), logs.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub async fn connect_with_logs_and_prompt(
+        config: SftpConnectConfig,
+        prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
+    ) -> Result<(Self, Vec<String>), (AppError, Vec<String>)> {
+        let mut logs = Vec::new();
+        let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
+
         logs.push(format!(
-            "[{}] 4/4 Ouverture du canal SSH et du sous-système SFTP...",
+            "[{}] Démarrage de la séquence de connexion SFTP...",
+            now()
+        ));
+        logs.push(format!(
+            "[{}] Cible finale : {}:{}",
+            now(),
+            config.host,
+            config.port
+        ));
+        logs.push(format!(
+            "[{}] Utilisateur SSH : '{}'",
+            now(),
+            config.username
+        ));
+
+        let ssh_config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            nodelay: true,
+            ..Default::default()
+        });
+
+        let proxy_opt = config.proxy.clone().filter(|p| p.enabled);
+        let bastion_opt = config.bastion.clone().filter(|b| b.enabled);
+
+        // Premier point d'atterrissage réseau (Bastion si activé, sinon Cible finale)
+        let (initial_host, initial_port, initial_label) = if let Some(ref bastion) = bastion_opt {
+            let b_host = bastion
+                .host
+                .as_deref()
+                .filter(|h| !h.trim().is_empty())
+                .ok_or_else(|| {
+                    let err = AppError::Config("L'adresse de l'hôte bastion est requise.".into());
+                    logs.push(format!("[{}] ❌ {err}", now()));
+                    (err, logs.clone())
+                })?;
+            let b_port = bastion.port.unwrap_or(22);
+            (b_host.to_string(), b_port, "Bastion SSH")
+        } else {
+            (config.host.clone(), config.port, "Serveur Cible")
+        };
+
+        // 1. Établissement du flux TCP initial (direct ou via Proxy)
+        let tcp_stream = if let Some(ref proxy) = proxy_opt {
+            let p_type = proxy.proxy_type.as_deref().unwrap_or("socks5");
+            let p_host = proxy.host.as_deref().unwrap_or("");
+            let p_port = proxy
+                .port
+                .unwrap_or(if p_type == "http" { 8080 } else { 1080 });
+            let p_display_addr = crate::sftp::proxy::format_host_port(p_host, p_port);
+            let target_display_addr =
+                crate::sftp::proxy::format_host_port(&initial_host, initial_port);
+            logs.push(format!(
+                "[{}] 🌐 Connexion au proxy {p_type} ({p_display_addr}) pour joindre {initial_label} ({target_display_addr})...",
+                now()
+            ));
+
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                crate::sftp::proxy::connect_via_proxy(proxy, &initial_host, initial_port),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
+                    logs.push(format!(
+                        "[{}] ✅ Tunnel proxy {p_type} établi avec succès vers {initial_label} ({target_display_addr}).",
+                        now()
+                    ));
+                    s
+                }
+                Ok(Err(e)) => {
+                    logs.push(format!(
+                        "[{}] ❌ Échec de négociation avec le proxy : {e}",
+                        now()
+                    ));
+                    return Err((e, logs));
+                }
+                Err(_) => {
+                    let err = AppError::Io(format!(
+                        "Délai d'attente dépassé (15s) lors de la connexion au proxy {p_display_addr}"
+                    ));
+                    logs.push(format!("[{}] ❌ {err}", now()));
+                    return Err((err, logs));
+                }
+            }
+        } else {
+            let addr = crate::sftp::proxy::format_host_port(&initial_host, initial_port);
+            logs.push(format!(
+                "[{}] 🔌 Connexion socket TCP directe vers {initial_label} ({addr})...",
+                now()
+            ));
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
+                    logs.push(format!(
+                        "[{}] Connexion socket TCP établie avec succès vers {addr}.",
+                        now()
+                    ));
+                    s
+                }
+                Ok(Err(e)) => {
+                    let err_msg = format!("Échec de connexion réseau vers {addr}: {e}");
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Io(err_msg), logs));
+                }
+                Err(_) => {
+                    let err_msg = format!(
+                        "Délai d'attente dépassé (15s) lors de la connexion réseau vers {addr}"
+                    );
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Io(err_msg), logs));
+                }
+            }
+        };
+
+        // 2. Saut Bastion SSH (si activé)
+        let (target_stream, bastion_handle_opt) = if let Some(ref bastion) = bastion_opt {
+            logs.push(format!(
+                "[{}] 🏰 Négociation SSH avec le Bastion ({initial_host}:{initial_port})...",
+                now()
+            ));
+
+            let (mut b_handle, b_key_status) = Self::connect_ssh_over_stream(
+                SshStream::Tcp(tcp_stream),
+                &initial_host,
+                initial_port,
+                Arc::clone(&ssh_config),
+                prompt_handler.clone(),
+                "Bastion",
+                &mut logs,
+            )
+            .await?;
+
+            let b_username = bastion
+                .username
+                .as_deref()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or(&config.username);
+
+            Self::authenticate_session(
+                &mut b_handle,
+                b_username,
+                bastion.key_path.as_deref(),
+                bastion.passphrase.as_deref(),
+                bastion.password.as_deref(),
+                "Bastion",
+                &mut logs,
+            )
+            .await?;
+
+            Self::persist_host_key(
+                b_key_status,
+                &initial_host,
+                initial_port,
+                "Bastion",
+                &mut logs,
+            )
+            .await?;
+
+            logs.push(format!(
+                "[{}] 🌉 Ouverture du tunnel direct-tcpip à travers le Bastion vers {}:{}...",
+                now(),
+                config.host,
+                config.port
+            ));
+
+            let channel_fut = b_handle.channel_open_direct_tcpip(
+                &config.host,
+                config.port as u32,
+                "127.0.0.1",
+                0,
+            );
+            let direct_channel = match tokio::time::timeout(Duration::from_secs(15), channel_fut)
+                .await
+            {
+                Ok(Ok(c)) => {
+                    logs.push(format!(
+                        "[{}] ✅ Tunnel direct-tcpip Bastion ➔ Cible ouvert avec succès.",
+                        now()
+                    ));
+                    c
+                }
+                Ok(Err(e)) => {
+                    let err_msg = format!(
+                        "Le Bastion a refusé l'ouverture du tunnel direct-tcpip vers {}:{}: {e}",
+                        config.host, config.port
+                    );
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Ssh(err_msg), logs));
+                }
+                Err(_) => {
+                    let err_msg = format!(
+                        "Délai d'attente dépassé (15s) lors de l'ouverture du tunnel direct-tcpip Bastion vers {}:{}",
+                        config.host, config.port
+                    );
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Io(err_msg), logs));
+                }
+            };
+
+            let stream = SshStream::Channel(direct_channel.into_stream());
+            (stream, Some(b_handle))
+        } else {
+            (SshStream::Tcp(tcp_stream), None)
+        };
+
+        // 3. Négociation SSH avec le Serveur Cible
+        logs.push(format!(
+            "[{}] 🎯 Négociation SSH avec le serveur cible ({}:{})...",
+            now(),
+            config.host,
+            config.port
+        ));
+
+        let (mut handle, key_status) = Self::connect_ssh_over_stream(
+            target_stream,
+            &config.host,
+            config.port,
+            Arc::clone(&ssh_config),
+            prompt_handler,
+            "Serveur Cible",
+            &mut logs,
+        )
+        .await?;
+
+        Self::authenticate_session(
+            &mut handle,
+            &config.username,
+            config.key_path.as_deref(),
+            config.passphrase.as_deref(),
+            config.password.as_deref(),
+            "Serveur Cible",
+            &mut logs,
+        )
+        .await?;
+
+        // 4. Ouverture du canal SFTP
+        logs.push(format!(
+            "[{}] Ouverture du canal SSH et du sous-système SFTP...",
             now()
         ));
         let channel = match handle.channel_open_session().await {
@@ -936,79 +1304,15 @@ impl SftpProvider {
             }
         };
 
-        // Persister la clé d'hôte approuvée uniquement après validation complète de l'authentification et de la session SFTP
-        let recorded_status = key_status.lock().await.clone();
-        match recorded_status {
-            Some(HostKeyStatus::PendingEnrollment(ref pubkey)) => {
-                let host = config.host.clone();
-                let port = config.port;
-                let pubkey_clone = pubkey.clone();
-                let _lock = KNOWN_HOSTS_LOCK.lock().await;
-                let learn_res = tokio::task::spawn_blocking(move || {
-                    russh::keys::known_hosts::learn_known_hosts(&host, port, &pubkey_clone)
-                })
-                .await;
-
-                match learn_res {
-                    Ok(Ok(())) => {
-                        let mut status = key_status.lock().await;
-                        *status = Some(HostKeyStatus::Learned);
-                        logs.push(format!(
-                            "[{}] 🔑 Nouvel hôte SSH approuvé : clé publique enregistrée dans ~/.ssh/known_hosts.",
-                            now()
-                        ));
-                    }
-                    Ok(Err(e)) => {
-                        let err_msg = format!(
-                            "Échec d'enregistrement de la clé dans ~/.ssh/known_hosts : {e}"
-                        );
-                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                        return Err((AppError::Io(err_msg), logs));
-                    }
-                    Err(e) => {
-                        let err_msg =
-                            format!("Erreur système lors de l'enregistrement de la clé : {e}");
-                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                        return Err((AppError::Io(err_msg), logs));
-                    }
-                }
-            }
-            Some(HostKeyStatus::PendingReplacement { ref pubkey, line }) => {
-                let host = config.host.clone();
-                let port = config.port;
-                let pubkey_clone = pubkey.clone();
-                let _lock = KNOWN_HOSTS_LOCK.lock().await;
-                let replace_res = tokio::task::spawn_blocking(move || {
-                    replace_known_hosts_entry_atomic(&host, port, &pubkey_clone, Some(line))
-                })
-                .await;
-
-                match replace_res {
-                    Ok(Ok(())) => {
-                        let mut status = key_status.lock().await;
-                        *status = Some(HostKeyStatus::Learned);
-                        logs.push(format!(
-                            "[{}] 🔄 Clé d'hôte SSH remplacée atomiquement : nouvelle empreinte enregistrée dans ~/.ssh/known_hosts.",
-                            now()
-                        ));
-                    }
-                    Ok(Err(e)) => {
-                        let err_msg = format!(
-                            "Échec du remplacement de la clé dans ~/.ssh/known_hosts : {e}"
-                        );
-                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                        return Err((AppError::Io(err_msg), logs));
-                    }
-                    Err(e) => {
-                        let err_msg =
-                            format!("Erreur système lors du remplacement de la clé : {e}");
-                        logs.push(format!("[{}] ❌ {}", now(), err_msg));
-                        return Err((AppError::Io(err_msg), logs));
-                    }
-                }
-            }
-            _ => {}
-        }
+        // Persister la clé d'hôte cible approuvée après initialisation réussie
+        Self::persist_host_key(
+            key_status.clone(),
+            &config.host,
+            config.port,
+            "Serveur Cible",
+            &mut logs,
+        )
+        .await?;
 
         let sudo_capability = if config.use_sudo {
             SudoCapability::Passwordless
@@ -1021,6 +1325,7 @@ impl SftpProvider {
             Self {
                 session: sftp_session,
                 _handle: handle,
+                _bastion_handle: bastion_handle_opt,
                 username: config.username,
                 identities: tokio::sync::RwLock::new(None),
                 host_key_status: final_status,
@@ -1030,7 +1335,6 @@ impl SftpProvider {
             logs,
         ))
     }
-
     pub async fn get_or_load_identities(&self) -> UserGroupMaps {
         // Fast path: if already cached and complete, return immediately
         {
@@ -1116,6 +1420,79 @@ impl SftpProvider {
             current_gid,
             is_complete,
         }
+    }
+
+    pub(crate) fn tmp_upload_path(remote_path: &str, transfer_id: &str) -> String {
+        Self::tmp_upload_path_with_nonce(remote_path, transfer_id, fastrand::u64(..))
+    }
+
+    pub(crate) fn tmp_upload_path_with_nonce(
+        remote_path: &str,
+        transfer_id: &str,
+        nonce: u64,
+    ) -> String {
+        let safe_id: String = transfer_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(24)
+            .collect();
+        let id = if safe_id.is_empty() {
+            "tmp".to_string()
+        } else {
+            safe_id
+        };
+        let tmp_name = format!(".orbit-tmp-{id}-{nonce:016x}");
+        match remote_path.rfind('/') {
+            Some(idx) => {
+                let parent = &remote_path[..idx];
+                if parent.is_empty() {
+                    format!("/{tmp_name}")
+                } else {
+                    format!("{parent}/{tmp_name}")
+                }
+            }
+            None => tmp_name,
+        }
+    }
+
+    async fn stream_upload(
+        &self,
+        local_file: &mut tokio::fs::File,
+        mut remote_file: russh_sftp::client::fs::File,
+        transfer: &mut TransferHandle,
+    ) -> Result<(), AppError> {
+        let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
+        loop {
+            transfer.checkpoint().await?;
+
+            let n = local_file
+                .read(&mut buffer)
+                .await
+                .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
+            if n == 0 {
+                break;
+            }
+
+            transfer
+                .guard(async {
+                    remote_file
+                        .write_all(&buffer[..n])
+                        .await
+                        .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))
+                })
+                .await?;
+
+            transfer.advance(n as u64);
+        }
+
+        transfer
+            .guard(async {
+                remote_file
+                    .close()
+                    .await
+                    .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))
+            })
+            .await
     }
 }
 
@@ -1487,56 +1864,110 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
-        // No `guard` here: aborting `create` after the server has received the OPEN would
-        // leave an empty/truncated remote file with no cleanup. Let the open complete; a
-        // cancellation is then picked up by the first `checkpoint` in the copy loop, which
-        // goes through the cleanup below.
-        let mut remote_file =
+        transfer.start(total_bytes);
+
+        // Check pre-existing destination metadata to preserve permissions upon atomic replace
+        let existing_dest_meta = self.session.metadata(&remote_path).await.ok();
+
+        let tmp_path = Self::tmp_upload_path(&remote_path, transfer.id());
+
+        // Attempt atomic upload via an unpredictable temporary file with exclusive open (CREATE | EXCLUDE)
+        // to prevent symlink and pre-creation attacks.
+        let open_res = self
+            .session
+            .open_with_flags(
+                &tmp_path,
+                russh_sftp::protocol::OpenFlags::CREATE
+                    | russh_sftp::protocol::OpenFlags::EXCLUDE
+                    | russh_sftp::protocol::OpenFlags::WRITE,
+            )
+            .await;
+
+        match open_res {
+            Ok(remote_file) => {
+                let copy_result = self
+                    .stream_upload(&mut local_file, remote_file, transfer)
+                    .await;
+
+                if let Err(err) = copy_result {
+                    // Transfer interrupted or failed: delete temporary file.
+                    // The original target file is completely untouched and intact.
+                    let _ = self.session.remove_file(&tmp_path).await;
+                    return Err(err);
+                }
+
+                // Verify cancellation signal before promoting the temporary file
+                if let Err(cancel_err) = transfer.checkpoint().await {
+                    let _ = self.session.remove_file(&tmp_path).await;
+                    return Err(cancel_err);
+                }
+
+                // Preserve existing destination permissions if destination is being overwritten
+                if let Some(ref dest_meta) = existing_dest_meta {
+                    let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+                    attrs.permissions = dest_meta.permissions;
+                    let _ = self.session.set_metadata(&tmp_path, attrs).await;
+                }
+
+                // Atomically rename temporary file to target path
+                let mut rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                if rename_result.is_err() && existing_dest_meta.is_some() {
+                    // Some SFTP servers (draft-02 strict) reject rename if target exists.
+                    // Safely move target to a backup path before renaming, restoring it if rename fails.
+                    let backup_path = Self::tmp_upload_path(&remote_path, "bak");
+                    if self
+                        .session
+                        .rename(&remote_path, &backup_path)
+                        .await
+                        .is_ok()
+                    {
+                        rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                        if rename_result.is_ok() {
+                            let _ = self.session.remove_file(&backup_path).await;
+                        } else {
+                            // Restore original destination on failure
+                            let _ = self.session.rename(&backup_path, &remote_path).await;
+                        }
+                    }
+                }
+
+                match rename_result {
+                    Ok(_) => {
+                        transfer.complete();
+                        return Ok(());
+                    }
+                    Err(rename_err) => {
+                        eprintln!(
+                            "[Orbit SFTP] ⚠️ Server refused rename ({rename_err}). Falling back to direct upload."
+                        );
+                        let _ = self.session.remove_file(&tmp_path).await;
+                        if let Err(seek_err) = local_file.rewind().await {
+                            return Err(AppError::Io(format!(
+                                "Cannot rewind local file: {seek_err}"
+                            )));
+                        }
+                        transfer.start(total_bytes);
+                    }
+                }
+            }
+            Err(create_err) => {
+                eprintln!(
+                    "[Orbit SFTP] ⚠️ Could not create temp file {tmp_path} ({create_err}). Falling back to direct upload."
+                );
+            }
+        }
+
+        // Direct upload fallback (if temp file or rename is forbidden by server)
+        let remote_file =
             self.session.create(&remote_path).await.map_err(|e| {
                 AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
             })?;
 
-        transfer.start(total_bytes);
-
-        let copy_result: Result<(), AppError> = async {
-            let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
-            loop {
-                transfer.checkpoint().await?;
-
-                let n = local_file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
-                if n == 0 {
-                    break;
-                }
-
-                transfer
-                    .guard(async {
-                        remote_file
-                            .write_all(&buffer[..n])
-                            .await
-                            .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))
-                    })
-                    .await?;
-
-                transfer.advance(n as u64);
-            }
-
-            transfer
-                .guard(async {
-                    remote_file
-                        .close()
-                        .await
-                        .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))
-                })
-                .await
-        }
-        .await;
+        let copy_result = self
+            .stream_upload(&mut local_file, remote_file, transfer)
+            .await;
 
         if let Err(err) = copy_result {
-            // Don't leave a truncated remote file behind an interrupted transfer
-            // (the remote handle was already released when the copy block exited).
             if let Err(rm_err) = self.session.remove_file(&remote_path).await {
                 eprintln!(
                     "[Orbit SFTP] ⚠️ Could not remove partial remote file {remote_path}: {rm_err}"
@@ -1577,12 +2008,7 @@ impl StorageProvider for SftpProvider {
         let total_bytes = meta.size.unwrap_or(0);
 
         let partial_path = partial_download_path(&local_path, transfer.id());
-        let mut local_file = tokio::fs::File::create(&partial_path).await.map_err(|e| {
-            AppError::Io(format!(
-                "Cannot create local file {}: {e}",
-                partial_path.display()
-            ))
-        })?;
+        let mut local_file = create_partial_download_file(&partial_path).await?;
 
         transfer.start(total_bytes);
 
@@ -1978,5 +2404,64 @@ docker:x:999:ubuntu,mathieu
             assert!(flag.load(Ordering::SeqCst));
         }
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_tmp_upload_path() {
+        assert_eq!(
+            SftpProvider::tmp_upload_path_with_nonce("/var/log/app.log", "tx-1234", 0x42),
+            "/var/log/.orbit-tmp-tx-1234-0000000000000042"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path_with_nonce("/file.txt", "tx-99", 0x99),
+            "/.orbit-tmp-tx-99-0000000000000099"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path_with_nonce("relative_file.txt", "abc", 1),
+            ".orbit-tmp-abc-0000000000000001"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path_with_nonce(
+                "/deep/nested/path/to/target.bin",
+                "tx!@#special-42",
+                0xabc
+            ),
+            "/deep/nested/path/to/.orbit-tmp-txspecial-42-0000000000000abc"
+        );
+    }
+
+    #[test]
+    fn test_tmp_upload_path_security_sanitization() {
+        // Path traversal payload in transfer_id must be stripped
+        let path1 = SftpProvider::tmp_upload_path_with_nonce(
+            "/var/data/file.txt",
+            "../../../../etc/shadow",
+            0,
+        );
+        assert_eq!(path1, "/var/data/.orbit-tmp-etcshadow-0000000000000000");
+        assert!(!path1.contains(".."));
+
+        // Backslash traversal attempt
+        let path2 =
+            SftpProvider::tmp_upload_path_with_nonce("/srv/data.bin", "..\\..\\sensitive", 0);
+        assert_eq!(path2, "/srv/.orbit-tmp-sensitive-0000000000000000");
+        assert!(!path2.contains('\\'));
+
+        // Null byte injection attempt
+        let path3 = SftpProvider::tmp_upload_path_with_nonce("/srv/data.bin", "tx\0injected", 0);
+        assert_eq!(path3, "/srv/.orbit-tmp-txinjected-0000000000000000");
+        assert!(!path3.contains('\0'));
+
+        // All-special-characters payload falls back safely without escaping parent
+        let path4 = SftpProvider::tmp_upload_path_with_nonce("/dir/test.txt", "!@#$%^&*()/?<>", 0);
+        assert_eq!(path4, "/dir/.orbit-tmp-tmp-0000000000000000");
+
+        // Length bounding to 24 safe characters
+        let long_id = "a".repeat(100);
+        let path5 = SftpProvider::tmp_upload_path_with_nonce("/file.txt", &long_id, 0);
+        assert_eq!(
+            path5,
+            format!("/.orbit-tmp-{}-0000000000000000", "a".repeat(24))
+        );
     }
 }

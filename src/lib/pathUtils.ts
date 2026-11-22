@@ -35,3 +35,11 @@ export function buildRenamePath(oldPath: string, newName: string): string | null
     : `${parentDir}${separator}${cleanName}`;
   return newPath === oldPath ? null : newPath;
 }
+
+export function canOpenTerminal(profile?: { type?: string } | null): boolean {
+  return Boolean(profile && profile.type === 'sftp');
+}
+
+export function resolveTerminalTargetPath(remotePath?: string, currentPath = '/'): string {
+  return remotePath ?? currentPath;
+}

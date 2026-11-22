@@ -10,6 +10,7 @@ pub mod provider;
 pub mod s3;
 pub mod session;
 pub mod sftp;
+pub mod terminal;
 pub mod transfer;
 pub mod updater;
 pub mod walk;
@@ -85,6 +86,7 @@ pub fn run() {
             commands::local_delete,
             commands::local_rename,
             commands::check_app_update,
+            commands::open_in_external_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

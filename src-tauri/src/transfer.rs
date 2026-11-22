@@ -115,6 +115,8 @@ impl TransferHandle {
     /// Sets the total size and emits an initial progress event.
     pub fn start(&mut self, total_bytes: u64) {
         self.total_bytes = total_bytes;
+        self.bytes_transferred = 0;
+        self.last_emit_bytes = 0;
         self.reset_speed_window();
         self.emit("transferring", 0);
     }
@@ -187,6 +189,47 @@ pub fn partial_download_path(local_path: &Path, transfer_id: &str) -> PathBuf {
         .take(PARTIAL_ID_MAX_LEN)
         .collect();
     local_path.with_file_name(format!(".orbit-{safe_id}.part"))
+}
+
+/// Creates a temporary file for download with strict permissions (0600 on Unix)
+/// to prevent local users from reading in-flight transferred data before finalization.
+/// Rejects pre-existing symlinks to prevent symlink-following attacks.
+pub async fn create_partial_download_file(path: &Path) -> Result<tokio::fs::File, AppError> {
+    if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
+        if meta.file_type().is_symlink() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).await.map_err(|e| {
+        AppError::Io(format!(
+            "Cannot create partial file {}: {e}",
+            path.display()
+        ))
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+        {
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(AppError::Io(format!(
+                "Cannot enforce 0600 permissions on partial file {}: {e}",
+                path.display()
+            )));
+        }
+    }
+
+    Ok(file)
 }
 
 /// Replaces `local_path` with the temporary file once the download has finished.
@@ -457,6 +500,87 @@ mod tests {
 
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_partial_download_file_sets_strict_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("strict-perms");
+        let dest = dir.join("file.txt");
+        let partial = partial_download_path(&dest, "t1");
+
+        let file = create_partial_download_file(&partial).await.unwrap();
+        drop(file);
+
+        let mode = std::fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "Group and others must not have any permissions"
+        );
+        assert_eq!(
+            mode & 0o600,
+            0o600,
+            "Owner must have read and write permissions"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_partial_download_file_truncates_and_hardens_preexisting_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("preexisting-hardening");
+        let dest = dir.join("file.txt");
+        let partial = partial_download_path(&dest, "t1");
+
+        // Simulate a pre-existing insecure partial file (e.g. 0666 with stale content)
+        std::fs::write(&partial, b"stale sensitive data").unwrap();
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let file = create_partial_download_file(&partial).await.unwrap();
+        drop(file);
+
+        let meta = std::fs::metadata(&partial).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(mode & 0o077, 0, "Group and others must have no access");
+        assert_eq!(meta.len(), 0, "File must be truncated on open");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_partial_download_file_removes_planted_symlink_without_modifying_target() {
+        let dir = scratch_dir("symlink-defense");
+        let target_file = dir.join("important_target.txt");
+        let dest = dir.join("file.txt");
+        let partial = partial_download_path(&dest, "t1");
+
+        // Plant target file and symlink pointing to it at the partial path
+        std::fs::write(&target_file, b"original secret content").unwrap();
+        std::os::unix::fs::symlink(&target_file, &partial).unwrap();
+
+        let file = create_partial_download_file(&partial).await.unwrap();
+        drop(file);
+
+        // The target file must remain unmodified and NOT truncated
+        assert_eq!(
+            std::fs::read(&target_file).unwrap(),
+            b"original secret content"
+        );
+        // The partial path is now a real regular file, not a symlink
+        assert!(
+            !std::fs::symlink_metadata(&partial)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

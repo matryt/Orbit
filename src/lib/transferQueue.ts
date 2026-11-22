@@ -14,7 +14,7 @@ export function countRunning(transfers: Pick<TransferItem, 'status'>[]): number 
 }
 
 type SchedulableTransfer = Pick<TransferItem, 'id' | 'status' | 'direction' | 'remotePath' | 'localPath'> &
-  Partial<Pick<TransferItem, 'profileId' | 'inFlight'>>;
+  Partial<Pick<TransferItem, 'profileId' | 'inFlight' | 'groupId'>>;
 
 /**
  * Identifies the file a transfer writes. Local paths are compared case-insensitively
@@ -39,7 +39,8 @@ const holdsDestination = (t: SchedulableTransfer) =>
  */
 export function pickTransfersToStart(
   transfers: SchedulableTransfer[],
-  maxConcurrent: number = MAX_CONCURRENT_TRANSFERS
+  maxConcurrent: number = MAX_CONCURRENT_TRANSFERS,
+  pausedGroupIds?: Set<string>
 ): string[] {
   let freeSlots = Math.max(0, maxConcurrent - countRunning(transfers));
   if (freeSlots === 0) return [];
@@ -49,6 +50,7 @@ export function pickTransfersToStart(
   for (let i = transfers.length - 1; i >= 0 && freeSlots > 0; i--) {
     const tx = transfers[i];
     if (tx.status !== 'queued') continue;
+    if (pausedGroupIds && tx.groupId && pausedGroupIds.has(tx.groupId)) continue;
     const key = destinationKey(tx);
     if (busy.has(key)) continue;
     busy.add(key);
