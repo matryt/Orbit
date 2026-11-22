@@ -98,7 +98,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist-bundles
-          find src-tauri/target -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" \) -exec cp {} dist-bundles/ \;
+          find src-tauri/target -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.app.tar.gz" \) -exec cp {} dist-bundles/ \;
           echo "=== Staged native bundles for attestation ==="
           ls -la dist-bundles
 

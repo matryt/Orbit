@@ -45,11 +45,11 @@ export function summarizeGroup(
   let status: GroupStatus;
   if (group.phase === 'scanning') status = 'scanning';
   else if (group.phase === 'failed') status = 'failed';
-  else if (group.paused) status = 'paused';
+  else if (group.phase === 'cancelled') status = 'cancelled';
   else if (count('transferring') > 0) status = 'transferring';
-  else if (count('paused') > 0) status = 'paused';
-  else if (count('queued') > 0) status = group.phase === 'cancelled' ? 'cancelled' : 'queued';
-  else if (group.phase === 'cancelled' || count('cancelled') > 0) status = 'cancelled';
+  else if (count('paused') > 0 || (group.paused && count('queued') > 0)) status = 'paused';
+  else if (count('queued') > 0) status = 'queued';
+  else if (count('cancelled') > 0) status = 'cancelled';
   else if (filesFailed > 0) status = 'failed';
   else status = 'completed';
 

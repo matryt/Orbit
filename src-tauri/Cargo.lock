@@ -3928,6 +3928,7 @@ dependencies = [
  "aws-sdk-s3",
  "chrono",
  "dirs",
+ "fastrand",
  "keyring",
  "libc",
  "reqwest 0.12.28",

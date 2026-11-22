@@ -1423,17 +1423,25 @@ impl SftpProvider {
     }
 
     pub(crate) fn tmp_upload_path(remote_path: &str, transfer_id: &str) -> String {
+        Self::tmp_upload_path_with_nonce(remote_path, transfer_id, fastrand::u64(..))
+    }
+
+    pub(crate) fn tmp_upload_path_with_nonce(
+        remote_path: &str,
+        transfer_id: &str,
+        nonce: u64,
+    ) -> String {
         let safe_id: String = transfer_id
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .take(32)
+            .take(24)
             .collect();
         let id = if safe_id.is_empty() {
             "tmp".to_string()
         } else {
             safe_id
         };
-        let tmp_name = format!(".orbit-tmp-{id}");
+        let tmp_name = format!(".orbit-tmp-{id}-{nonce:016x}");
         match remote_path.rfind('/') {
             Some(idx) => {
                 let parent = &remote_path[..idx];
@@ -1858,10 +1866,24 @@ impl StorageProvider for SftpProvider {
 
         transfer.start(total_bytes);
 
+        // Check pre-existing destination metadata to preserve permissions upon atomic replace
+        let existing_dest_meta = self.session.metadata(&remote_path).await.ok();
+
         let tmp_path = Self::tmp_upload_path(&remote_path, transfer.id());
 
-        // Attempt atomic upload via a temporary file first
-        match self.session.create(&tmp_path).await {
+        // Attempt atomic upload via an unpredictable temporary file with exclusive open (CREATE | EXCLUDE)
+        // to prevent symlink and pre-creation attacks.
+        let open_res = self
+            .session
+            .open_with_flags(
+                &tmp_path,
+                russh_sftp::protocol::OpenFlags::CREATE
+                    | russh_sftp::protocol::OpenFlags::EXCLUDE
+                    | russh_sftp::protocol::OpenFlags::WRITE,
+            )
+            .await;
+
+        match open_res {
             Ok(remote_file) => {
                 let copy_result = self
                     .stream_upload(&mut local_file, remote_file, transfer)
@@ -1870,20 +1892,43 @@ impl StorageProvider for SftpProvider {
                 if let Err(err) = copy_result {
                     // Transfer interrupted or failed: delete temporary file.
                     // The original target file is completely untouched and intact.
-                    if let Err(rm_err) = self.session.remove_file(&tmp_path).await {
-                        eprintln!(
-                            "[Orbit SFTP] ⚠️ Could not remove partial temp file {tmp_path}: {rm_err}"
-                        );
-                    }
+                    let _ = self.session.remove_file(&tmp_path).await;
                     return Err(err);
                 }
 
-                // Complete upload to temp file: atomically rename to target
+                // Verify cancellation signal before promoting the temporary file
+                if let Err(cancel_err) = transfer.checkpoint().await {
+                    let _ = self.session.remove_file(&tmp_path).await;
+                    return Err(cancel_err);
+                }
+
+                // Preserve existing destination permissions if destination is being overwritten
+                if let Some(ref dest_meta) = existing_dest_meta {
+                    let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+                    attrs.permissions = dest_meta.permissions;
+                    let _ = self.session.set_metadata(&tmp_path, attrs).await;
+                }
+
+                // Atomically rename temporary file to target path
                 let mut rename_result = self.session.rename(&tmp_path, &remote_path).await;
-                if rename_result.is_err() {
-                    // Some servers refuse rename if the target exists; remove and retry
-                    let _ = self.session.remove_file(&remote_path).await;
-                    rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                if rename_result.is_err() && existing_dest_meta.is_some() {
+                    // Some SFTP servers (draft-02 strict) reject rename if target exists.
+                    // Safely move target to a backup path before renaming, restoring it if rename fails.
+                    let backup_path = Self::tmp_upload_path(&remote_path, "bak");
+                    if self
+                        .session
+                        .rename(&remote_path, &backup_path)
+                        .await
+                        .is_ok()
+                    {
+                        rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                        if rename_result.is_ok() {
+                            let _ = self.session.remove_file(&backup_path).await;
+                        } else {
+                            // Restore original destination on failure
+                            let _ = self.session.rename(&backup_path, &remote_path).await;
+                        }
+                    }
                 }
 
                 match rename_result {
@@ -2364,47 +2409,59 @@ docker:x:999:ubuntu,mathieu
     #[test]
     fn test_tmp_upload_path() {
         assert_eq!(
-            SftpProvider::tmp_upload_path("/var/log/app.log", "tx-1234"),
-            "/var/log/.orbit-tmp-tx-1234"
+            SftpProvider::tmp_upload_path_with_nonce("/var/log/app.log", "tx-1234", 0x42),
+            "/var/log/.orbit-tmp-tx-1234-0000000000000042"
         );
         assert_eq!(
-            SftpProvider::tmp_upload_path("/file.txt", "tx-99"),
-            "/.orbit-tmp-tx-99"
+            SftpProvider::tmp_upload_path_with_nonce("/file.txt", "tx-99", 0x99),
+            "/.orbit-tmp-tx-99-0000000000000099"
         );
         assert_eq!(
-            SftpProvider::tmp_upload_path("relative_file.txt", "abc"),
-            ".orbit-tmp-abc"
+            SftpProvider::tmp_upload_path_with_nonce("relative_file.txt", "abc", 1),
+            ".orbit-tmp-abc-0000000000000001"
         );
         assert_eq!(
-            SftpProvider::tmp_upload_path("/deep/nested/path/to/target.bin", "tx!@#special-42"),
-            "/deep/nested/path/to/.orbit-tmp-txspecial-42"
+            SftpProvider::tmp_upload_path_with_nonce(
+                "/deep/nested/path/to/target.bin",
+                "tx!@#special-42",
+                0xabc
+            ),
+            "/deep/nested/path/to/.orbit-tmp-txspecial-42-0000000000000abc"
         );
     }
 
     #[test]
     fn test_tmp_upload_path_security_sanitization() {
         // Path traversal payload in transfer_id must be stripped
-        let path1 = SftpProvider::tmp_upload_path("/var/data/file.txt", "../../../../etc/shadow");
-        assert_eq!(path1, "/var/data/.orbit-tmp-etcshadow");
+        let path1 = SftpProvider::tmp_upload_path_with_nonce(
+            "/var/data/file.txt",
+            "../../../../etc/shadow",
+            0,
+        );
+        assert_eq!(path1, "/var/data/.orbit-tmp-etcshadow-0000000000000000");
         assert!(!path1.contains(".."));
 
         // Backslash traversal attempt
-        let path2 = SftpProvider::tmp_upload_path("/srv/data.bin", "..\\..\\sensitive");
-        assert_eq!(path2, "/srv/.orbit-tmp-sensitive");
+        let path2 =
+            SftpProvider::tmp_upload_path_with_nonce("/srv/data.bin", "..\\..\\sensitive", 0);
+        assert_eq!(path2, "/srv/.orbit-tmp-sensitive-0000000000000000");
         assert!(!path2.contains('\\'));
 
         // Null byte injection attempt
-        let path3 = SftpProvider::tmp_upload_path("/srv/data.bin", "tx\0injected");
-        assert_eq!(path3, "/srv/.orbit-tmp-txinjected");
+        let path3 = SftpProvider::tmp_upload_path_with_nonce("/srv/data.bin", "tx\0injected", 0);
+        assert_eq!(path3, "/srv/.orbit-tmp-txinjected-0000000000000000");
         assert!(!path3.contains('\0'));
 
         // All-special-characters payload falls back safely without escaping parent
-        let path4 = SftpProvider::tmp_upload_path("/dir/test.txt", "!@#$%^&*()/?<>");
-        assert_eq!(path4, "/dir/.orbit-tmp-tmp");
+        let path4 = SftpProvider::tmp_upload_path_with_nonce("/dir/test.txt", "!@#$%^&*()/?<>", 0);
+        assert_eq!(path4, "/dir/.orbit-tmp-tmp-0000000000000000");
 
-        // Length bounding to 32 safe characters
+        // Length bounding to 24 safe characters
         let long_id = "a".repeat(100);
-        let path5 = SftpProvider::tmp_upload_path("/file.txt", &long_id);
-        assert_eq!(path5, format!("/.orbit-tmp-{}", "a".repeat(32)));
+        let path5 = SftpProvider::tmp_upload_path_with_nonce("/file.txt", &long_id, 0);
+        assert_eq!(
+            path5,
+            format!("/.orbit-tmp-{}-0000000000000000", "a".repeat(24))
+        );
     }
 }

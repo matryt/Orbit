@@ -104,7 +104,7 @@ const GroupRow: React.FC<{
           </div>
 
           <div className="flex items-center gap-1 border-l border-border-subtle pl-2">
-            {s.status === 'transferring' && (
+            {(s.status === 'transferring' || (s.status === 'queued' && !group.paused)) && (
               <button
                 onClick={onPause}
                 className="p-1 rounded hover:bg-amber-500/20 text-zinc-400 hover:text-amber-300 transition-colors"
@@ -113,7 +113,7 @@ const GroupRow: React.FC<{
                 <Pause className="w-3 h-3" />
               </button>
             )}
-            {(s.status === 'paused' || (group.paused && s.status === 'queued')) && (
+            {(s.status === 'paused' || group.paused) && (
               <button
                 onClick={onResume}
                 className="p-1 rounded hover:bg-emerald-500/20 text-zinc-400 hover:text-emerald-300 transition-colors"

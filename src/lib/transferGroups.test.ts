@@ -47,12 +47,27 @@ describe('summarizeGroup', () => {
     assert.equal(summarizeGroup({ phase: 'ready' }, [child('completed', 0, 100)]).bytesTransferred, 100);
   });
 
-  it('reports paused when group.paused is true', () => {
+  it('reports paused when group.paused is true with queued children', () => {
     const s = summarizeGroup({ phase: 'ready', paused: true }, [
-      child('paused', 40, 100),
+      child('queued', 0, 100),
       child('queued', 0, 100),
     ]);
     assert.equal(s.status, 'paused');
+  });
+
+  it('cancelled phase takes precedence over group.paused', () => {
+    const s = summarizeGroup({ phase: 'cancelled', paused: true }, [
+      child('cancelled', 0, 100),
+    ]);
+    assert.equal(s.status, 'cancelled');
+  });
+
+  it('settled children (all cancelled) do not report paused even if group.paused was set', () => {
+    const s = summarizeGroup({ phase: 'ready', paused: true }, [
+      child('cancelled', 0, 100),
+      child('cancelled', 0, 100),
+    ]);
+    assert.equal(s.status, 'cancelled');
   });
 
   it('reports paused when files are paused and none are transferring', () => {
