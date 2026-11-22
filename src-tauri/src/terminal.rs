@@ -75,7 +75,9 @@ pub fn build_ssh_args(
     remote_path: Option<&str>,
 ) -> Result<Vec<String>, String> {
     if profile.storage_type != "sftp" {
-        return Err("L'ouverture dans un terminal n'est supportée que pour les profils SFTP.".to_string());
+        return Err(
+            "L'ouverture dans un terminal n'est supportée que pour les profils SFTP.".to_string(),
+        );
     }
 
     let host = profile
@@ -384,7 +386,12 @@ fn launch_linux(_ssh_cmd: &str, ssh_args: &[String]) -> Result<(), String> {
     if let Ok(term) = std::env::var("TERMINAL") {
         let trimmed = term.trim();
         if !trimmed.is_empty() {
-            if let Ok(_) = Command::new(trimmed).arg("-e").arg("ssh").args(ssh_args).spawn() {
+            if let Ok(_) = Command::new(trimmed)
+                .arg("-e")
+                .arg("ssh")
+                .args(ssh_args)
+                .spawn()
+            {
                 return Ok(());
             }
         }
@@ -469,7 +476,14 @@ mod tests {
 
     #[test]
     fn test_build_ssh_args_simple() {
-        let prof = create_dummy_profile("p1", "sftp", Some("example.com"), Some(22), Some("ubuntu"), None);
+        let prof = create_dummy_profile(
+            "p1",
+            "sftp",
+            Some("example.com"),
+            Some(22),
+            Some("ubuntu"),
+            None,
+        );
         let args = build_ssh_args(&prof, &[], None).unwrap();
         assert_eq!(args, vec!["-p", "22", "ubuntu@example.com"]);
     }
@@ -493,7 +507,14 @@ mod tests {
 
     #[test]
     fn test_build_ssh_args_with_remote_path() {
-        let prof = create_dummy_profile("p3", "sftp", Some("server.org"), Some(22), Some("deploy"), None);
+        let prof = create_dummy_profile(
+            "p3",
+            "sftp",
+            Some("server.org"),
+            Some(22),
+            Some("deploy"),
+            None,
+        );
         let args = build_ssh_args(&prof, &[], Some("/var/www/my app's folder")).unwrap();
         assert_eq!(
             args,
@@ -509,7 +530,14 @@ mod tests {
 
     #[test]
     fn test_build_ssh_args_inline_bastion() {
-        let mut prof = create_dummy_profile("p4", "sftp", Some("target.internal"), Some(22), Some("root"), None);
+        let mut prof = create_dummy_profile(
+            "p4",
+            "sftp",
+            Some("target.internal"),
+            Some(22),
+            Some("root"),
+            None,
+        );
         prof.bastion = Some(BastionConfig {
             enabled: true,
             profile_id: None,
@@ -546,7 +574,8 @@ mod tests {
             None,
         );
 
-        let mut prof = create_dummy_profile("p5", "sftp", Some("prod.db"), Some(22), Some("dba"), None);
+        let mut prof =
+            create_dummy_profile("p5", "sftp", Some("prod.db"), Some(22), Some("dba"), None);
         prof.bastion = Some(BastionConfig {
             enabled: true,
             profile_id: Some("bastion-profile-id".to_string()),
@@ -562,13 +591,7 @@ mod tests {
         let args = build_ssh_args(&prof, &[bastion_prof], None).unwrap();
         assert_eq!(
             args,
-            vec![
-                "-p",
-                "22",
-                "-J",
-                "secops@jump.company.com",
-                "dba@prod.db"
-            ]
+            vec!["-p", "22", "-J", "secops@jump.company.com", "dba@prod.db"]
         );
     }
 

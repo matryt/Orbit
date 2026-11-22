@@ -589,11 +589,11 @@ pub async fn open_in_external_terminal(
 
     if profile.storage_type != "sftp" {
         return Err(AppError::Config(
-            "L'ouverture dans un terminal externe n'est disponible que pour les profils SFTP.".to_string(),
+            "L'ouverture dans un terminal externe n'est disponible que pour les profils SFTP."
+                .to_string(),
         ));
     }
 
     crate::terminal::launch_terminal(profile, &profiles, remote_path.as_deref())
         .map_err(AppError::Io)
 }
-
