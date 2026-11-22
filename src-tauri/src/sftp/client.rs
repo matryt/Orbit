@@ -1025,9 +1025,12 @@ impl SftpProvider {
         let tcp_stream = if let Some(ref proxy) = proxy_opt {
             let p_type = proxy.proxy_type.as_deref().unwrap_or("socks5");
             let p_host = proxy.host.as_deref().unwrap_or("");
-            let p_port = proxy.port.unwrap_or(if p_type == "http" { 8080 } else { 1080 });
+            let p_port = proxy
+                .port
+                .unwrap_or(if p_type == "http" { 8080 } else { 1080 });
             let p_display_addr = crate::sftp::proxy::format_host_port(p_host, p_port);
-            let target_display_addr = crate::sftp::proxy::format_host_port(&initial_host, initial_port);
+            let target_display_addr =
+                crate::sftp::proxy::format_host_port(&initial_host, initial_port);
             logs.push(format!(
                 "[{}] 🌐 Connexion au proxy {p_type} ({p_display_addr}) pour joindre {initial_label} ({target_display_addr})...",
                 now()
@@ -1067,7 +1070,12 @@ impl SftpProvider {
                 "[{}] 🔌 Connexion socket TCP directe vers {initial_label} ({addr})...",
                 now()
             ));
-            match tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(&addr)).await {
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
                 Ok(Ok(s)) => {
                     logs.push(format!(
                         "[{}] Connexion socket TCP établie avec succès vers {addr}.",
@@ -1081,7 +1089,9 @@ impl SftpProvider {
                     return Err((AppError::Io(err_msg), logs));
                 }
                 Err(_) => {
-                    let err_msg = format!("Délai d'attente dépassé (15s) lors de la connexion réseau vers {addr}");
+                    let err_msg = format!(
+                        "Délai d'attente dépassé (15s) lors de la connexion réseau vers {addr}"
+                    );
                     logs.push(format!("[{}] ❌ {err_msg}", now()));
                     return Err((AppError::Io(err_msg), logs));
                 }
@@ -1139,24 +1149,37 @@ impl SftpProvider {
                 config.port
             ));
 
-            let direct_channel = match b_handle
-                .channel_open_direct_tcpip(&config.host, config.port as u32, "127.0.0.1", 0)
+            let channel_fut = b_handle.channel_open_direct_tcpip(
+                &config.host,
+                config.port as u32,
+                "127.0.0.1",
+                0,
+            );
+            let direct_channel = match tokio::time::timeout(Duration::from_secs(15), channel_fut)
                 .await
             {
-                Ok(c) => {
+                Ok(Ok(c)) => {
                     logs.push(format!(
                         "[{}] ✅ Tunnel direct-tcpip Bastion ➔ Cible ouvert avec succès.",
                         now()
                     ));
                     c
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let err_msg = format!(
                         "Le Bastion a refusé l'ouverture du tunnel direct-tcpip vers {}:{}: {e}",
                         config.host, config.port
                     );
                     logs.push(format!("[{}] ❌ {err_msg}", now()));
                     return Err((AppError::Ssh(err_msg), logs));
+                }
+                Err(_) => {
+                    let err_msg = format!(
+                        "Délai d'attente dépassé (15s) lors de l'ouverture du tunnel direct-tcpip Bastion vers {}:{}",
+                        config.host, config.port
+                    );
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Io(err_msg), logs));
                 }
             };
 

@@ -34,7 +34,10 @@ pub async fn get_pending_host_key_prompts(
     Ok(host_key_mgr.get_pending_requests().await)
 }
 
-async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConnectConfig) -> Result<(), AppError> {
+async fn resolve_sftp_credentials(
+    app: &tauri::AppHandle,
+    config: &mut SftpConnectConfig,
+) -> Result<(), AppError> {
     if config.password.is_none() && config.passphrase.is_none() {
         let pid = config.profile_id.clone();
         if let Ok(Ok(Some(secret))) =
@@ -55,7 +58,9 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
                 let b_prof = profiles
                     .into_iter()
                     .find(|p| p.id == *b_pid)
-                    .ok_or_else(|| AppError::Config(format!("Profil de bastion '{b_pid}' introuvable")))?;
+                    .ok_or_else(|| {
+                        AppError::Config(format!("Profil de bastion '{b_pid}' introuvable"))
+                    })?;
 
                 if bastion.host.is_none() {
                     bastion.host = b_prof.host;
@@ -78,11 +83,12 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
                     if let Ok(Ok(Some(sec))) =
                         tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
                     {
-                        let is_key_auth = bastion.auth_type.as_deref() == Some("key") || bastion.key_path.is_some();
-                        if is_key_auth {
-                            bastion.passphrase = Some(sec);
-                        } else {
+                        if bastion.auth_type.as_deref() == Some("password")
+                            || (bastion.auth_type.is_none() && bastion.key_path.is_none())
+                        {
                             bastion.password = Some(sec);
+                        } else {
+                            bastion.passphrase = Some(sec);
                         }
                     }
                 }
@@ -91,11 +97,12 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
                 if let Ok(Ok(Some(sec))) =
                     tokio::task::spawn_blocking(move || KeyringService::get_secret(&key)).await
                 {
-                    let is_key_auth = bastion.auth_type.as_deref() == Some("key") || bastion.key_path.is_some();
-                    if is_key_auth {
-                        bastion.passphrase = Some(sec);
-                    } else {
+                    if bastion.auth_type.as_deref() == Some("password")
+                        || (bastion.auth_type.is_none() && bastion.key_path.is_none())
+                    {
                         bastion.password = Some(sec);
+                    } else {
+                        bastion.passphrase = Some(sec);
                     }
                 }
             }
@@ -132,7 +139,13 @@ pub async fn test_sftp_connection(
     let test_task = async move {
         if let Err(e) = resolve_sftp_credentials(&app_clone, &mut config).await {
             let err_msg = e.to_string();
-            return Err((e, vec![format!("[{}] ❌ Erreur de configuration : {err_msg}", chrono::Utc::now().format("%H:%M:%S%.3f"))]));
+            return Err((
+                e,
+                vec![format!(
+                    "[{}] ❌ Erreur de configuration : {err_msg}",
+                    chrono::Utc::now().format("%H:%M:%S%.3f")
+                )],
+            ));
         }
         SftpProvider::connect_with_logs_and_prompt(config, Some(prompt_handler)).await
     };
@@ -489,10 +502,11 @@ pub async fn save_profile(
 
 #[tauri::command]
 pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), AppError> {
+    ConfigService::delete_profile(&app, &profile_id)?;
     let _ = KeyringService::delete_secret(&profile_id);
     let _ = KeyringService::delete_secret(&format!("{profile_id}:bastion"));
     let _ = KeyringService::delete_secret(&format!("{profile_id}:proxy"));
-    ConfigService::delete_profile(&app, &profile_id)
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

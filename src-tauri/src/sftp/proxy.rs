@@ -139,8 +139,16 @@ pub async fn socks5_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         }
         0x02 => {
             // Authentification Username / Password (RFC 1929)
+            if username.is_none() {
+                return Err(AppError::Auth(
+                    "Le serveur proxy SOCKS5 a sélectionné l'authentification par identifiants alors qu'aucun utilisateur n'a été configuré".into(),
+                ));
+            }
             let user = username.unwrap_or_default();
             let pass = password.unwrap_or_default();
+            if user.is_empty() {
+                return Err(AppError::Auth("Nom d'utilisateur SOCKS5 manquant".into()));
+            }
             if user.len() > 255 || pass.len() > 255 {
                 return Err(AppError::Auth(
                     "Identifiants de proxy SOCKS5 trop longs (max 255 caractères)".into(),
@@ -162,7 +170,7 @@ pub async fn socks5_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 AppError::Auth(format!("Erreur de réponse d'authentification SOCKS5: {e}"))
             })?;
 
-            if auth_resp[1] != 0x00 {
+            if auth_resp[0] != 0x01 || auth_resp[1] != 0x00 {
                 return Err(AppError::Auth(
                     "Authentification refusée par le serveur proxy SOCKS5".into(),
                 ));
@@ -261,10 +269,10 @@ pub async fn socks5_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             let mut rest = vec![0u8; domain_len + 2];
             stream.read_exact(&mut rest).await?;
         }
-        _ => {
-            // Type inconnu : lecture minimale de 6 octets de fallback
-            let mut buf = [0u8; 6];
-            let _ = stream.read_exact(&mut buf).await;
+        atyp => {
+            return Err(AppError::Io(format!(
+                "Type d'adresse SOCKS5 non pris en charge dans la réponse : 0x{atyp:02x}"
+            )));
         }
     }
 
@@ -279,7 +287,10 @@ pub async fn http_connect_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     target_host: &str,
     target_port: u16,
 ) -> Result<(), AppError> {
-    if target_host.chars().any(|c| c == '\r' || c == '\n' || c == ' ') {
+    if target_host
+        .chars()
+        .any(|c| c == '\r' || c == '\n' || c == ' ')
+    {
         return Err(AppError::Io(
             "Hôte cible invalide pour la requête HTTP CONNECT (caractères interdits)".into(),
         ));
@@ -316,54 +327,69 @@ pub async fn http_connect_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
 
-    // Lecture de la réponse HTTP ligne par ligne jusqu'à la fin des en-têtes (\r\n\r\n)
-    let mut response_buf = Vec::new();
-    let mut byte = [0u8; 1];
-    let max_header_len = 8192;
+    // Lecture de la réponse HTTP (boucle pour ignorer d'éventuelles réponses d'information 1xx)
+    loop {
+        let mut response_buf = Vec::new();
+        let mut byte = [0u8; 1];
+        let max_header_len = 8192;
 
-    while response_buf.len() < max_header_len {
-        stream.read_exact(&mut byte).await.map_err(|e| {
+        while response_buf.len() < max_header_len {
+            stream.read_exact(&mut byte).await.map_err(|e| {
+                AppError::Io(format!(
+                    "Erreur de lecture lors de la réponse HTTP CONNECT: {e}"
+                ))
+            })?;
+            response_buf.push(byte[0]);
+
+            if response_buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        if !response_buf.ends_with(b"\r\n\r\n") {
+            return Err(AppError::Io(
+                "En-tête de réponse HTTP du proxy trop volumineux ou incomplet (dépasse 8 KiB sans CRLF final)".into(),
+            ));
+        }
+
+        let response_str = String::from_utf8_lossy(&response_buf);
+        let first_line = response_str
+            .lines()
+            .next()
+            .ok_or_else(|| AppError::Io("Réponse HTTP vide du proxy".into()))?;
+
+        // Ex: "HTTP/1.1 200 Connection established"
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Err(AppError::Io(format!(
+                "Réponse HTTP du proxy malformée : '{first_line}'"
+            )));
+        }
+
+        let status_code: u16 = parts[1].parse().map_err(|_| {
             AppError::Io(format!(
-                "Erreur de lecture lors de la réponse HTTP CONNECT: {e}"
+                "Code statut HTTP invalide dans la réponse du proxy : '{first_line}'"
             ))
         })?;
-        response_buf.push(byte[0]);
 
-        if response_buf.ends_with(b"\r\n\r\n") {
-            break;
+        // 1xx Informational (ex: 103 Early Hints, 100 Continue) : ignorer et lire la réponse finale
+        if (100..=199).contains(&status_code) {
+            continue;
         }
-    }
 
-    let response_str = String::from_utf8_lossy(&response_buf);
-    let first_line = response_str
-        .lines()
-        .next()
-        .ok_or_else(|| AppError::Io("Réponse HTTP vide du proxy".into()))?;
+        if status_code == 407 {
+            return Err(AppError::Auth(
+                "Authentification proxy HTTP requise (407 Proxy Authentication Required). Vérifiez les identifiants du proxy.".into(),
+            ));
+        }
 
-    // Ex: "HTTP/1.1 200 Connection established"
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(AppError::Io(format!(
-            "Réponse HTTP du proxy malformée : '{first_line}'"
-        )));
-    }
+        if !(200..=299).contains(&status_code) {
+            return Err(AppError::Io(format!(
+                "Le proxy HTTP a rejeté la requête CONNECT vers {target_host}:{target_port} ({first_line})"
+            )));
+        }
 
-    let status_code: u16 = parts[1].parse().map_err(|_| {
-        AppError::Io(format!(
-            "Code statut HTTP invalide dans la réponse du proxy : '{first_line}'"
-        ))
-    })?;
-
-    if status_code == 407 {
-        return Err(AppError::Auth(
-            "Authentification proxy HTTP requise (407 Proxy Authentication Required). Vérifiez les identifiants du proxy.".into(),
-        ));
-    }
-
-    if !(200..=299).contains(&status_code) {
-        return Err(AppError::Io(format!(
-            "Le proxy HTTP a rejeté la requête CONNECT vers {target_host}:{target_port} ({first_line})"
-        )));
+        break;
     }
 
     Ok(())

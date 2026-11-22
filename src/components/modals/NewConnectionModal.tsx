@@ -328,6 +328,24 @@ export const NewConnectionModal: React.FC = () => {
       return;
     }
 
+    if (bastionEnabled && bastionMode === 'custom' && !bastionHost.trim()) {
+      setTestResult({
+        type: 'error',
+        message: 'Veuillez renseigner l\'hôte du Bastion SSH.',
+        logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Hôte du Bastion est obligatoire lorsque le bastion est activé.`],
+      });
+      return;
+    }
+
+    if (proxyEnabled && !proxyHost.trim()) {
+      setTestResult({
+        type: 'error',
+        message: 'Veuillez renseigner l\'hôte du Proxy.',
+        logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Hôte du Proxy est obligatoire lorsque le proxy réseau est activé.`],
+      });
+      return;
+    }
+
     setIsTesting(true);
 
     try {
@@ -420,6 +438,27 @@ export const NewConnectionModal: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+
+    if (type === 'sftp') {
+      if (bastionEnabled && bastionMode === 'custom' && !bastionHost.trim()) {
+        setShowNetworkSettings(true);
+        setTestResult({
+          type: 'error',
+          message: 'Veuillez renseigner l\'hôte du Bastion SSH.',
+          logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Hôte du Bastion est obligatoire lorsque le bastion est activé.`],
+        });
+        return;
+      }
+      if (proxyEnabled && !proxyHost.trim()) {
+        setShowNetworkSettings(true);
+        setTestResult({
+          type: 'error',
+          message: 'Veuillez renseigner l\'hôte du Proxy.',
+          logs: [`[${new Date().toLocaleTimeString()}] ❌ Erreur de validation : Le champ Hôte du Proxy est obligatoire lorsque le proxy réseau est activé.`],
+        });
+        return;
+      }
+    }
 
     const secret =
       type === 's3'
@@ -1213,6 +1252,15 @@ export const NewConnectionModal: React.FC = () => {
                               HTTP CONNECT
                             </button>
                           </div>
+
+                          {proxyType === 'http' && (
+                            <div className="flex items-start gap-1.5 p-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300">
+                              <ShieldAlert className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-amber-400" />
+                              <span>
+                                Les proxys HTTP CONNECT transmettent les identifiants d'authentification en clair (Base64 non chiffré) sur le réseau local. Utilisez un réseau de confiance ou SOCKS5.
+                              </span>
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-4 gap-2">
                             <div className="col-span-3">

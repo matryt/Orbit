@@ -43,7 +43,7 @@ describe('network profiles (bastion & proxy)', () => {
     assert.ok(exportedJson.includes('socks5'));
   });
 
-  it('correctly handles bastion referencing an existing profile ID', () => {
+  it('correctly handles bastion referencing an existing profile ID during export', () => {
     const profileWithJumpRef: ConnectionProfile = {
       id: 'prof-2',
       name: 'Server with Jump Reference',
@@ -57,10 +57,17 @@ describe('network profiles (bastion & proxy)', () => {
         enabled: true,
         profileId: 'bastion-prof-prod',
       },
+      proxy: {
+        enabled: false,
+        proxyType: 'socks5',
+        host: '127.0.0.1',
+      },
     };
 
-    assert.equal(profileWithJumpRef.bastion?.enabled, true);
-    assert.equal(profileWithJumpRef.bastion?.profileId, 'bastion-prof-prod');
-    assert.equal(profileWithJumpRef.bastion?.host, undefined);
+    const sanitized = sanitizeProfileForExport(profileWithJumpRef);
+    assert.equal(sanitized.bastion?.enabled, true);
+    assert.equal(sanitized.bastion?.profileId, 'bastion-prof-prod');
+    assert.equal(sanitized.bastion?.host, undefined);
+    assert.equal(sanitized.proxy, undefined);
   });
 });
