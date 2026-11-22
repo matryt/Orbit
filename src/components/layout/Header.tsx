@@ -14,6 +14,7 @@ import {
   X,
   Sparkles,
   ShieldAlert,
+  Terminal,
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
@@ -43,7 +44,13 @@ export const Header: React.FC = () => {
     availableUpdate,
     setUpdateModalOpen,
     enqueueTransfers,
+    openExternalTerminal,
+    profiles,
+    activeProfileId,
   } = useOrbitStore();
+
+  const activeProfile = profiles.find((p) => p.id === activeProfileId);
+  const isSftp = activeProfile?.type === 'sftp';
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -237,6 +244,18 @@ export const Header: React.FC = () => {
             className={`w-3.5 h-3.5 ${(isLocalActive ? isLoadingLocalFiles : isLoadingFiles) ? 'animate-spin' : ''}`}
           />
         </button>
+
+        {/* External Terminal button (SFTP distant only) */}
+        {!isLocalActive && isSftp && (
+          <button
+            type="button"
+            onClick={() => openExternalTerminal(currentPath)}
+            className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
+            title={`Ouvrir dans le terminal (${currentPath})`}
+          >
+            <Terminal className="w-3.5 h-3.5 text-zinc-400 hover:text-indigo-400 transition-colors" />
+          </button>
+        )}
 
         {/* Instant filter input */}
         <div className="relative flex items-center">

@@ -480,4 +480,15 @@ export const storageApi = {
     }
     return await invoke<UpdateCheckResult>('check_app_update');
   },
+
+  async openInExternalTerminal(profileId: string, remotePath?: string): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] openInExternalTerminal', profileId, remotePath);
+      return;
+    }
+    await invoke('open_in_external_terminal', {
+      profileId,
+      remotePath: remotePath || null,
+    });
+  },
 };
