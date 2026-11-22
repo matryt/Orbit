@@ -503,9 +503,23 @@ pub async fn save_profile(
 #[tauri::command]
 pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), AppError> {
     ConfigService::delete_profile(&app, &profile_id)?;
-    let _ = KeyringService::delete_secret(&profile_id);
-    let _ = KeyringService::delete_secret(&format!("{profile_id}:bastion"));
-    let _ = KeyringService::delete_secret(&format!("{profile_id}:proxy"));
+    let mut err = None;
+    if let Err(e) = KeyringService::delete_secret(&profile_id) {
+        err = Some(e);
+    }
+    if let Err(e) = KeyringService::delete_secret(&format!("{profile_id}:bastion")) {
+        if err.is_none() {
+            err = Some(e);
+        }
+    }
+    if let Err(e) = KeyringService::delete_secret(&format!("{profile_id}:proxy")) {
+        if err.is_none() {
+            err = Some(e);
+        }
+    }
+    if let Some(e) = err {
+        return Err(e);
+    }
     Ok(())
 }
 

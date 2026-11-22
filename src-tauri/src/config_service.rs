@@ -53,8 +53,20 @@ impl ConfigService {
         let json = serde_json::to_string_pretty(profiles)
             .map_err(|e| AppError::Io(format!("Erreur de sérialisation JSON: {e}")))?;
 
-        fs::write(&path, json)
-            .map_err(|e| AppError::Io(format!("Erreur d'écriture dans {}: {e}", path.display())))?;
+        // Écriture atomique via un fichier temporaire pour éviter toute troncature observable par les lectures concurrentes
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, json).map_err(|e| {
+            AppError::Io(format!(
+                "Erreur d'écriture dans {}: {e}",
+                tmp_path.display()
+            ))
+        })?;
+        fs::rename(&tmp_path, &path).map_err(|e| {
+            AppError::Io(format!(
+                "Erreur de renommage atomique vers {}: {e}",
+                path.display()
+            ))
+        })?;
 
         Ok(())
     }

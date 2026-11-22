@@ -84,6 +84,7 @@ export const NewConnectionModal: React.FC = () => {
   const [showNetworkSettings, setShowNetworkSettings] = useState(false);
 
   const otherSftpProfiles = profiles.filter((p) => p.type === 'sftp' && p.id !== editingProfile?.id);
+  const effectiveBastionMode = otherSftpProfiles.length > 0 ? bastionMode : 'custom';
 
   // Test state & logs
   const [isTesting, setIsTesting] = useState(false);
@@ -328,7 +329,7 @@ export const NewConnectionModal: React.FC = () => {
       return;
     }
 
-    if (bastionEnabled && bastionMode === 'custom' && !bastionHost.trim()) {
+    if (bastionEnabled && effectiveBastionMode === 'custom' && !bastionHost.trim()) {
       setTestResult({
         type: 'error',
         message: 'Veuillez renseigner l\'hôte du Bastion SSH.',
@@ -358,8 +359,8 @@ export const NewConnectionModal: React.FC = () => {
 
       let bastionParam = undefined;
       if (bastionEnabled) {
-        const effectiveBastionPid = bastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
-        if (bastionMode === 'profile' && effectiveBastionPid) {
+        const effectiveBastionPid = effectiveBastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
+        if (effectiveBastionMode === 'profile' && effectiveBastionPid) {
           bastionParam = {
             enabled: true,
             profileId: effectiveBastionPid,
@@ -440,7 +441,7 @@ export const NewConnectionModal: React.FC = () => {
     if (!name.trim()) return;
 
     if (type === 'sftp') {
-      if (bastionEnabled && bastionMode === 'custom' && !bastionHost.trim()) {
+      if (bastionEnabled && effectiveBastionMode === 'custom' && !bastionHost.trim()) {
         setShowNetworkSettings(true);
         setTestResult({
           type: 'error',
@@ -471,8 +472,8 @@ export const NewConnectionModal: React.FC = () => {
     let bastionSecretToSave: string | undefined = undefined;
     if (type === 'sftp') {
       if (bastionEnabled) {
-        const effectiveBastionPid = bastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
-        if (bastionMode === 'profile' && effectiveBastionPid) {
+        const effectiveBastionPid = effectiveBastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
+        if (effectiveBastionMode === 'profile' && effectiveBastionPid) {
           bastionConfig = {
             enabled: true,
             profileId: effectiveBastionPid,
