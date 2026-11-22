@@ -77,6 +77,7 @@ interface OrbitState {
   selectRemoteFile: (path: string, multi?: boolean) => void;
   clearRemoteSelection: () => void;
   refreshRemote: () => Promise<void>;
+  openExternalTerminal: (remotePath?: string) => Promise<void>;
   createRemoteFolder: (folderName: string) => Promise<void>;
   renameRemoteItem: (oldPath: string, newName: string) => Promise<void>;
   deleteRemoteItem: (path: string, isDir: boolean) => Promise<void>;
@@ -746,6 +747,21 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   refreshRemote: async () => {
     const { currentPath } = get();
     await get().setCurrentPath(currentPath);
+  },
+
+  openExternalTerminal: async (remotePath?: string) => {
+    const { activeProfileId, profiles, currentPath } = get();
+    const profile = profiles.find((p) => p.id === activeProfileId);
+    if (!profile || profile.type !== 'sftp') return;
+
+    const targetPath = remotePath ?? currentPath;
+    try {
+      await storageApi.openInExternalTerminal(activeProfileId, targetPath);
+    } catch (err: any) {
+      const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+      console.error('Failed to open external terminal:', errMsg);
+      set({ connectionError: `Erreur terminal : ${errMsg}` });
+    }
   },
 
   elevateActiveSession: async (targetPath?: string) => {

@@ -24,6 +24,7 @@ import {
   ArrowDown,
   ArrowUpDown,
   ShieldAlert,
+  Terminal,
 } from 'lucide-react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { isTauri, storageApi } from '../../services/storageApi';
@@ -90,7 +91,12 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     selectedLocalPaths,
     activeDrag,
     setActiveDrag,
+    openExternalTerminal,
+    activeProfileId,
   } = useOrbitStore();
+
+  const activeProfile = profiles.find((p) => p.id === activeProfileId);
+  const isSftp = activeProfile?.type === 'sftp';
 
   const selectedPaths = isLocal ? selectedLocalPaths : selectedRemotePaths;
 
@@ -274,7 +280,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     onSelect(file.path, false);
 
     const menuWidth = 200;
-    const menuHeight = isLocal ? 180 : 220;
+    const menuHeight = isLocal ? 180 : 260;
     const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
 
@@ -287,7 +293,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setActivePane(isLocal ? 'local' : 'remote');
 
     const menuWidth = 200;
-    const menuHeight = 120;
+    const menuHeight = isLocal ? 120 : 160;
     const x = Math.min(e.clientX, window.innerWidth - menuWidth - 12);
     const y = Math.min(e.clientY, window.innerHeight - menuHeight - 12);
 
@@ -643,10 +649,22 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
               ))}
             </div>
           </div>
-          <span className="text-[11px] text-zinc-500 flex-shrink-0 ml-2">
-            {files.length} élément{files.length > 1 ? 's' : ''}
-            {searchQuery.trim() ? ' (filtré)' : ''}
-          </span>
+          <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+            <span className="text-[11px] text-zinc-500">
+              {files.length} élément{files.length > 1 ? 's' : ''}
+              {searchQuery.trim() ? ' (filtré)' : ''}
+            </span>
+            {!isLocal && isSftp && (
+              <button
+                type="button"
+                onClick={() => openExternalTerminal(currentPath)}
+                className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors ml-1"
+                title={`Ouvrir dans le terminal (${currentPath})`}
+              >
+                <Terminal className="w-3.5 h-3.5 text-zinc-400 hover:text-indigo-400 transition-colors" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1013,6 +1031,24 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
+              {/* Ouvrir un terminal ici (Dossier distant SFTP) */}
+              {!isLocal && contextMenu.file.is_dir && isSftp && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dirPath = contextMenu.file?.path;
+                    setContextMenu(null);
+                    if (dirPath) {
+                      openExternalTerminal(dirPath);
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+                >
+                  <Terminal className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Ouvrir un terminal ici</span>
+                </button>
+              )}
+
               {/* Rename */}
               <button
                 type="button"
@@ -1076,6 +1112,21 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 >
                   <Upload className="w-3.5 h-3.5 text-indigo-400" />
                   <span>Importer des fichiers...</span>
+                </button>
+              )}
+
+              {/* Ouvrir un terminal ici (Répertoire courant distant SFTP) */}
+              {!isLocal && isSftp && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setContextMenu(null);
+                    openExternalTerminal(currentPath);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+                >
+                  <Terminal className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Ouvrir un terminal ici</span>
                 </button>
               )}
 

@@ -574,3 +574,26 @@ pub async fn local_rename(old_path: String, new_path: String) -> Result<(), AppE
 pub async fn check_app_update() -> Result<crate::updater::UpdateCheckResult, AppError> {
     crate::updater::check_for_updates().await
 }
+
+#[tauri::command]
+pub async fn open_in_external_terminal(
+    app: tauri::AppHandle,
+    profile_id: String,
+    remote_path: Option<String>,
+) -> Result<(), AppError> {
+    let profiles = ConfigService::load_profiles(&app)?;
+    let profile = profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| AppError::Config(format!("Profil introuvable: {profile_id}")))?;
+
+    if profile.storage_type != "sftp" {
+        return Err(AppError::Config(
+            "L'ouverture dans un terminal externe n'est disponible que pour les profils SFTP.".to_string(),
+        ));
+    }
+
+    crate::terminal::launch_terminal(profile, &profiles, remote_path.as_deref())
+        .map_err(AppError::Io)
+}
+
