@@ -97,7 +97,9 @@ pub async fn socks5_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut greeting_resp = [0u8; 2];
     stream.read_exact(&mut greeting_resp).await.map_err(|e| {
-        AppError::Io(format!("Erreur de lecture lors de la salutation SOCKS5: {e}"))
+        AppError::Io(format!(
+            "Erreur de lecture lors de la salutation SOCKS5: {e}"
+        ))
     })?;
 
     if greeting_resp[0] != 0x05 {

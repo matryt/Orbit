@@ -521,7 +521,13 @@ impl SftpProvider {
         prompt_handler: Option<Arc<dyn HostKeyPromptHandler + Send + Sync>>,
         target_label: &str,
         logs: &mut Vec<String>,
-    ) -> Result<(Handle<SshHandler>, Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>), (AppError, Vec<String>)> {
+    ) -> Result<
+        (
+            Handle<SshHandler>,
+            Arc<tokio::sync::Mutex<Option<HostKeyStatus>>>,
+        ),
+        (AppError, Vec<String>),
+    > {
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
         let addr = format!("{host}:{port}");
         let key_status = Arc::new(tokio::sync::Mutex::new(None));
@@ -608,8 +614,14 @@ impl SftpProvider {
             Ok(Err(e)) => {
                 let recorded_status = key_status.lock().await.clone();
                 if let Some(HostKeyStatus::Rejected(ref reason)) = recorded_status {
-                    logs.push(format!("[{}] [{target_label}] ❌ Connexion annulée : {reason}", now()));
-                    return Err((AppError::Ssh(format!("Connexion annulée : {reason}")), logs.clone()));
+                    logs.push(format!(
+                        "[{}] [{target_label}] ❌ Connexion annulée : {reason}",
+                        now()
+                    ));
+                    return Err((
+                        AppError::Ssh(format!("Connexion annulée : {reason}")),
+                        logs.clone(),
+                    ));
                 }
 
                 if let Some(HostKeyStatus::Changed { line }) = recorded_status {
@@ -630,7 +642,9 @@ impl SftpProvider {
                 }
 
                 if let Some(HostKeyStatus::CheckFailed(reason)) = recorded_status {
-                    let err_msg = format!("Échec de vérification de la clé d'hôte SSH ({target_label}) : {reason}");
+                    let err_msg = format!(
+                        "Échec de vérification de la clé d'hôte SSH ({target_label}) : {reason}"
+                    );
                     logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                     return Err((AppError::Ssh(err_msg), logs.clone()));
                 }
@@ -765,12 +779,17 @@ impl SftpProvider {
             }
 
             if !authenticated {
-                let err_msg = format!("Le serveur SSH ({target_label}) a rejeté la clé publique pour tous les algorithmes (SSH_MSG_USERAUTH_FAILURE)");
+                let err_msg = format!(
+                    "Le serveur SSH ({target_label}) a rejeté la clé publique pour tous les algorithmes (SSH_MSG_USERAUTH_FAILURE)"
+                );
                 logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                 return Err((AppError::Auth(err_msg), logs.clone()));
             }
         } else if let Some(pwd) = password.filter(|p| !p.is_empty()) {
-            logs.push(format!("[{}] [{target_label}] Méthode : Mot de passe", now()));
+            logs.push(format!(
+                "[{}] [{target_label}] Méthode : Mot de passe",
+                now()
+            ));
             match handle.authenticate_password(username, pwd).await {
                 Ok(res) if res.success() => {
                     logs.push(format!(
@@ -779,12 +798,14 @@ impl SftpProvider {
                     ));
                 }
                 Ok(_) => {
-                    let err_msg = format!("Nom d'utilisateur ou mot de passe incorrect sur {target_label}");
+                    let err_msg =
+                        format!("Nom d'utilisateur ou mot de passe incorrect sur {target_label}");
                     logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                     return Err((AppError::Auth(err_msg), logs.clone()));
                 }
                 Err(e) => {
-                    let err_msg = format!("Erreur lors de l'authentification sur {target_label}: {e}");
+                    let err_msg =
+                        format!("Erreur lors de l'authentification sur {target_label}: {e}");
                     logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                     return Err((AppError::Auth(err_msg), logs.clone()));
                 }
@@ -831,8 +852,11 @@ impl SftpProvider {
                                 };
 
                             for hash_alg in hash_candidates {
-                                let key_with_alg = PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
-                                if let Ok(res) = handle.authenticate_publickey(username, key_with_alg).await {
+                                let key_with_alg =
+                                    PrivateKeyWithHashAlg::new(key_arc.clone(), hash_alg);
+                                if let Ok(res) =
+                                    handle.authenticate_publickey(username, key_with_alg).await
+                                {
                                     if res.success() {
                                         logs.push(format!(
                                             "[{}] [{target_label}] Authentification réussie avec {}",
@@ -853,7 +877,8 @@ impl SftpProvider {
             }
 
             if !authenticated {
-                let err_msg = format!("Aucun mot de passe ni clé SSH valide fournie pour {target_label}");
+                let err_msg =
+                    format!("Aucun mot de passe ni clé SSH valide fournie pour {target_label}");
                 logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                 return Err((AppError::Auth(err_msg), logs.clone()));
             }
@@ -891,12 +916,16 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        let err_msg = format!("Échec d'enregistrement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}");
+                        let err_msg = format!(
+                            "Échec d'enregistrement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}"
+                        );
                         logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                         return Err((AppError::Io(err_msg), logs.clone()));
                     }
                     Err(e) => {
-                        let err_msg = format!("Erreur système lors de l'enregistrement de la clé ({target_label}) : {e}");
+                        let err_msg = format!(
+                            "Erreur système lors de l'enregistrement de la clé ({target_label}) : {e}"
+                        );
                         logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                         return Err((AppError::Io(err_msg), logs.clone()));
                     }
@@ -921,12 +950,16 @@ impl SftpProvider {
                         ));
                     }
                     Ok(Err(e)) => {
-                        let err_msg = format!("Échec du remplacement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}");
+                        let err_msg = format!(
+                            "Échec du remplacement de la clé ({target_label}) dans ~/.ssh/known_hosts : {e}"
+                        );
                         logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                         return Err((AppError::Io(err_msg), logs.clone()));
                     }
                     Err(e) => {
-                        let err_msg = format!("Erreur système lors du remplacement de la clé ({target_label}) : {e}");
+                        let err_msg = format!(
+                            "Erreur système lors du remplacement de la clé ({target_label}) : {e}"
+                        );
                         logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                         return Err((AppError::Io(err_msg), logs.clone()));
                     }
@@ -999,7 +1032,10 @@ impl SftpProvider {
                     s
                 }
                 Err(e) => {
-                    logs.push(format!("[{}] ❌ Échec de négociation avec le proxy : {e}", now()));
+                    logs.push(format!(
+                        "[{}] ❌ Échec de négociation avec le proxy : {e}",
+                        now()
+                    ));
                     return Err((e, logs));
                 }
             }
