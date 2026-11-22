@@ -34,6 +34,81 @@ pub async fn get_pending_host_key_prompts(
     Ok(host_key_mgr.get_pending_requests().await)
 }
 
+async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConnectConfig) {
+    if config.password.is_none() && config.passphrase.is_none() {
+        let pid = config.profile_id.clone();
+        if let Ok(Ok(Some(secret))) =
+            tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+        {
+            if config.key_path.is_some() {
+                config.passphrase = Some(secret);
+            } else {
+                config.password = Some(secret);
+            }
+        }
+    }
+
+    if let Some(ref mut bastion) = config.bastion {
+        if bastion.enabled {
+            if let Some(ref b_pid) = bastion.profile_id {
+                if let Ok(profiles) = ConfigService::load_profiles(app) {
+                    if let Some(b_prof) = profiles.into_iter().find(|p| p.id == *b_pid) {
+                        if bastion.host.is_none() {
+                            bastion.host = b_prof.host;
+                        }
+                        if bastion.port.is_none() {
+                            bastion.port = b_prof.port;
+                        }
+                        if bastion.username.is_none() {
+                            bastion.username = b_prof.username;
+                        }
+                        if bastion.auth_type.is_none() {
+                            bastion.auth_type = b_prof.auth_type;
+                        }
+                        if bastion.key_path.is_none() {
+                            bastion.key_path = b_prof.key_path;
+                        }
+                    }
+                }
+                if bastion.password.is_none() && bastion.passphrase.is_none() {
+                    let pid = b_pid.clone();
+                    if let Ok(Ok(Some(sec))) =
+                        tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
+                    {
+                        if bastion.auth_type.as_deref() == Some("password") {
+                            bastion.password = Some(sec);
+                        } else {
+                            bastion.passphrase = Some(sec);
+                        }
+                    }
+                }
+            } else if bastion.password.is_none() && bastion.passphrase.is_none() {
+                let key = format!("{}:bastion", config.profile_id);
+                if let Ok(Ok(Some(sec))) =
+                    tokio::task::spawn_blocking(move || KeyringService::get_secret(&key)).await
+                {
+                    if bastion.auth_type.as_deref() == Some("password") {
+                        bastion.password = Some(sec);
+                    } else {
+                        bastion.passphrase = Some(sec);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ref mut proxy) = config.proxy {
+        if proxy.enabled && proxy.password.is_none() && proxy.username.is_some() {
+            let key = format!("{}:proxy", config.profile_id);
+            if let Ok(Ok(Some(sec))) =
+                tokio::task::spawn_blocking(move || KeyringService::get_secret(&key)).await
+            {
+                proxy.password = Some(sec);
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn test_sftp_connection(
     app: tauri::AppHandle,
@@ -42,25 +117,13 @@ pub async fn test_sftp_connection(
 ) -> Result<ConnectionTestResult, AppError> {
     let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
         Arc::new(TauriHostKeyPromptHandler::new(
-            app,
+            app.clone(),
             Arc::clone(&host_key_mgr),
         ));
 
+    let app_clone = app.clone();
     let test_task = async move {
-        // Run synchronous keyring lookup on a blocking thread inside the timeout
-        if config.password.is_none() && config.passphrase.is_none() {
-            let pid = config.profile_id.clone();
-            if let Ok(Ok(Some(secret))) =
-                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
-            {
-                if config.key_path.is_some() {
-                    config.passphrase = Some(secret);
-                } else {
-                    config.password = Some(secret);
-                }
-            }
-        }
-
+        resolve_sftp_credentials(&app_clone, &mut config).await;
         SftpProvider::connect_with_logs_and_prompt(config, Some(prompt_handler)).await
     };
 
@@ -97,27 +160,15 @@ pub async fn connect_sftp(
     // Démarre le suivi et le canal d'annulation AVANT toute opération (y compris le trousseau)
     let (generation, mut cancel_rx) = state.start_connecting(&profile_id).await;
 
+    let app_clone = app.clone();
     let connect_task = async move {
         let prompt_handler: Arc<dyn crate::sftp::host_key::HostKeyPromptHandler + Send + Sync> =
             Arc::new(TauriHostKeyPromptHandler::new(
-                app,
+                app_clone.clone(),
                 Arc::clone(&host_key_mgr),
             ));
 
-        // If password or passphrase not provided directly, look in system keyring on a blocking thread
-        if config.password.is_none() && config.passphrase.is_none() {
-            let pid = config.profile_id.clone();
-            if let Ok(Ok(Some(secret))) =
-                tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
-            {
-                if config.key_path.is_some() {
-                    config.passphrase = Some(secret);
-                } else {
-                    config.password = Some(secret);
-                }
-            }
-        }
-
+        resolve_sftp_credentials(&app_clone, &mut config).await;
         SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await
     };
 
@@ -429,6 +480,8 @@ pub async fn save_profile(
 #[tauri::command]
 pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), AppError> {
     let _ = KeyringService::delete_secret(&profile_id);
+    let _ = KeyringService::delete_secret(&format!("{profile_id}:bastion"));
+    let _ = KeyringService::delete_secret(&format!("{profile_id}:proxy"));
     ConfigService::delete_profile(&app, &profile_id)
 }
 

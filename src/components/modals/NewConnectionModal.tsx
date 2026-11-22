@@ -22,6 +22,8 @@ import {
   ChevronDown,
   ChevronUp,
   ShieldAlert,
+  Globe,
+  Network,
 } from 'lucide-react';
 
 export const NewConnectionModal: React.FC = () => {
@@ -32,6 +34,7 @@ export const NewConnectionModal: React.FC = () => {
     editingProfile,
     setEditingProfile,
     updateProfile,
+    profiles,
   } = useOrbitStore();
 
   const [type, setType] = useState<StorageType>('sftp');
@@ -54,6 +57,33 @@ export const NewConnectionModal: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [useSudo, setUseSudo] = useState(false);
+
+  // Bastion (SSH Jump Host) state
+  const [bastionEnabled, setBastionEnabled] = useState(false);
+  const [bastionMode, setBastionMode] = useState<'profile' | 'custom'>('profile');
+  const [bastionProfileId, setBastionProfileId] = useState('');
+  const [bastionHost, setBastionHost] = useState('');
+  const [bastionPort, setBastionPort] = useState(22);
+  const [bastionUsername, setBastionUsername] = useState('');
+  const [bastionAuthType, setBastionAuthType] = useState<'key' | 'password'>('key');
+  const [bastionKeyPath, setBastionKeyPath] = useState('~/.ssh/id_ed25519');
+  const [bastionPassphrase, setBastionPassphrase] = useState('');
+  const [bastionPassword, setBastionPassword] = useState('');
+  const [showBastionPassword, setShowBastionPassword] = useState(false);
+
+  // Proxy state
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyType, setProxyType] = useState<'socks5' | 'http'>('socks5');
+  const [proxyHost, setProxyHost] = useState('');
+  const [proxyPort, setProxyPort] = useState(1080);
+  const [proxyUsername, setProxyUsername] = useState('');
+  const [proxyPassword, setProxyPassword] = useState('');
+  const [showProxyPassword, setShowProxyPassword] = useState(false);
+
+  // Network accordion toggle
+  const [showNetworkSettings, setShowNetworkSettings] = useState(false);
+
+  const otherSftpProfiles = profiles.filter((p) => p.type === 'sftp' && p.id !== editingProfile?.id);
 
   // Test state & logs
   const [isTesting, setIsTesting] = useState(false);
@@ -87,6 +117,58 @@ export const NewConnectionModal: React.FC = () => {
           else setPassphrase(sec);
         }
       });
+
+      if (editingProfile.bastion?.enabled) {
+        setBastionEnabled(true);
+        if (editingProfile.bastion.profileId) {
+          setBastionMode('profile');
+          setBastionProfileId(editingProfile.bastion.profileId);
+        } else {
+          setBastionMode('custom');
+          setBastionHost(editingProfile.bastion.host || '');
+          setBastionPort(editingProfile.bastion.port || 22);
+          setBastionUsername(editingProfile.bastion.username || '');
+          setBastionAuthType(editingProfile.bastion.authType || 'key');
+          setBastionKeyPath(editingProfile.bastion.keyPath || '~/.ssh/id_ed25519');
+        }
+        setShowNetworkSettings(true);
+        storageApi.getSecret(`${editingProfile.id}:bastion`).then((sec) => {
+          if (sec) {
+            if (editingProfile.bastion?.authType === 'password') setBastionPassword(sec);
+            else setBastionPassphrase(sec);
+          }
+        });
+      } else {
+        setBastionEnabled(false);
+        setBastionMode('profile');
+        setBastionProfileId('');
+        setBastionHost('');
+        setBastionPort(22);
+        setBastionUsername('');
+        setBastionAuthType('key');
+        setBastionKeyPath('~/.ssh/id_ed25519');
+        setBastionPassphrase('');
+        setBastionPassword('');
+      }
+
+      if (editingProfile.proxy?.enabled) {
+        setProxyEnabled(true);
+        setProxyType(editingProfile.proxy.proxyType || 'socks5');
+        setProxyHost(editingProfile.proxy.host || '');
+        setProxyPort(editingProfile.proxy.port || (editingProfile.proxy.proxyType === 'http' ? 8080 : 1080));
+        setProxyUsername(editingProfile.proxy.username || '');
+        setShowNetworkSettings(true);
+        storageApi.getSecret(`${editingProfile.id}:proxy`).then((sec) => {
+          if (sec) setProxyPassword(sec);
+        });
+      } else {
+        setProxyEnabled(false);
+        setProxyType('socks5');
+        setProxyHost('');
+        setProxyPort(1080);
+        setProxyUsername('');
+        setProxyPassword('');
+      }
     } else {
       setType('sftp');
       setName('');
@@ -103,6 +185,23 @@ export const NewConnectionModal: React.FC = () => {
       setPassphrase('');
       setPassword('');
       setUseSudo(false);
+      setBastionEnabled(false);
+      setBastionMode('profile');
+      setBastionProfileId('');
+      setBastionHost('');
+      setBastionPort(22);
+      setBastionUsername('');
+      setBastionAuthType('key');
+      setBastionKeyPath('~/.ssh/id_ed25519');
+      setBastionPassphrase('');
+      setBastionPassword('');
+      setProxyEnabled(false);
+      setProxyType('socks5');
+      setProxyHost('');
+      setProxyPort(1080);
+      setProxyUsername('');
+      setProxyPassword('');
+      setShowNetworkSettings(false);
       setTestResult(null);
       setIsTesting(false);
       setShowLogs(false);
@@ -128,6 +227,22 @@ export const NewConnectionModal: React.FC = () => {
       });
       if (selected && typeof selected === 'string') {
         setKeyPath(selected);
+        setTestResult(null);
+      }
+    } catch (err) {
+      console.warn('Dialog not available in browser mode:', err);
+    }
+  };
+
+  const handleBrowseBastionKey = async () => {
+    try {
+      const selected = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: 'Sélectionner la clé privée SSH du Bastion',
+      });
+      if (selected && typeof selected === 'string') {
+        setBastionKeyPath(selected);
         setTestResult(null);
       }
     } catch (err) {
@@ -217,9 +332,42 @@ export const NewConnectionModal: React.FC = () => {
         )
       );
 
+      let bastionParam = undefined;
+      if (bastionEnabled) {
+        if (bastionMode === 'profile' && bastionProfileId) {
+          bastionParam = {
+            enabled: true,
+            profileId: bastionProfileId,
+          };
+        } else if (bastionHost.trim()) {
+          bastionParam = {
+            enabled: true,
+            host: bastionHost.trim(),
+            port: Number(bastionPort) || 22,
+            username: bastionUsername.trim(),
+            authType: bastionAuthType,
+            keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
+            password: bastionAuthType === 'password' ? bastionPassword.trim() || undefined : undefined,
+            passphrase: bastionAuthType === 'key' ? bastionPassphrase.trim() || undefined : undefined,
+          };
+        }
+      }
+
+      let proxyParam = undefined;
+      if (proxyEnabled && proxyHost.trim()) {
+        proxyParam = {
+          enabled: true,
+          proxyType,
+          host: proxyHost.trim(),
+          port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
+          username: proxyUsername.trim() || undefined,
+          password: proxyPassword.trim() || undefined,
+        };
+      }
+
       const res = await Promise.race([
         storageApi.testSftp({
-          profile_id: `test-${Date.now()}`,
+          profile_id: editingProfile?.id || `test-${Date.now()}`,
           host: host.trim(),
           port: Number(port) || 22,
           username: username.trim(),
@@ -227,6 +375,8 @@ export const NewConnectionModal: React.FC = () => {
           key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
           passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
           use_sudo: useSudo,
+          bastion: bastionParam,
+          proxy: proxyParam,
         }),
         timeoutPromise,
       ]);
@@ -271,6 +421,42 @@ export const NewConnectionModal: React.FC = () => {
         ? passphrase.trim()
         : password.trim();
 
+    let bastionConfig = undefined;
+    let bastionSecretToSave = undefined;
+    if (type === 'sftp' && bastionEnabled) {
+      if (bastionMode === 'profile' && bastionProfileId) {
+        bastionConfig = {
+          enabled: true,
+          profileId: bastionProfileId,
+        };
+      } else if (bastionHost.trim()) {
+        bastionConfig = {
+          enabled: true,
+          host: bastionHost.trim(),
+          port: Number(bastionPort) || 22,
+          username: bastionUsername.trim(),
+          authType: bastionAuthType,
+          keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
+        };
+        bastionSecretToSave = bastionAuthType === 'password' ? bastionPassword.trim() : bastionPassphrase.trim();
+      }
+    }
+
+    let proxyConfig = undefined;
+    let proxySecretToSave = undefined;
+    if (type === 'sftp' && proxyEnabled && proxyHost.trim()) {
+      proxyConfig = {
+        enabled: true,
+        proxyType,
+        host: proxyHost.trim(),
+        port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
+        username: proxyUsername.trim() || undefined,
+      };
+      if (proxyPassword.trim()) {
+        proxySecretToSave = proxyPassword.trim();
+      }
+    }
+
     if (editingProfile) {
       const updatedProfile: ConnectionProfile = {
         ...editingProfile,
@@ -287,6 +473,8 @@ export const NewConnectionModal: React.FC = () => {
               username: undefined,
               authType: undefined,
               keyPath: undefined,
+              bastion: undefined,
+              proxy: undefined,
             }
           : {
               host: host.trim(),
@@ -295,13 +483,15 @@ export const NewConnectionModal: React.FC = () => {
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
               useSudo,
+              bastion: bastionConfig,
+              proxy: proxyConfig,
               endpoint: undefined,
               bucket: undefined,
               region: undefined,
               accessKey: undefined,
             }),
       };
-      await updateProfile(updatedProfile, secret || undefined);
+      await updateProfile(updatedProfile, secret || undefined, bastionSecretToSave, proxySecretToSave);
     } else {
       const newProfile: ConnectionProfile = {
         id: `prof-${Date.now()}`,
@@ -323,9 +513,11 @@ export const NewConnectionModal: React.FC = () => {
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
               useSudo,
+              bastion: bastionConfig,
+              proxy: proxyConfig,
             }),
       };
-      await addProfile(newProfile, secret || undefined);
+      await addProfile(newProfile, secret || undefined, bastionSecretToSave, proxySecretToSave);
     }
 
     handleClose();
@@ -742,6 +934,345 @@ export const NewConnectionModal: React.FC = () => {
                     </p>
                   </div>
                 </label>
+              </div>
+
+              {/* Réseau, Bastion & Proxy Accordion */}
+              <div className="pt-2 border-t border-white/5 space-y-3">
+                <button
+                  type="button"
+                  onClick={() => setShowNetworkSettings(!showNetworkSettings)}
+                  className="w-full flex items-center justify-between text-xs font-medium text-zinc-300 hover:text-white transition-colors py-1 group"
+                >
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Réseau & Passerelle (Bastion SSH / Proxy)</span>
+                    {(bastionEnabled || proxyEnabled) && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
+                        {[bastionEnabled && 'Bastion', proxyEnabled && `Proxy ${proxyType.toUpperCase()}`].filter(Boolean).join(' + ')}
+                      </span>
+                    )}
+                  </div>
+                  {showNetworkSettings ? <ChevronUp className="w-3.5 h-3.5 text-zinc-400 group-hover:text-white" /> : <ChevronDown className="w-3.5 h-3.5 text-zinc-400 group-hover:text-white" />}
+                </button>
+
+                {showNetworkSettings && (
+                  <div className="space-y-4 p-3 bg-surface-muted/40 rounded-lg border border-border-subtle text-xs animate-in fade-in duration-150">
+                    {/* --- Bastion Section --- */}
+                    <div className="space-y-3">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={bastionEnabled}
+                          onChange={(e) => {
+                            setBastionEnabled(e.target.checked);
+                            setTestResult(null);
+                          }}
+                          className="w-4 h-4 rounded border-border-subtle bg-surface-muted text-sky-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                        />
+                        <span className="font-semibold text-white flex items-center gap-1.5">
+                          <Network className="w-3.5 h-3.5 text-sky-400" />
+                          Passer par un Bastion SSH (Jump Host / ProxyJump)
+                        </span>
+                      </label>
+
+                      {bastionEnabled && (
+                        <div className="pl-6 space-y-3 border-l-2 border-sky-500/30 pt-1">
+                          {otherSftpProfiles.length > 0 && (
+                            <div className="flex items-center gap-4 text-[11px] mb-2">
+                              <label className="flex items-center gap-1.5 cursor-pointer text-zinc-300">
+                                <input
+                                  type="radio"
+                                  name="bastionMode"
+                                  checked={bastionMode === 'profile'}
+                                  onChange={() => {
+                                    setBastionMode('profile');
+                                    if (!bastionProfileId && otherSftpProfiles[0]) {
+                                      setBastionProfileId(otherSftpProfiles[0].id);
+                                    }
+                                    setTestResult(null);
+                                  }}
+                                  className="text-sky-500 focus:ring-0 cursor-pointer"
+                                />
+                                <span>Utiliser un profil SFTP existant</span>
+                              </label>
+                              <label className="flex items-center gap-1.5 cursor-pointer text-zinc-300">
+                                <input
+                                  type="radio"
+                                  name="bastionMode"
+                                  checked={bastionMode === 'custom'}
+                                  onChange={() => {
+                                    setBastionMode('custom');
+                                    setTestResult(null);
+                                  }}
+                                  className="text-sky-500 focus:ring-0 cursor-pointer"
+                                />
+                                <span>Configuration personnalisée</span>
+                              </label>
+                            </div>
+                          )}
+
+                          {bastionMode === 'profile' && otherSftpProfiles.length > 0 ? (
+                            <div>
+                              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                Sélectionner la passerelle SSH
+                              </label>
+                              <select
+                                value={bastionProfileId || otherSftpProfiles[0]?.id}
+                                onChange={(e) => {
+                                  setBastionProfileId(e.target.value);
+                                  setTestResult(null);
+                                }}
+                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500/50"
+                              >
+                                {otherSftpProfiles.map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.name} ({p.username}@{p.host}:{p.port || 22})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="grid grid-cols-4 gap-2">
+                                <div className="col-span-3">
+                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                    Hôte du Bastion
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={bastionHost}
+                                    onChange={(e) => {
+                                      setBastionHost(e.target.value);
+                                      setTestResult(null);
+                                    }}
+                                    placeholder="jump.mondomaine.com"
+                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                    Port
+                                  </label>
+                                  <input
+                                    type="number"
+                                    value={bastionPort}
+                                    onChange={(e) => {
+                                      setBastionPort(Number(e.target.value));
+                                      setTestResult(null);
+                                    }}
+                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-sky-500/50"
+                                  />
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                  Utilisateur Bastion
+                                </label>
+                                <input
+                                  type="text"
+                                  value={bastionUsername}
+                                  onChange={(e) => {
+                                    setBastionUsername(e.target.value);
+                                    setTestResult(null);
+                                  }}
+                                  placeholder="bastion-user"
+                                  className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                />
+                              </div>
+
+                              <div>
+                                <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-black/20 rounded-md border border-border-subtle mb-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setBastionAuthType('key')}
+                                    className={`py-1 rounded text-[11px] font-medium ${bastionAuthType === 'key' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' : 'text-zinc-400 hover:text-white'}`}
+                                  >
+                                    Clé SSH
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setBastionAuthType('password')}
+                                    className={`py-1 rounded text-[11px] font-medium ${bastionAuthType === 'password' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' : 'text-zinc-400 hover:text-white'}`}
+                                  >
+                                    Mot de passe
+                                  </button>
+                                </div>
+
+                                {bastionAuthType === 'key' ? (
+                                  <div className="space-y-2">
+                                    <div className="flex gap-1.5">
+                                      <input
+                                        type="text"
+                                        value={bastionKeyPath}
+                                        onChange={(e) => setBastionKeyPath(e.target.value)}
+                                        placeholder="~/.ssh/id_ed25519"
+                                        className="flex-1 bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={handleBrowseBastionKey}
+                                        className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[11px] text-zinc-300 border border-border-subtle"
+                                      >
+                                        Parcourir...
+                                      </button>
+                                    </div>
+                                    <input
+                                      type="password"
+                                      value={bastionPassphrase}
+                                      onChange={(e) => setBastionPassphrase(e.target.value)}
+                                      placeholder="Passphrase Bastion (si chiffrée)"
+                                      className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                    />
+                                  </div>
+                                ) : (
+                                  <div className="relative flex items-center">
+                                    <input
+                                      type={showBastionPassword ? 'text' : 'password'}
+                                      value={bastionPassword}
+                                      onChange={(e) => setBastionPassword(e.target.value)}
+                                      placeholder="Mot de passe Bastion"
+                                      className="w-full bg-surface-muted border border-border-subtle rounded-md pl-2.5 pr-8 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowBastionPassword(!showBastionPassword)}
+                                      className="absolute right-2 text-zinc-400 hover:text-white"
+                                    >
+                                      {showBastionPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* --- Proxy Section --- */}
+                    <div className="space-y-3 pt-3 border-t border-white/5">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={proxyEnabled}
+                          onChange={(e) => {
+                            setProxyEnabled(e.target.checked);
+                            setTestResult(null);
+                          }}
+                          className="w-4 h-4 rounded border-border-subtle bg-surface-muted text-emerald-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                        />
+                        <span className="font-semibold text-white flex items-center gap-1.5">
+                          <Globe className="w-3.5 h-3.5 text-emerald-400" />
+                          Passer par un Proxy réseau (SOCKS5 / HTTP)
+                        </span>
+                      </label>
+
+                      {proxyEnabled && (
+                        <div className="pl-6 space-y-3 border-l-2 border-emerald-500/30 pt-1">
+                          <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-black/20 rounded-md border border-border-subtle">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProxyType('socks5');
+                                if (proxyPort === 8080) setProxyPort(1080);
+                                setTestResult(null);
+                              }}
+                              className={`py-1 rounded text-[11px] font-medium ${proxyType === 'socks5' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-zinc-400 hover:text-white'}`}
+                            >
+                              SOCKS5
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProxyType('http');
+                                if (proxyPort === 1080) setProxyPort(8080);
+                                setTestResult(null);
+                              }}
+                              className={`py-1 rounded text-[11px] font-medium ${proxyType === 'http' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-zinc-400 hover:text-white'}`}
+                            >
+                              HTTP CONNECT
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-4 gap-2">
+                            <div className="col-span-3">
+                              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                Hôte du Proxy
+                              </label>
+                              <input
+                                type="text"
+                                value={proxyHost}
+                                onChange={(e) => {
+                                  setProxyHost(e.target.value);
+                                  setTestResult(null);
+                                }}
+                                placeholder="127.0.0.1 ou proxy.entreprise.lan"
+                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-emerald-500/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                Port
+                              </label>
+                              <input
+                                type="number"
+                                value={proxyPort}
+                                onChange={(e) => {
+                                  setProxyPort(Number(e.target.value));
+                                  setTestResult(null);
+                                }}
+                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-emerald-500/50"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                Utilisateur (optionnel)
+                              </label>
+                              <input
+                                type="text"
+                                value={proxyUsername}
+                                onChange={(e) => {
+                                  setProxyUsername(e.target.value);
+                                  setTestResult(null);
+                                }}
+                                placeholder="proxy-user"
+                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-emerald-500/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                                Mot de passe (optionnel)
+                              </label>
+                              <div className="relative flex items-center">
+                                <input
+                                  type={showProxyPassword ? 'text' : 'password'}
+                                  value={proxyPassword}
+                                  onChange={(e) => {
+                                    setProxyPassword(e.target.value);
+                                    setTestResult(null);
+                                  }}
+                                  placeholder="••••••••"
+                                  className="w-full bg-surface-muted border border-border-subtle rounded-md pl-2.5 pr-8 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-emerald-500/50"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setShowProxyPassword(!showProxyPassword)}
+                                  className="absolute right-2 text-zinc-400 hover:text-white"
+                                >
+                                  {showProxyPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </>
           )}

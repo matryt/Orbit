@@ -41,8 +41,8 @@ interface OrbitState {
   activeProfileId: string;
   loadPersistedProfiles: () => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
-  addProfile: (profile: ConnectionProfile, secret?: string) => Promise<void>;
-  updateProfile: (profile: ConnectionProfile, secret?: string) => Promise<void>;
+  addProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
+  updateProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   connectProfile: (profileId: string, secret?: string) => Promise<void>;
   disconnectProfile: (id: string) => Promise<void>;
@@ -435,9 +435,15 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }
   },
 
-  addProfile: async (profile, secret) => {
+  addProfile: async (profile, secret, bastionSecret, proxySecret) => {
     if (secret) {
       await storageApi.saveSecret(profile.id, secret);
+    }
+    if (bastionSecret) {
+      await storageApi.saveSecret(`${profile.id}:bastion`, bastionSecret);
+    }
+    if (proxySecret) {
+      await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
     }
 
     try {
@@ -466,9 +472,15 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   editingProfile: null,
   setEditingProfile: (profile) => set({ editingProfile: profile, isNewConnectionModalOpen: profile !== null }),
 
-  updateProfile: async (profile, secret) => {
-    if (secret) {
+  updateProfile: async (profile, secret, bastionSecret, proxySecret) => {
+    if (secret !== undefined) {
       await storageApi.saveSecret(profile.id, secret);
+    }
+    if (bastionSecret !== undefined) {
+      await storageApi.saveSecret(`${profile.id}:bastion`, bastionSecret);
+    }
+    if (proxySecret !== undefined) {
+      await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
     }
 
     try {
@@ -582,12 +594,32 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           port: profile.port || 22,
           username: profile.username || '',
           use_sudo: profile.useSudo,
+          bastion: profile.bastion,
+          proxy: profile.proxy,
         };
         if (isKeyAuth) {
           if (profile.keyPath) connectParams.key_path = profile.keyPath;
           if (secretVal) connectParams.passphrase = secretVal;
         } else if (secretVal) {
           connectParams.password = secretVal;
+        }
+
+        if (profile.bastion?.enabled && !profile.bastion.profileId) {
+          const bSecret = await storageApi.getSecret(`${profile.id}:bastion`);
+          if (bSecret) {
+            if (profile.bastion.authType === 'password') {
+              connectParams.bastion = { ...profile.bastion, password: bSecret };
+            } else {
+              connectParams.bastion = { ...profile.bastion, passphrase: bSecret };
+            }
+          }
+        }
+
+        if (profile.proxy?.enabled && profile.proxy.username) {
+          const pSecret = await storageApi.getSecret(`${profile.id}:proxy`);
+          if (pSecret) {
+            connectParams.proxy = { ...profile.proxy, password: pSecret };
+          }
         }
 
         sessionInfo = await storageApi.connectSftp(connectParams);

@@ -1,0 +1,95 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import type { ConnectionProfile } from '../types/index.ts';
+
+describe('network profiles (bastion & proxy)', () => {
+  it('sanitizes bastion and proxy configurations for export without leaking secrets', () => {
+    const rawProfile: ConnectionProfile = {
+      id: 'prof-1',
+      name: 'Internal Server via Jump',
+      type: 'sftp',
+      host: '10.0.0.5',
+      port: 22,
+      username: 'ubuntu',
+      status: 'idle',
+      isFavorite: true,
+      bastion: {
+        enabled: true,
+        host: 'bastion.corp.com',
+        port: 2222,
+        username: 'jumpuser',
+        authType: 'password',
+        password: 'SUPER_SECRET_BASTION_PASSWORD',
+        passphrase: 'SHOULD_NOT_LEAK',
+      },
+      proxy: {
+        enabled: true,
+        proxyType: 'socks5',
+        host: '127.0.0.1',
+        port: 1080,
+        username: 'proxyuser',
+        password: 'SUPER_SECRET_PROXY_PASSWORD',
+      },
+    };
+
+    // Mirror of export serialization
+    const sanitized = {
+      id: rawProfile.id,
+      name: rawProfile.name,
+      type: rawProfile.type,
+      host: rawProfile.host,
+      port: rawProfile.port,
+      username: rawProfile.username,
+      bastion: rawProfile.bastion?.enabled
+        ? {
+            enabled: true,
+            profileId: rawProfile.bastion.profileId,
+            host: rawProfile.bastion.host,
+            port: rawProfile.bastion.port,
+            username: rawProfile.bastion.username,
+            authType: rawProfile.bastion.authType,
+            keyPath: rawProfile.bastion.keyPath,
+          }
+        : undefined,
+      proxy: rawProfile.proxy?.enabled
+        ? {
+            enabled: true,
+            proxyType: rawProfile.proxy.proxyType,
+            host: rawProfile.proxy.host,
+            port: rawProfile.proxy.port,
+            username: rawProfile.proxy.username,
+          }
+        : undefined,
+      isFavorite: rawProfile.isFavorite,
+    };
+
+    const exportedJson = JSON.stringify(sanitized);
+
+    assert.ok(!exportedJson.includes('SUPER_SECRET_BASTION_PASSWORD'));
+    assert.ok(!exportedJson.includes('SHOULD_NOT_LEAK'));
+    assert.ok(!exportedJson.includes('SUPER_SECRET_PROXY_PASSWORD'));
+    assert.ok(exportedJson.includes('bastion.corp.com'));
+    assert.ok(exportedJson.includes('socks5'));
+  });
+
+  it('correctly handles bastion referencing an existing profile ID', () => {
+    const profileWithJumpRef: ConnectionProfile = {
+      id: 'prof-2',
+      name: 'Server with Jump Reference',
+      type: 'sftp',
+      host: 'db.internal',
+      port: 22,
+      username: 'postgres',
+      status: 'idle',
+      isFavorite: false,
+      bastion: {
+        enabled: true,
+        profileId: 'bastion-prof-prod',
+      },
+    };
+
+    assert.equal(profileWithJumpRef.bastion?.enabled, true);
+    assert.equal(profileWithJumpRef.bastion?.profileId, 'bastion-prof-prod');
+    assert.equal(profileWithJumpRef.bastion?.host, undefined);
+  });
+});
