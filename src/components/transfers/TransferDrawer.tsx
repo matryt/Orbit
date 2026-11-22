@@ -20,10 +20,18 @@ import {
   Loader2,
 } from 'lucide-react';
 
-const GroupRow: React.FC<{ group: TransferGroup; files: TransferItem[]; onCancel: () => void }> = ({
+const GroupRow: React.FC<{
+  group: TransferGroup;
+  files: TransferItem[];
+  onCancel: () => void;
+  onPause: () => void;
+  onResume: () => void;
+}> = ({
   group,
   files,
   onCancel,
+  onPause,
+  onResume,
 }) => {
   const [showFailures, setShowFailures] = React.useState(false);
   const s = summarizeGroup(group, files);
@@ -96,6 +104,24 @@ const GroupRow: React.FC<{ group: TransferGroup; files: TransferItem[]; onCancel
           </div>
 
           <div className="flex items-center gap-1 border-l border-border-subtle pl-2">
+            {(s.status === 'transferring' || (s.status === 'queued' && !group.paused)) && (
+              <button
+                onClick={onPause}
+                className="p-1 rounded hover:bg-amber-500/20 text-zinc-400 hover:text-amber-300 transition-colors"
+                title="Mettre en pause le dossier"
+              >
+                <Pause className="w-3 h-3" />
+              </button>
+            )}
+            {(s.status === 'paused' || group.paused) && (
+              <button
+                onClick={onResume}
+                className="p-1 rounded hover:bg-emerald-500/20 text-zinc-400 hover:text-emerald-300 transition-colors"
+                title="Reprendre le transfert du dossier"
+              >
+                <Play className="w-3 h-3" />
+              </button>
+            )}
             {canCancel && (
               <button
                 onClick={onCancel}
@@ -163,6 +189,8 @@ export const TransferDrawer: React.FC = () => {
     cancelTransfer,
     clearCompletedTransfers,
     transferGroups,
+    pauseTransferGroup,
+    resumeTransferGroup,
     cancelTransferGroup,
   } = useOrbitStore();
 
@@ -266,6 +294,8 @@ export const TransferDrawer: React.FC = () => {
             group={group}
             files={childrenOf(group.id)}
             onCancel={() => cancelTransferGroup(group.id)}
+            onPause={() => pauseTransferGroup(group.id)}
+            onResume={() => resumeTransferGroup(group.id)}
           />
         ))}
         {transfers.filter((tx) => !tx.groupId).map((tx) => {

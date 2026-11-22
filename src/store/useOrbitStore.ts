@@ -12,7 +12,13 @@ import {
   planFolderTransfer,
   shouldRefreshAfterSettle,
 } from '../lib/transferGroups';
-import { applyProgress, generateTransferId, isFinishedStatus, pickTransfersToStart } from '../lib/transferQueue';
+import {
+  MAX_CONCURRENT_TRANSFERS,
+  applyProgress,
+  generateTransferId,
+  isFinishedStatus,
+  pickTransfersToStart,
+} from '../lib/transferQueue';
 import {
   ConflictDecision,
   ConflictPrompt,
@@ -145,6 +151,8 @@ interface OrbitState {
     profileId?: string;
   }) => Promise<void>;
   transferGroups: TransferGroup[];
+  pauseTransferGroup: (groupId: string) => void;
+  resumeTransferGroup: (groupId: string) => void;
   cancelTransferGroup: (groupId: string) => void;
   transferConflict: TransferConflictPrompt | null;
   /** Answers the current conflict prompt; `null` cancels the whole batch. */
@@ -248,17 +256,21 @@ function enqueueTransferBatch(set: StoreSet, get: StoreGet, batch: EnqueueParams
 let conflictResolver: ((decision: ConflictDecision | null) => void) | null = null;
 /** Folder transfer that owns the current prompt, so cancelling the folder can close it. */
 let conflictGroupId: string | null = null;
+/** Profile of the batch currently asking or planning conflicts. */
+let conflictProfileId: string | null = null;
 /** Batches are planned one at a time so their conflict prompts never overlap. */
 let batchChain: Promise<void> = Promise.resolve();
 
 function askConflict(
   set: StoreSet,
   prompt: TransferConflictPrompt,
-  groupId?: string
+  groupId?: string,
+  profileId?: string
 ): Promise<ConflictDecision | null> {
   return new Promise((resolve) => {
     conflictResolver = resolve;
     conflictGroupId = groupId ?? null;
+    conflictProfileId = profileId ?? null;
     set(() => ({ transferConflict: prompt }));
   });
 }
@@ -323,7 +335,7 @@ function planBatch<T extends TransferRequest>(
       group?.isCancelled()
         ? Promise.resolve(new NameSet(direction === 'download'))
         : loadTakenNames(get, direction, dir, profileId),
-    ask: (prompt) => (group?.isCancelled() ? Promise.resolve(null) : askConflict(set, prompt, group?.id)),
+    ask: (prompt) => (group?.isCancelled() ? Promise.resolve(null) : askConflict(set, prompt, group?.id, profileId)),
   });
 }
 
@@ -512,14 +524,26 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   disconnectProfile: async (id: string) => {
-    // Queued transfers on this profile can no longer start; running ones are
+    // Dismiss/cancel any conflict prompts currently open for this session
+    if (
+      conflictProfileId === id ||
+      (conflictGroupId && get().transferGroups.find((g) => g.id === conflictGroupId)?.profileId === id)
+    ) {
+      get().resolveTransferConflict(null);
+    }
+
+    // Queued and paused transfers on this profile can no longer continue; running ones are
     // cancelled on the Rust side by the `disconnect` command.
     set((state) => ({
       transfers: state.transfers.map((tx) =>
-        tx.profileId === id && tx.status === 'queued' ? { ...tx, status: 'cancelled' as const } : tx
+        tx.profileId === id && (tx.status === 'queued' || tx.status === 'paused')
+          ? { ...tx, status: 'cancelled' as const }
+          : tx
       ),
       transferGroups: state.transferGroups.map((g) =>
-        g.profileId === id && g.phase === 'scanning' ? { ...g, phase: 'cancelled' as const } : g
+        g.profileId === id && (g.phase === 'scanning' || g.phase === 'ready')
+          ? { ...g, phase: 'cancelled' as const, paused: false }
+          : g
       ),
     }));
     try {
@@ -1040,6 +1064,13 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     storageApi.pauseTransfer(id).catch((err) => {
       console.error('[Orbit] Pause failed:', err);
       updateTransfer(set, id, { status: 'transferring' }, ['paused']);
+      if (tx.groupId) {
+        set((state) => ({
+          transferGroups: state.transferGroups.map((g) =>
+            g.id === tx.groupId ? { ...g, paused: false } : g
+          ),
+        }));
+      }
     });
   },
 
@@ -1096,8 +1127,13 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     const checkConflicts = options?.checkConflicts ?? true;
 
     const run = async () => {
+      const profile = get().profiles.find((p) => p.id === profileId);
+      if (!profile || profile.status !== 'connected') return;
+
       const planned = checkConflicts ? await planBatch(set, get, requests, profileId) : requests;
       if (!planned) return;
+
+      if (get().profiles.find((p) => p.id === profileId)?.status !== 'connected') return;
       enqueueTransferBatch(set, get, planned, profileId);
     };
     batchChain = batchChain.then(run).catch((err) => console.error('[Orbit] Failed to enqueue transfers:', err));
@@ -1140,8 +1176,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
     const run = async () => {
       try {
-        // Cancelled while waiting behind earlier batches: skip the (possibly large) walk.
-        if (isCancelled()) return;
+        // Cancelled or disconnected while waiting behind earlier batches: skip the (possibly large) walk.
+        if (isCancelled() || get().profiles.find((p) => p.id === profileId)?.status !== 'connected') return;
         const entries =
           direction === 'upload'
             ? (await storageApi.walkLocal(sourcePath)).entries
@@ -1204,12 +1240,44 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     return batchChain;
   },
 
+  pauseTransferGroup: (groupId) => {
+    set((state) => ({
+      transferGroups: state.transferGroups.map((g) =>
+        g.id === groupId ? { ...g, paused: true } : g
+      ),
+    }));
+    for (const tx of get().transfers) {
+      if (tx.groupId === groupId && tx.status === 'transferring') {
+        get().pauseTransfer(tx.id);
+      }
+    }
+  },
+
+  resumeTransferGroup: (groupId) => {
+    set((state) => ({
+      transferGroups: state.transferGroups.map((g) =>
+        g.id === groupId ? { ...g, paused: false } : g
+      ),
+    }));
+    const runningCount = get().transfers.filter((t) => t.status === 'transferring').length;
+    let availableSlots = Math.max(0, MAX_CONCURRENT_TRANSFERS - runningCount);
+    for (const tx of get().transfers) {
+      if (tx.groupId === groupId && tx.status === 'paused') {
+        if (availableSlots > 0) {
+          get().resumeTransfer(tx.id);
+          availableSlots--;
+        }
+      }
+    }
+    get().processTransferQueue();
+  },
+
   cancelTransferGroup: (groupId) => {
     const group = get().transferGroups.find((g) => g.id === groupId);
     if (!group) return;
     if (group.phase === 'scanning' || group.phase === 'ready') {
       set((state) => ({
-        transferGroups: state.transferGroups.map((g) => (g.id === groupId ? { ...g, phase: 'cancelled' } : g)),
+        transferGroups: state.transferGroups.map((g) => (g.id === groupId ? { ...g, phase: 'cancelled', paused: false } : g)),
       }));
     }
     // Close the folder's pending conflict prompt: its answer no longer matters.
@@ -1224,12 +1292,16 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     const resolve = conflictResolver;
     conflictResolver = null;
     conflictGroupId = null;
+    conflictProfileId = null;
     set({ transferConflict: null });
     resolve?.(decision);
   },
 
   processTransferQueue: () => {
-    const toStart = pickTransfersToStart(get().transfers);
+    const pausedGroupIds = new Set(
+      get().transferGroups.filter((g) => g.paused).map((g) => g.id)
+    );
+    const toStart = pickTransfersToStart(get().transfers, MAX_CONCURRENT_TRANSFERS, pausedGroupIds);
     if (toStart.length === 0) return;
     set((state) => ({
       transfers: state.transfers.map((tx) =>
