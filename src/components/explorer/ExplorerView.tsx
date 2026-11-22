@@ -657,6 +657,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
             {!isLocal && isSftp && (
               <button
                 type="button"
+                onKeyDown={(e) => e.stopPropagation()}
                 onClick={() => openExternalTerminal(currentPath)}
                 className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white transition-colors ml-1"
                 title={`Ouvrir dans le terminal (${currentPath})`}

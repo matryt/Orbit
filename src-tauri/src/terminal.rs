@@ -18,13 +18,29 @@ pub fn escape_single_quotes(path: &str) -> String {
     path.replace('\'', "'\\''")
 }
 
-/// Construit la spécification Jump Host / Bastion pour OpenSSH (`-J [user@]host[:port]`).
-pub fn build_bastion_spec(
+/// Échappe un argument pour le shell POSIX en l'entourant d'apostrophes simples.
+pub fn posix_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// Échappe un argument pour PowerShell en l'entourant d'apostrophes simples (`' -> ''`).
+pub fn powershell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "''"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BastionRouting {
+    JumpHost(String),
+    ProxyCommand(String),
+}
+
+/// Construit la spécification Jump Host / ProxyCommand pour le bastion.
+pub fn build_bastion_routing(
     bastion: &BastionConfig,
     all_profiles: &[ConnectionProfile],
-) -> Option<String> {
+) -> Result<Option<BastionRouting>, String> {
     if !bastion.enabled {
-        return None;
+        return Ok(None);
     }
 
     let b_prof = bastion
@@ -35,12 +51,10 @@ pub fn build_bastion_spec(
     let host = bastion
         .host
         .as_deref()
-        .or_else(|| b_prof.and_then(|p| p.host.as_deref()))?;
-
-    let host_trimmed = host.trim();
-    if host_trimmed.is_empty() {
-        return None;
-    }
+        .or_else(|| b_prof.and_then(|p| p.host.as_deref()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Configuration de bastion invalide : aucun hôte spécifié".to_string())?;
 
     let user = bastion
         .username
@@ -54,18 +68,44 @@ pub fn build_bastion_spec(
         .or_else(|| b_prof.and_then(|p| p.port))
         .unwrap_or(22);
 
+    let key_path = bastion
+        .key_path
+        .as_deref()
+        .or_else(|| b_prof.and_then(|p| p.key_path.as_deref()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    // Encadrement des adresses IPv6 littérales
+    let host_bracketed = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+
+    // Si une clé privée spécifique est requise pour le bastion, passer par ProxyCommand
+    if let Some(kp) = key_path {
+        let resolved_key = resolve_home_path(kp);
+        let target = match user {
+            Some(u) => format!("{u}@{host_bracketed}"),
+            None => host_bracketed,
+        };
+        let proxy_cmd = format!("ssh -W %h:%p -i '{resolved_key}' -p {port} {target}");
+        return Ok(Some(BastionRouting::ProxyCommand(proxy_cmd)));
+    }
+
+    // Sinon, syntaxe standard OpenSSH Jump Host (-J [user@]host[:port])
     let mut spec = String::new();
     if let Some(u) = user {
         spec.push_str(u);
         spec.push('@');
     }
-    spec.push_str(host_trimmed);
+    spec.push_str(&host_bracketed);
     if port != 22 && port != 0 {
         spec.push(':');
         spec.push_str(&port.to_string());
     }
 
-    Some(spec)
+    Ok(Some(BastionRouting::JumpHost(spec)))
 }
 
 /// Construit la liste des arguments pour le binaire OpenSSH `ssh`.
@@ -94,9 +134,17 @@ pub fn build_ssh_args(
     args.push(port.to_string());
 
     if let Some(ref bastion) = profile.bastion {
-        if let Some(spec) = build_bastion_spec(bastion, all_profiles) {
-            args.push("-J".to_string());
-            args.push(spec);
+        if let Some(routing) = build_bastion_routing(bastion, all_profiles)? {
+            match routing {
+                BastionRouting::JumpHost(spec) => {
+                    args.push("-J".to_string());
+                    args.push(spec);
+                }
+                BastionRouting::ProxyCommand(cmd) => {
+                    args.push("-o".to_string());
+                    args.push(format!("ProxyCommand={cmd}"));
+                }
+            }
         }
     }
 
@@ -109,6 +157,16 @@ pub fn build_ssh_args(
         }
     }
 
+    // Dans la syntaxe OpenSSH (ssh [options] [user@]hostname [command]),
+    // les options (-t) DOIVENT obligatoirement précéder la cible (hostname).
+    let has_remote_cmd = match remote_path {
+        Some(path) if !path.is_empty() => {
+            args.push("-t".to_string());
+            true
+        }
+        _ => false,
+    };
+
     let target = match profile
         .username
         .as_deref()
@@ -120,38 +178,29 @@ pub fn build_ssh_args(
     };
     args.push(target);
 
-    if let Some(path) = remote_path {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            args.push("-t".to_string());
-            let escaped_path = escape_single_quotes(trimmed);
-            args.push(format!("cd '{}' && exec $SHELL -l", escaped_path));
-        }
+    // La commande distante suit le nom d'hôte cible.
+    if has_remote_cmd {
+        let path = remote_path.unwrap();
+        let escaped_path = escape_single_quotes(path);
+        args.push(format!("cd '{}' && exec $SHELL -l", escaped_path));
     }
 
     Ok(args)
 }
 
-/// Formate la commande SSH complète sous forme de chaîne pour les shells ou terminaux.
-pub fn format_ssh_command_line(args: &[String]) -> String {
+/// Formate la ligne de commande avec un quoting strict POSIX pour les scripts shells / macOS.
+pub fn format_posix_command_line(args: &[String]) -> String {
     let mut parts = vec!["ssh".to_string()];
     for arg in args {
-        if arg.contains(' ')
-            || arg.contains('\t')
-            || arg.contains('\'')
-            || arg.contains('"')
-            || arg.contains('$')
-        {
-            let escaped = arg
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('$', "\\$");
-            parts.push(format!("\"{escaped}\""));
-        } else {
-            parts.push(arg.clone());
-        }
+        parts.push(posix_quote(arg));
     }
     parts.join(" ")
+}
+
+/// Formate la ligne de commande pour PowerShell sous Windows (évite l'interpolation locale de $SHELL).
+pub fn format_powershell_command_line(args: &[String]) -> String {
+    let quoted_args: Vec<String> = args.iter().map(|a| powershell_quote(a)).collect();
+    format!("& ssh @({})", quoted_args.join(", "))
 }
 
 /// Cherche un exécutable dans la variable d'environnement PATH.
@@ -182,21 +231,20 @@ pub fn launch_terminal(
     remote_path: Option<&str>,
 ) -> Result<(), String> {
     let ssh_args = build_ssh_args(profile, all_profiles, remote_path)?;
-    let ssh_cmd = format_ssh_command_line(&ssh_args);
 
     #[cfg(target_os = "macos")]
     {
-        launch_macos(&ssh_cmd, &ssh_args)
+        launch_macos(&ssh_args)
     }
 
     #[cfg(target_os = "windows")]
     {
-        launch_windows(profile, &ssh_cmd, &ssh_args)
+        launch_windows(profile, &ssh_args, remote_path.is_some())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        launch_linux(&ssh_cmd, &ssh_args)
+        launch_linux(&ssh_args)
     }
 }
 
@@ -204,11 +252,13 @@ pub fn launch_terminal(
 // Adaptateur macOS
 // ---------------------------------------------------------------------------
 #[cfg(target_os = "macos")]
-fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
+fn launch_macos(ssh_args: &[String]) -> Result<(), String> {
     let iterm_available = Path::new("/Applications/iTerm.app").exists()
         || dirs::home_dir()
             .map(|h| h.join("Applications/iTerm.app").exists())
             .unwrap_or(false);
+
+    let posix_cmd = format_posix_command_line(ssh_args);
 
     // Méthode 1 (Privilégiée) : Lancement natif via script .command avec `open`
     // Cette approche évite l'erreur AppleEvents -1743 (TCC / Privacy Automation)
@@ -223,7 +273,7 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
     let script_content = format!(
         "#!/bin/sh\n\
         rm -f \"$0\"\n\
-        {ssh_cmd}\n\
+        {posix_cmd}\n\
         STATUS=$?\n\
         if [ $STATUS -ne 0 ]; then\n\
             echo \"\"\n\
@@ -233,13 +283,22 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
         fi\n"
     );
 
-    std::fs::write(&script_path, &script_content)
-        .map_err(|e| format!("Impossible de créer le script temporaire pour Terminal: {e}"))?;
-
+    // O_CREAT | O_EXCL via create_new(true) empêche formellement de suivre un lien symbolique préexistant
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&script_path)
+            .map_err(|e| format!("Impossible de créer le script temporaire pour Terminal: {e}"))?;
+
+        file.write_all(script_content.as_bytes())
+            .map_err(|e| format!("Impossible d'écrire dans le script temporaire: {e}"))?;
     }
 
     // Si iTerm2 est présent, tenter avec iTerm
@@ -282,7 +341,7 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
     }
 
     // Méthode 2 : Fallback AppleScript si disponible et autorisé
-    let escaped_cmd = ssh_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_cmd = posix_cmd.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         "tell application \"Terminal\"\n\
             activate\n\
@@ -306,8 +365,8 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn launch_windows(
     profile: &ConnectionProfile,
-    ssh_cmd: &str,
     ssh_args: &[String],
+    has_remote_path: bool,
 ) -> Result<(), String> {
     // Priorité 1 : Windows Terminal (`wt.exe -d . ssh ...`)
     let wt_found = find_in_path("wt").is_some()
@@ -324,53 +383,60 @@ fn launch_windows(
     }
 
     // Priorité 2 : PuTTY (`putty.exe -ssh -P <port> -l <user> -i <key> <host>`)
-    let putty_candidates = [
-        find_in_path("putty"),
-        Some(PathBuf::from("C:\\Program Files\\PuTTY\\putty.exe")),
-        Some(PathBuf::from("C:\\Program Files (x86)\\PuTTY\\putty.exe")),
-    ];
-    let putty_path = putty_candidates.into_iter().flatten().find(|p| p.exists());
+    // NOTA : PuTTY ne supporte pas -J ni l'allocation de shell avec commande distante.
+    // Si un bastion ou un dossier distant est requis, on bascule vers OpenSSH PowerShell.
+    let bastion_active = profile.bastion.as_ref().map(|b| b.enabled).unwrap_or(false);
+    if !bastion_active && !has_remote_path {
+        let putty_candidates = [
+            find_in_path("putty"),
+            Some(PathBuf::from("C:\\Program Files\\PuTTY\\putty.exe")),
+            Some(PathBuf::from("C:\\Program Files (x86)\\PuTTY\\putty.exe")),
+        ];
+        let putty_path = putty_candidates.into_iter().flatten().find(|p| p.exists());
 
-    if let Some(putty_bin) = putty_path {
-        let mut cmd = Command::new(putty_bin);
-        cmd.arg("-ssh");
-        let port = profile.port.unwrap_or(22);
-        cmd.args(["-P", &port.to_string()]);
+        if let Some(putty_bin) = putty_path {
+            let mut cmd = Command::new(putty_bin);
+            cmd.arg("-ssh");
+            let port = profile.port.unwrap_or(22);
+            cmd.args(["-P", &port.to_string()]);
 
-        if let Some(ref u) = profile.username {
-            let trimmed = u.trim();
-            if !trimmed.is_empty() {
-                cmd.args(["-l", trimmed]);
+            if let Some(ref u) = profile.username {
+                let trimmed = u.trim();
+                if !trimmed.is_empty() {
+                    cmd.args(["-l", trimmed]);
+                }
             }
-        }
 
-        if let Some(ref kp) = profile.key_path {
-            let trimmed = kp.trim();
-            if !trimmed.is_empty() {
-                cmd.args(["-i", &resolve_home_path(trimmed)]);
+            if let Some(ref kp) = profile.key_path {
+                let trimmed = kp.trim();
+                if !trimmed.is_empty() {
+                    cmd.args(["-i", &resolve_home_path(trimmed)]);
+                }
             }
-        }
 
-        if let Some(ref h) = profile.host {
-            cmd.arg(h.trim());
-        }
+            if let Some(ref h) = profile.host {
+                cmd.arg(h.trim());
+            }
 
-        if let Ok(_) = cmd.spawn() {
-            return Ok(());
+            if let Ok(_) = cmd.spawn() {
+                return Ok(());
+            }
         }
     }
 
-    // Fallback 1 : PowerShell
+    // Fallback 1 : PowerShell avec arguments littéraux (évite l'expansion locale de $SHELL)
+    let ps_cmd = format_powershell_command_line(ssh_args);
     if let Ok(_) = Command::new("powershell.exe")
-        .args(["-NoExit", "-Command", ssh_cmd])
+        .args(["-NoExit", "-Command", &ps_cmd])
         .spawn()
     {
         return Ok(());
     }
 
     // Fallback 2 : cmd.exe
+    let posix_cmd = format_posix_command_line(ssh_args);
     Command::new("cmd.exe")
-        .args(["/c", "start", "cmd.exe", "/k", ssh_cmd])
+        .args(["/c", "start", "cmd.exe", "/k", &posix_cmd])
         .spawn()
         .map_err(|e| format!("Échec du lancement du terminal sous Windows: {e}"))?;
 
@@ -381,13 +447,18 @@ fn launch_windows(
 // Adaptateur Linux & Unix
 // ---------------------------------------------------------------------------
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn launch_linux(_ssh_cmd: &str, ssh_args: &[String]) -> Result<(), String> {
+fn launch_linux(ssh_args: &[String]) -> Result<(), String> {
     // 1. Variable $TERMINAL si définie
     if let Ok(term) = std::env::var("TERMINAL") {
         let trimmed = term.trim();
         if !trimmed.is_empty() {
+            let opt = if trimmed.contains("xfce4-terminal") {
+                "-x"
+            } else {
+                "-e"
+            };
             if let Ok(_) = Command::new(trimmed)
-                .arg("-e")
+                .arg(opt)
                 .arg("ssh")
                 .args(ssh_args)
                 .spawn()
@@ -415,6 +486,9 @@ fn launch_linux(_ssh_cmd: &str, ssh_args: &[String]) -> Result<(), String> {
                 "gnome-terminal" => {
                     cmd.arg("--").arg("ssh").args(ssh_args);
                 }
+                "xfce4-terminal" => {
+                    cmd.arg("-x").arg("ssh").args(ssh_args);
+                }
                 "kitty" => {
                     cmd.arg("ssh").args(ssh_args);
                 }
@@ -429,7 +503,10 @@ fn launch_linux(_ssh_cmd: &str, ssh_args: &[String]) -> Result<(), String> {
         }
     }
 
-    Err("Aucun émulateur de terminal pris en charge n'a été détecté (x-terminal-emulator, gnome-terminal, konsole, kitty, alacritty, xterm).".to_string())
+    Err(
+        "Aucun émulateur de terminal pris en charge n'a été détecté (x-terminal-emulator, gnome-terminal, konsole, kitty, alacritty, xfce4-terminal, xterm)."
+            .to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +552,19 @@ mod tests {
     }
 
     #[test]
+    fn test_posix_quote() {
+        assert_eq!(posix_quote("normal"), "'normal'");
+        assert_eq!(posix_quote("has space and $VAR"), "'has space and $VAR'");
+        assert_eq!(posix_quote("has 'quote'"), "'has '\\''quote'\\'''");
+    }
+
+    #[test]
+    fn test_powershell_quote() {
+        assert_eq!(powershell_quote("normal"), "'normal'");
+        assert_eq!(powershell_quote("has 'quote'"), "'has ''quote'''");
+    }
+
+    #[test]
     fn test_build_ssh_args_simple() {
         let prof = create_dummy_profile(
             "p1",
@@ -506,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_ssh_args_with_remote_path() {
+    fn test_build_ssh_args_with_remote_path_order_and_whitespace() {
         let prof = create_dummy_profile(
             "p3",
             "sftp",
@@ -515,21 +605,23 @@ mod tests {
             Some("deploy"),
             None,
         );
-        let args = build_ssh_args(&prof, &[], Some("/var/www/my app's folder")).unwrap();
+        // Doit préserver les espaces début/fin sans trim
+        let args = build_ssh_args(&prof, &[], Some(" /var/www/my app's folder ")).unwrap();
+        // -t DOIT précéder la destination deploy@server.org
         assert_eq!(
             args,
             vec![
                 "-p",
                 "22",
-                "deploy@server.org",
                 "-t",
-                "cd '/var/www/my app'\\''s folder' && exec $SHELL -l"
+                "deploy@server.org",
+                "cd ' /var/www/my app'\\''s folder ' && exec $SHELL -l"
             ]
         );
     }
 
     #[test]
-    fn test_build_ssh_args_inline_bastion() {
+    fn test_build_ssh_args_inline_bastion_ipv6() {
         let mut prof = create_dummy_profile(
             "p4",
             "sftp",
@@ -541,7 +633,7 @@ mod tests {
         prof.bastion = Some(BastionConfig {
             enabled: true,
             profile_id: None,
-            host: Some("jump.example.com".to_string()),
+            host: Some("2001:db8::1".to_string()),
             port: Some(2200),
             username: Some("bastionuser".to_string()),
             auth_type: None,
@@ -557,28 +649,60 @@ mod tests {
                 "-p",
                 "22",
                 "-J",
-                "bastionuser@jump.example.com:2200",
+                "bastionuser@[2001:db8::1]:2200",
                 "root@target.internal"
             ]
         );
     }
 
     #[test]
-    fn test_build_ssh_args_referenced_bastion_profile() {
-        let bastion_prof = create_dummy_profile(
-            "bastion-profile-id",
+    fn test_build_ssh_args_bastion_with_key_uses_proxy_command() {
+        let mut prof = create_dummy_profile(
+            "p5",
             "sftp",
-            Some("jump.company.com"),
+            Some("target.internal"),
             Some(22),
-            Some("secops"),
+            Some("root"),
             None,
         );
-
-        let mut prof =
-            create_dummy_profile("p5", "sftp", Some("prod.db"), Some(22), Some("dba"), None);
         prof.bastion = Some(BastionConfig {
             enabled: true,
-            profile_id: Some("bastion-profile-id".to_string()),
+            profile_id: None,
+            host: Some("jump.example.com".to_string()),
+            port: Some(2222),
+            username: Some("jumpuser".to_string()),
+            auth_type: Some("key".to_string()),
+            key_path: Some("/tmp/jump_key".to_string()),
+            password: None,
+            passphrase: None,
+        });
+
+        let args = build_ssh_args(&prof, &[], None).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "22",
+                "-o",
+                "ProxyCommand=ssh -W %h:%p -i '/tmp/jump_key' -p 2222 jumpuser@jump.example.com",
+                "root@target.internal"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_ssh_args_invalid_bastion_returns_error() {
+        let mut prof = create_dummy_profile(
+            "p6",
+            "sftp",
+            Some("target.internal"),
+            Some(22),
+            Some("root"),
+            None,
+        );
+        prof.bastion = Some(BastionConfig {
+            enabled: true,
+            profile_id: None,
             host: None,
             port: None,
             username: None,
@@ -588,35 +712,41 @@ mod tests {
             passphrase: None,
         });
 
-        let args = build_ssh_args(&prof, &[bastion_prof], None).unwrap();
-        assert_eq!(
-            args,
-            vec!["-p", "22", "-J", "secops@jump.company.com", "dba@prod.db"]
-        );
+        let err = build_ssh_args(&prof, &[], None).unwrap_err();
+        assert!(err.contains("Configuration de bastion invalide"));
     }
 
     #[test]
     fn test_build_ssh_args_rejects_s3() {
-        let prof = create_dummy_profile("p6", "s3", Some("bucket"), None, None, None);
+        let prof = create_dummy_profile("p7", "s3", Some("bucket"), None, None, None);
         let err = build_ssh_args(&prof, &[], None).unwrap_err();
         assert!(err.contains("SFTP"));
     }
 
     #[test]
-    fn test_format_ssh_command_line() {
+    fn test_format_posix_command_line() {
         let args = vec![
             "-p".to_string(),
             "22".to_string(),
-            "-J".to_string(),
-            "jump.com".to_string(),
-            "user@target".to_string(),
             "-t".to_string(),
+            "user@target".to_string(),
             "cd '/var/log' && exec $SHELL -l".to_string(),
         ];
-        let cmd = format_ssh_command_line(&args);
+        let cmd = format_posix_command_line(&args);
         assert_eq!(
             cmd,
-            "ssh -p 22 -J jump.com user@target -t \"cd '/var/log' && exec \\$SHELL -l\""
+            "ssh '-p' '22' '-t' 'user@target' 'cd '\\''/var/log'\\'' && exec $SHELL -l'"
         );
+    }
+
+    #[test]
+    fn test_format_powershell_command_line() {
+        let args = vec![
+            "-p".to_string(),
+            "22".to_string(),
+            "user@target".to_string(),
+        ];
+        let cmd = format_powershell_command_line(&args);
+        assert_eq!(cmd, "& ssh @('-p', '22', 'user@target')");
     }
 }

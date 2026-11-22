@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferGroup, TransferItem, UpdateCheckResult } from '../types';
 import { MOCK_REMOTE_FILES } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
-import { buildNewFolderPath, buildRenamePath } from '../lib/pathUtils';
+import { buildNewFolderPath, buildRenamePath, canOpenTerminal, resolveTerminalTargetPath } from '../lib/pathUtils';
 import {
   findFileDirCollisions,
   folderDestination,
@@ -752,12 +752,14 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   openExternalTerminal: async (remotePath?: string) => {
     const { activeProfileId, profiles, currentPath } = get();
     const profile = profiles.find((p) => p.id === activeProfileId);
-    if (!profile || profile.type !== 'sftp') return;
+    if (!canOpenTerminal(profile)) return;
 
-    const targetPath = remotePath ?? currentPath;
+    const initiatingProfileId = activeProfileId;
+    const targetPath = resolveTerminalTargetPath(remotePath, currentPath);
     try {
-      await storageApi.openInExternalTerminal(activeProfileId, targetPath);
+      await storageApi.openInExternalTerminal(initiatingProfileId, targetPath);
     } catch (err: any) {
+      if (get().activeProfileId !== initiatingProfileId) return;
       const errMsg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
       console.error('Failed to open external terminal:', errMsg);
       set({ connectionError: `Erreur terminal : ${errMsg}` });
