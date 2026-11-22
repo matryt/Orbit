@@ -208,44 +208,30 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
             .map(|h| h.join("Applications/iTerm.app").exists())
             .unwrap_or(false);
 
-    // Tentative 1 : iTerm2 via AppleScript si présent
-    if iterm_available {
-        let escaped_cmd = ssh_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        let script = format!(
-            "tell application \"iTerm\"\n\
-                activate\n\
-                set newWindow to (create window with default profile)\n\
-                tell current session of newWindow\n\
-                    write text \"{escaped_cmd}\"\n\
-                end tell\n\
-            end tell"
-        );
-        if let Ok(mut child) = Command::new("osascript").arg("-e").arg(&script).spawn() {
-            let _ = child.wait();
-            return Ok(());
-        }
-    }
-
-    // Tentative 2 : Terminal.app par défaut via AppleScript
-    let escaped_cmd = ssh_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "tell application \"Terminal\"\n\
-            activate\n\
-            do script \"{escaped_cmd}\"\n\
-        end tell"
-    );
-    if let Ok(mut child) = Command::new("osascript").arg("-e").arg(&script).spawn() {
-        let _ = child.wait();
-        return Ok(());
-    }
-
-    // Tentative 3 : Fallback via script .command exécuté par `open` (évite les restrictions TCC/Automation)
+    // Méthode 1 (Privilégiée) : Lancement natif via script .command avec `open`
+    // Cette approche évite l'erreur AppleEvents -1743 (TCC / Privacy Automation)
     let temp_dir = std::env::temp_dir();
-    let script_filename = format!("orbit-ssh-{}.command", std::process::id());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let script_filename = format!("orbit-ssh-{}-{now}.command", std::process::id());
     let script_path = temp_dir.join(script_filename);
 
-    let script_content = format!("#!/bin/sh\nexec {ssh_cmd}\n");
-    std::fs::write(&script_path, script_content)
+    let script_content = format!(
+        "#!/bin/sh\n\
+        rm -f \"$0\"\n\
+        {ssh_cmd}\n\
+        STATUS=$?\n\
+        if [ $STATUS -ne 0 ]; then\n\
+            echo \"\"\n\
+            echo \"La commande SSH s'est terminée avec le code $STATUS.\"\n\
+            echo \"Appuyez sur Entrée pour fermer cette fenêtre...\"\n\
+            read -r _\n\
+        fi\n"
+    );
+
+    std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Impossible de créer le script temporaire pour Terminal: {e}"))?;
 
     #[cfg(unix)]
@@ -254,14 +240,62 @@ fn launch_macos(ssh_cmd: &str, _ssh_args: &[String]) -> Result<(), String> {
         let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
     }
 
-    Command::new("open")
+    // Si iTerm2 est présent, tenter avec iTerm
+    if iterm_available {
+        if let Ok(mut child) = Command::new("open")
+            .arg("-a")
+            .arg("iTerm")
+            .arg(&script_path)
+            .spawn()
+        {
+            if let Ok(status) = child.wait() {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Ouvrir avec Terminal.app via `open -a Terminal`
+    if let Ok(mut child) = Command::new("open")
         .arg("-a")
         .arg("Terminal")
         .arg(&script_path)
         .spawn()
-        .map_err(|e| format!("Échec du lancement de Terminal.app: {e}"))?;
+    {
+        if let Ok(status) = child.wait() {
+            if status.success() {
+                return Ok(());
+            }
+        }
+    }
 
-    Ok(())
+    // Fallback `open <script>` (ouvre avec l'application par défaut pour .command)
+    if let Ok(mut child) = Command::new("open").arg(&script_path).spawn() {
+        if let Ok(status) = child.wait() {
+            if status.success() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Méthode 2 : Fallback AppleScript si disponible et autorisé
+    let escaped_cmd = ssh_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "tell application \"Terminal\"\n\
+            activate\n\
+            do script \"{escaped_cmd}\"\n\
+        end tell"
+    );
+    if let Ok(mut child) = Command::new("osascript").arg("-e").arg(&script).spawn() {
+        if let Ok(status) = child.wait() {
+            if status.success() {
+                return Ok(());
+            }
+        }
+    }
+
+    Err("Impossible d'ouvrir le terminal sous macOS (échec de open et osascript).".to_string())
 }
 
 // ---------------------------------------------------------------------------
