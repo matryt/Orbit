@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { X, Copy, Check, Download, Shield } from 'lucide-react';
+import { sanitizeProfileForExport } from '../../lib/profileExport';
 
 export const ExportProfilesModal: React.FC = () => {
   const { isExportModalOpen, setExportModalOpen, profiles } = useOrbitStore();
@@ -8,14 +9,7 @@ export const ExportProfilesModal: React.FC = () => {
 
   if (!isExportModalOpen) return null;
 
-  // Sanitized profiles: no secret keys or passwords
-  const sanitizedProfiles = profiles.map(({ id, name, type, endpoint, bucket, region, accessKey, host, port, username, isFavorite }) => ({
-    id,
-    name,
-    type,
-    ...(type === 's3' ? { endpoint, bucket, region, accessKey } : { host, port, username }),
-    isFavorite,
-  }));
+  const sanitizedProfiles = profiles.map(sanitizeProfileForExport);
 
   const jsonString = JSON.stringify(sanitizedProfiles, null, 2);
 

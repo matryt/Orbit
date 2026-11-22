@@ -22,6 +22,10 @@ pub struct ConnectionProfile {
     pub is_favorite: bool,
     #[serde(rename = "useSudo", default)]
     pub use_sudo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bastion: Option<BastionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +50,44 @@ pub struct TransferProgress {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BastionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(rename = "profileId", default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(rename = "authType", default, skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
+    #[serde(rename = "keyPath", default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(rename = "proxyType", default, skip_serializing_if = "Option::is_none")]
+    pub proxy_type: Option<String>, // "socks5" | "http"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftpConnectConfig {
     pub profile_id: String,
@@ -58,6 +100,10 @@ pub struct SftpConnectConfig {
     #[serde(default)]
     pub use_sudo: bool,
     pub sudo_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bastion: Option<BastionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,5 +193,47 @@ mod tests {
         }"#;
         let profile_omitted: ConnectionProfile = serde_json::from_str(json_omitted).unwrap();
         assert!(!profile_omitted.use_sudo);
+    }
+
+    #[test]
+    fn test_connection_profile_bastion_and_proxy_serde() {
+        let json = r#"{
+            "id": "prof-with-jump",
+            "name": "Jump Server",
+            "type": "sftp",
+            "host": "internal.lan",
+            "port": 22,
+            "username": "deploy",
+            "bastion": {
+                "enabled": true,
+                "profileId": "prof-bastion-1"
+            },
+            "proxy": {
+                "enabled": true,
+                "proxyType": "socks5",
+                "host": "127.0.0.1",
+                "port": 1080
+            }
+        }"#;
+
+        let profile: ConnectionProfile = serde_json::from_str(json).unwrap();
+        assert!(profile.bastion.is_some());
+        let bastion = profile.bastion.as_ref().unwrap();
+        assert!(bastion.enabled);
+        assert_eq!(bastion.profile_id.as_deref(), Some("prof-bastion-1"));
+
+        assert!(profile.proxy.is_some());
+        let proxy = profile.proxy.as_ref().unwrap();
+        assert!(proxy.enabled);
+        assert_eq!(proxy.proxy_type.as_deref(), Some("socks5"));
+        assert_eq!(proxy.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(proxy.port, Some(1080));
+
+        let serialized = serde_json::to_string(&profile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed["bastion"]["profileId"], "prof-bastion-1");
+        assert_eq!(parsed["bastion"]["enabled"], true);
+        assert_eq!(parsed["proxy"]["proxyType"], "socks5");
+        assert_eq!(parsed["proxy"]["port"], 1080);
     }
 }

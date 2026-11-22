@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -13,6 +13,8 @@ export interface SftpConnectParams {
   passphrase?: string;
   use_sudo?: boolean;
   sudo_password?: string;
+  bastion?: BastionConfig;
+  proxy?: ProxyConfig;
 }
 
 export interface BackendTransferProgress {
