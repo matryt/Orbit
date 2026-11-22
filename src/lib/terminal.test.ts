@@ -38,4 +38,21 @@ describe('external terminal integration', () => {
     assert.equal(resolveTerminalTargetPath('/home/user/with space', '/'), '/home/user/with space');
     assert.equal(resolveTerminalTargetPath(undefined, '/'), '/');
   });
+
+  it('handles adversarial path inputs without modifying raw values', () => {
+    const maliciousPaths = [
+      '/var/log/`id`',
+      '/var/log/$(reboot)',
+      '/var/log; rm -rf /',
+      '/var/log & ping 127.0.0.1',
+      '/var/log/with "quotes" and \'apostrophes\'',
+      '../../../etc/shadow',
+      '/srv/trailing space ',
+      ' /srv/leading space',
+    ];
+
+    for (const p of maliciousPaths) {
+      assert.equal(resolveTerminalTargetPath(p, '/default'), p);
+    }
+  });
 });

