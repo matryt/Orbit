@@ -230,7 +230,10 @@ mod tests {
         assert_eq!(proxy.port, Some(1080));
 
         let serialized = serde_json::to_string(&profile).unwrap();
-        assert!(serialized.contains("prof-bastion-1"));
-        assert!(serialized.contains("socks5"));
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed["bastion"]["profileId"], "prof-bastion-1");
+        assert_eq!(parsed["bastion"]["enabled"], true);
+        assert_eq!(parsed["proxy"]["proxyType"], "socks5");
+        assert_eq!(parsed["proxy"]["port"], 1080);
     }
 }

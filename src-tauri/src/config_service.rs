@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::error::AppError;
 use crate::models::ConnectionProfile;
+
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct ConfigService;
 
@@ -57,6 +60,7 @@ impl ConfigService {
     }
 
     pub fn save_profile(app: &AppHandle, profile: ConnectionProfile) -> Result<(), AppError> {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut profiles = Self::load_profiles(app)?;
         if let Some(pos) = profiles.iter().position(|p| p.id == profile.id) {
             profiles[pos] = profile;
@@ -67,6 +71,7 @@ impl ConfigService {
     }
 
     pub fn delete_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError> {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut profiles = Self::load_profiles(app)?;
         profiles.retain(|p| p.id != profile_id);
         Self::save_profiles(app, &profiles)

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ConnectionProfile } from '../types/index.ts';
+import { sanitizeProfileForExport } from './profileExport.ts';
 
 describe('network profiles (bastion & proxy)', () => {
   it('sanitizes bastion and proxy configurations for export without leaking secrets', () => {
@@ -32,37 +33,7 @@ describe('network profiles (bastion & proxy)', () => {
       },
     };
 
-    // Mirror of export serialization
-    const sanitized = {
-      id: rawProfile.id,
-      name: rawProfile.name,
-      type: rawProfile.type,
-      host: rawProfile.host,
-      port: rawProfile.port,
-      username: rawProfile.username,
-      bastion: rawProfile.bastion?.enabled
-        ? {
-            enabled: true,
-            profileId: rawProfile.bastion.profileId,
-            host: rawProfile.bastion.host,
-            port: rawProfile.bastion.port,
-            username: rawProfile.bastion.username,
-            authType: rawProfile.bastion.authType,
-            keyPath: rawProfile.bastion.keyPath,
-          }
-        : undefined,
-      proxy: rawProfile.proxy?.enabled
-        ? {
-            enabled: true,
-            proxyType: rawProfile.proxy.proxyType,
-            host: rawProfile.proxy.host,
-            port: rawProfile.proxy.port,
-            username: rawProfile.proxy.username,
-          }
-        : undefined,
-      isFavorite: rawProfile.isFavorite,
-    };
-
+    const sanitized = sanitizeProfileForExport(rawProfile);
     const exportedJson = JSON.stringify(sanitized);
 
     assert.ok(!exportedJson.includes('SUPER_SECRET_BASTION_PASSWORD'));

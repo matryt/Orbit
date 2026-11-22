@@ -474,13 +474,25 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   updateProfile: async (profile, secret, bastionSecret, proxySecret) => {
     if (secret !== undefined) {
-      await storageApi.saveSecret(profile.id, secret);
+      if (secret === '') {
+        await storageApi.deleteSecret(profile.id);
+      } else {
+        await storageApi.saveSecret(profile.id, secret);
+      }
     }
     if (bastionSecret !== undefined) {
-      await storageApi.saveSecret(`${profile.id}:bastion`, bastionSecret);
+      if (bastionSecret === '' || !profile.bastion?.enabled) {
+        await storageApi.deleteSecret(`${profile.id}:bastion`);
+      } else {
+        await storageApi.saveSecret(`${profile.id}:bastion`, bastionSecret);
+      }
     }
     if (proxySecret !== undefined) {
-      await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
+      if (proxySecret === '' || !profile.proxy?.enabled) {
+        await storageApi.deleteSecret(`${profile.id}:proxy`);
+      } else {
+        await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
+      }
     }
 
     try {
@@ -537,6 +549,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       await storageApi.deleteProfile(id);
     } catch (err) {
       console.error('Failed to delete profile from storage:', err);
+      throw err;
     }
 
     const { profiles, activeProfileId } = get();

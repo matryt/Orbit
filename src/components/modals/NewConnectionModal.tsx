@@ -97,6 +97,8 @@ export const NewConnectionModal: React.FC = () => {
 
   // Populate fields when editing an existing profile
   React.useEffect(() => {
+    let cancelled = false;
+
     if (editingProfile) {
       setType(editingProfile.type);
       setName(editingProfile.name);
@@ -111,7 +113,7 @@ export const NewConnectionModal: React.FC = () => {
       setKeyPath(editingProfile.keyPath || '~/.ssh/id_ed25519');
       setUseSudo(Boolean(editingProfile.useSudo));
       storageApi.getSecret(editingProfile.id).then((sec) => {
-        if (sec) {
+        if (!cancelled && sec) {
           if (editingProfile.type === 's3') setSecretKey(sec);
           else if (editingProfile.authType === 'password') setPassword(sec);
           else setPassphrase(sec);
@@ -133,7 +135,7 @@ export const NewConnectionModal: React.FC = () => {
         }
         setShowNetworkSettings(true);
         storageApi.getSecret(`${editingProfile.id}:bastion`).then((sec) => {
-          if (sec) {
+          if (!cancelled && sec) {
             if (editingProfile.bastion?.authType === 'password') setBastionPassword(sec);
             else setBastionPassphrase(sec);
           }
@@ -159,7 +161,7 @@ export const NewConnectionModal: React.FC = () => {
         setProxyUsername(editingProfile.proxy.username || '');
         setShowNetworkSettings(true);
         storageApi.getSecret(`${editingProfile.id}:proxy`).then((sec) => {
-          if (sec) setProxyPassword(sec);
+          if (!cancelled && sec) setProxyPassword(sec);
         });
       } else {
         setProxyEnabled(false);
@@ -206,6 +208,10 @@ export const NewConnectionModal: React.FC = () => {
       setIsTesting(false);
       setShowLogs(false);
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [editingProfile, isNewConnectionModalOpen]);
 
   if (!isNewConnectionModalOpen) return null;
@@ -334,10 +340,11 @@ export const NewConnectionModal: React.FC = () => {
 
       let bastionParam = undefined;
       if (bastionEnabled) {
-        if (bastionMode === 'profile' && bastionProfileId) {
+        const effectiveBastionPid = bastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
+        if (bastionMode === 'profile' && effectiveBastionPid) {
           bastionParam = {
             enabled: true,
-            profileId: bastionProfileId,
+            profileId: effectiveBastionPid,
           };
         } else if (bastionHost.trim()) {
           bastionParam = {
@@ -422,38 +429,46 @@ export const NewConnectionModal: React.FC = () => {
         : password.trim();
 
     let bastionConfig = undefined;
-    let bastionSecretToSave = undefined;
-    if (type === 'sftp' && bastionEnabled) {
-      if (bastionMode === 'profile' && bastionProfileId) {
-        bastionConfig = {
-          enabled: true,
-          profileId: bastionProfileId,
-        };
-      } else if (bastionHost.trim()) {
-        bastionConfig = {
-          enabled: true,
-          host: bastionHost.trim(),
-          port: Number(bastionPort) || 22,
-          username: bastionUsername.trim(),
-          authType: bastionAuthType,
-          keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
-        };
-        bastionSecretToSave = bastionAuthType === 'password' ? bastionPassword.trim() : bastionPassphrase.trim();
+    let bastionSecretToSave: string | undefined = undefined;
+    if (type === 'sftp') {
+      if (bastionEnabled) {
+        const effectiveBastionPid = bastionMode === 'profile' ? (bastionProfileId || otherSftpProfiles[0]?.id) : undefined;
+        if (bastionMode === 'profile' && effectiveBastionPid) {
+          bastionConfig = {
+            enabled: true,
+            profileId: effectiveBastionPid,
+          };
+          bastionSecretToSave = '';
+        } else if (bastionHost.trim()) {
+          bastionConfig = {
+            enabled: true,
+            host: bastionHost.trim(),
+            port: Number(bastionPort) || 22,
+            username: bastionUsername.trim(),
+            authType: bastionAuthType,
+            keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
+          };
+          bastionSecretToSave = bastionAuthType === 'password' ? bastionPassword.trim() : bastionPassphrase.trim();
+        }
+      } else {
+        bastionSecretToSave = '';
       }
     }
 
     let proxyConfig = undefined;
-    let proxySecretToSave = undefined;
-    if (type === 'sftp' && proxyEnabled && proxyHost.trim()) {
-      proxyConfig = {
-        enabled: true,
-        proxyType,
-        host: proxyHost.trim(),
-        port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
-        username: proxyUsername.trim() || undefined,
-      };
-      if (proxyPassword.trim()) {
+    let proxySecretToSave: string | undefined = undefined;
+    if (type === 'sftp') {
+      if (proxyEnabled && proxyHost.trim()) {
+        proxyConfig = {
+          enabled: true,
+          proxyType,
+          host: proxyHost.trim(),
+          port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
+          username: proxyUsername.trim() || undefined,
+        };
         proxySecretToSave = proxyPassword.trim();
+      } else {
+        proxySecretToSave = '';
       }
     }
 
@@ -964,7 +979,11 @@ export const NewConnectionModal: React.FC = () => {
                           type="checkbox"
                           checked={bastionEnabled}
                           onChange={(e) => {
-                            setBastionEnabled(e.target.checked);
+                            const checked = e.target.checked;
+                            setBastionEnabled(checked);
+                            if (checked && !bastionProfileId && otherSftpProfiles.length > 0) {
+                              setBastionProfileId(otherSftpProfiles[0].id);
+                            }
                             setTestResult(null);
                           }}
                           className="w-4 h-4 rounded border-border-subtle bg-surface-muted text-sky-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
@@ -1017,7 +1036,7 @@ export const NewConnectionModal: React.FC = () => {
                                 Sélectionner la passerelle SSH
                               </label>
                               <select
-                                value={bastionProfileId || otherSftpProfiles[0]?.id}
+                                value={bastionProfileId || otherSftpProfiles[0]?.id || ''}
                                 onChange={(e) => {
                                   setBastionProfileId(e.target.value);
                                   setTestResult(null);

@@ -34,7 +34,7 @@ pub async fn get_pending_host_key_prompts(
     Ok(host_key_mgr.get_pending_requests().await)
 }
 
-async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConnectConfig) {
+async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConnectConfig) -> Result<(), AppError> {
     if config.password.is_none() && config.passphrase.is_none() {
         let pid = config.profile_id.clone();
         if let Ok(Ok(Some(secret))) =
@@ -51,34 +51,38 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
     if let Some(ref mut bastion) = config.bastion {
         if bastion.enabled {
             if let Some(ref b_pid) = bastion.profile_id {
-                if let Ok(profiles) = ConfigService::load_profiles(app) {
-                    if let Some(b_prof) = profiles.into_iter().find(|p| p.id == *b_pid) {
-                        if bastion.host.is_none() {
-                            bastion.host = b_prof.host;
-                        }
-                        if bastion.port.is_none() {
-                            bastion.port = b_prof.port;
-                        }
-                        if bastion.username.is_none() {
-                            bastion.username = b_prof.username;
-                        }
-                        if bastion.auth_type.is_none() {
-                            bastion.auth_type = b_prof.auth_type;
-                        }
-                        if bastion.key_path.is_none() {
-                            bastion.key_path = b_prof.key_path;
-                        }
-                    }
+                let profiles = ConfigService::load_profiles(app)?;
+                let b_prof = profiles
+                    .into_iter()
+                    .find(|p| p.id == *b_pid)
+                    .ok_or_else(|| AppError::Config(format!("Profil de bastion '{b_pid}' introuvable")))?;
+
+                if bastion.host.is_none() {
+                    bastion.host = b_prof.host;
                 }
+                if bastion.port.is_none() {
+                    bastion.port = b_prof.port;
+                }
+                if bastion.username.is_none() {
+                    bastion.username = b_prof.username;
+                }
+                if bastion.auth_type.is_none() {
+                    bastion.auth_type = b_prof.auth_type;
+                }
+                if bastion.key_path.is_none() {
+                    bastion.key_path = b_prof.key_path;
+                }
+
                 if bastion.password.is_none() && bastion.passphrase.is_none() {
                     let pid = b_pid.clone();
                     if let Ok(Ok(Some(sec))) =
                         tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
                     {
-                        if bastion.auth_type.as_deref() == Some("password") {
-                            bastion.password = Some(sec);
-                        } else {
+                        let is_key_auth = bastion.auth_type.as_deref() == Some("key") || bastion.key_path.is_some();
+                        if is_key_auth {
                             bastion.passphrase = Some(sec);
+                        } else {
+                            bastion.password = Some(sec);
                         }
                     }
                 }
@@ -87,10 +91,11 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
                 if let Ok(Ok(Some(sec))) =
                     tokio::task::spawn_blocking(move || KeyringService::get_secret(&key)).await
                 {
-                    if bastion.auth_type.as_deref() == Some("password") {
-                        bastion.password = Some(sec);
-                    } else {
+                    let is_key_auth = bastion.auth_type.as_deref() == Some("key") || bastion.key_path.is_some();
+                    if is_key_auth {
                         bastion.passphrase = Some(sec);
+                    } else {
+                        bastion.password = Some(sec);
                     }
                 }
             }
@@ -107,6 +112,8 @@ async fn resolve_sftp_credentials(app: &tauri::AppHandle, config: &mut SftpConne
             }
         }
     }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -123,7 +130,10 @@ pub async fn test_sftp_connection(
 
     let app_clone = app.clone();
     let test_task = async move {
-        resolve_sftp_credentials(&app_clone, &mut config).await;
+        if let Err(e) = resolve_sftp_credentials(&app_clone, &mut config).await {
+            let err_msg = e.to_string();
+            return Err((e, vec![format!("[{}] ❌ Erreur de configuration : {err_msg}", chrono::Utc::now().format("%H:%M:%S%.3f"))]));
+        }
         SftpProvider::connect_with_logs_and_prompt(config, Some(prompt_handler)).await
     };
 
@@ -168,7 +178,7 @@ pub async fn connect_sftp(
                 Arc::clone(&host_key_mgr),
             ));
 
-        resolve_sftp_credentials(&app_clone, &mut config).await;
+        resolve_sftp_credentials(&app_clone, &mut config).await?;
         SftpProvider::connect_with_prompt(config, Some(prompt_handler)).await
     };
 

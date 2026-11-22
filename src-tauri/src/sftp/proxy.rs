@@ -1,8 +1,18 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::ProxyConfig;
+
+/// Formate une adresse hôte et port, en encadrant les adresses IPv6 littérales de crochets si nécessaire.
+pub fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
 
 /// Encode une chaîne ou séquence d'octets en Base64 standard (RFC 4648).
 pub fn base64_encode(input: &[u8]) -> String {
@@ -40,16 +50,25 @@ pub async fn connect_via_proxy(
         .as_deref()
         .filter(|h| !h.trim().is_empty())
         .ok_or_else(|| AppError::Io("Hôte du proxy manquant".into()))?;
-    let proxy_port = proxy.port.unwrap_or(1080);
     let proxy_type = proxy
         .proxy_type
         .as_deref()
         .unwrap_or("socks5")
         .to_ascii_lowercase();
+    let proxy_port = proxy.port.unwrap_or(match proxy_type.as_str() {
+        "http" => 8080,
+        _ => 1080,
+    });
 
-    let proxy_addr = format!("{proxy_host}:{proxy_port}");
-    let mut stream = tokio::net::TcpStream::connect(&proxy_addr)
+    let proxy_addr = format_host_port(proxy_host, proxy_port);
+    let connect_future = tokio::net::TcpStream::connect(&proxy_addr);
+    let mut stream = tokio::time::timeout(Duration::from_secs(15), connect_future)
         .await
+        .map_err(|_| {
+            AppError::Io(format!(
+                "Délai d'attente dépassé (15s) lors de la connexion au serveur proxy {proxy_addr}"
+            ))
+        })?
         .map_err(|e| {
             AppError::Io(format!(
                 "Impossible de se connecter au serveur proxy {proxy_addr}: {e}"
@@ -63,9 +82,14 @@ pub async fn connect_via_proxy(
         "socks5" => {
             socks5_handshake(&mut stream, username, password, target_host, target_port).await?;
         }
-        "http" | "https" => {
+        "http" => {
             http_connect_handshake(&mut stream, username, password, target_host, target_port)
                 .await?;
+        }
+        "https" => {
+            return Err(AppError::Io(
+                "Les proxys HTTPS (TLS) ne sont pas encore pris en charge. Utilisez 'http' (HTTP CONNECT) ou 'socks5'.".into(),
+            ));
         }
         other => {
             return Err(AppError::Io(format!(
@@ -255,8 +279,29 @@ pub async fn http_connect_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     target_host: &str,
     target_port: u16,
 ) -> Result<(), AppError> {
+    if target_host.chars().any(|c| c == '\r' || c == '\n' || c == ' ') {
+        return Err(AppError::Io(
+            "Hôte cible invalide pour la requête HTTP CONNECT (caractères interdits)".into(),
+        ));
+    }
+    if let Some(user) = username {
+        if user.chars().any(|c| c == '\r' || c == '\n') {
+            return Err(AppError::Io(
+                "Nom d'utilisateur proxy invalide (caractères de saut de ligne interdits)".into(),
+            ));
+        }
+    }
+    if let Some(pass) = password {
+        if pass.chars().any(|c| c == '\r' || c == '\n') {
+            return Err(AppError::Io(
+                "Mot de passe proxy invalide (caractères de saut de ligne interdits)".into(),
+            ));
+        }
+    }
+
+    let host_authority = format_host_port(target_host, target_port);
     let mut request = format!(
-        "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nProxy-Connection: Keep-Alive\r\n"
+        "CONNECT {host_authority} HTTP/1.1\r\nHost: {host_authority}\r\nProxy-Connection: Keep-Alive\r\n"
     );
 
     if let Some(user) = username {

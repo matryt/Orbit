@@ -1006,7 +1006,15 @@ impl SftpProvider {
 
         // Premier point d'atterrissage réseau (Bastion si activé, sinon Cible finale)
         let (initial_host, initial_port, initial_label) = if let Some(ref bastion) = bastion_opt {
-            let b_host = bastion.host.as_deref().unwrap_or("127.0.0.1");
+            let b_host = bastion
+                .host
+                .as_deref()
+                .filter(|h| !h.trim().is_empty())
+                .ok_or_else(|| {
+                    let err = AppError::Config("L'adresse de l'hôte bastion est requise.".into());
+                    logs.push(format!("[{}] ❌ {err}", now()));
+                    (err, logs.clone())
+                })?;
             let b_port = bastion.port.unwrap_or(22);
             (b_host.to_string(), b_port, "Bastion SSH")
         } else {
@@ -1017,44 +1025,63 @@ impl SftpProvider {
         let tcp_stream = if let Some(ref proxy) = proxy_opt {
             let p_type = proxy.proxy_type.as_deref().unwrap_or("socks5");
             let p_host = proxy.host.as_deref().unwrap_or("");
-            let p_port = proxy.port.unwrap_or(1080);
+            let p_port = proxy.port.unwrap_or(if p_type == "http" { 8080 } else { 1080 });
+            let p_display_addr = crate::sftp::proxy::format_host_port(p_host, p_port);
+            let target_display_addr = crate::sftp::proxy::format_host_port(&initial_host, initial_port);
             logs.push(format!(
-                "[{}] 🌐 Connexion au proxy {p_type} ({p_host}:{p_port}) pour joindre {initial_label} ({initial_host}:{initial_port})...",
+                "[{}] 🌐 Connexion au proxy {p_type} ({p_display_addr}) pour joindre {initial_label} ({target_display_addr})...",
                 now()
             ));
 
-            match crate::sftp::proxy::connect_via_proxy(proxy, &initial_host, initial_port).await {
-                Ok(s) => {
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                crate::sftp::proxy::connect_via_proxy(proxy, &initial_host, initial_port),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
                     logs.push(format!(
-                        "[{}] ✅ Tunnel proxy {p_type} établi avec succès vers {initial_label} ({initial_host}:{initial_port}).",
+                        "[{}] ✅ Tunnel proxy {p_type} établi avec succès vers {initial_label} ({target_display_addr}).",
                         now()
                     ));
                     s
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     logs.push(format!(
                         "[{}] ❌ Échec de négociation avec le proxy : {e}",
                         now()
                     ));
                     return Err((e, logs));
                 }
+                Err(_) => {
+                    let err = AppError::Io(format!(
+                        "Délai d'attente dépassé (15s) lors de la connexion au proxy {p_display_addr}"
+                    ));
+                    logs.push(format!("[{}] ❌ {err}", now()));
+                    return Err((err, logs));
+                }
             }
         } else {
-            let addr = format!("{initial_host}:{initial_port}");
+            let addr = crate::sftp::proxy::format_host_port(&initial_host, initial_port);
             logs.push(format!(
                 "[{}] 🔌 Connexion socket TCP directe vers {initial_label} ({addr})...",
                 now()
             ));
-            match tokio::net::TcpStream::connect(&addr).await {
-                Ok(s) => {
+            match tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(&addr)).await {
+                Ok(Ok(s)) => {
                     logs.push(format!(
                         "[{}] Connexion socket TCP établie avec succès vers {addr}.",
                         now()
                     ));
                     s
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let err_msg = format!("Échec de connexion réseau vers {addr}: {e}");
+                    logs.push(format!("[{}] ❌ {err_msg}", now()));
+                    return Err((AppError::Io(err_msg), logs));
+                }
+                Err(_) => {
+                    let err_msg = format!("Délai d'attente dépassé (15s) lors de la connexion réseau vers {addr}");
                     logs.push(format!("[{}] ❌ {err_msg}", now()));
                     return Err((AppError::Io(err_msg), logs));
                 }
