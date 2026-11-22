@@ -153,4 +153,5 @@ export interface TransferGroup {
   /** scanning: walking the source tree; ready: files enqueued; failed/cancelled before enqueuing. */
   phase: 'scanning' | 'ready' | 'failed' | 'cancelled';
   error?: string;
+  paused?: boolean;
 }

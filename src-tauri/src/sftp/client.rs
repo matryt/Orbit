@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
@@ -21,7 +21,9 @@ use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
     HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
 };
-use crate::transfer::{TransferHandle, finalize_partial_download, partial_download_path};
+use crate::transfer::{
+    TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
+};
 
 /// Verrou global pour sérialiser les opérations de vérification et d'enregistrement dans ~/.ssh/known_hosts
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
@@ -1419,6 +1421,71 @@ impl SftpProvider {
             is_complete,
         }
     }
+
+    pub(crate) fn tmp_upload_path(remote_path: &str, transfer_id: &str) -> String {
+        let safe_id: String = transfer_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(32)
+            .collect();
+        let id = if safe_id.is_empty() {
+            "tmp".to_string()
+        } else {
+            safe_id
+        };
+        let tmp_name = format!(".orbit-tmp-{id}");
+        match remote_path.rfind('/') {
+            Some(idx) => {
+                let parent = &remote_path[..idx];
+                if parent.is_empty() {
+                    format!("/{tmp_name}")
+                } else {
+                    format!("{parent}/{tmp_name}")
+                }
+            }
+            None => tmp_name,
+        }
+    }
+
+    async fn stream_upload(
+        &self,
+        local_file: &mut tokio::fs::File,
+        mut remote_file: russh_sftp::client::fs::File,
+        transfer: &mut TransferHandle,
+    ) -> Result<(), AppError> {
+        let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
+        loop {
+            transfer.checkpoint().await?;
+
+            let n = local_file
+                .read(&mut buffer)
+                .await
+                .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
+            if n == 0 {
+                break;
+            }
+
+            transfer
+                .guard(async {
+                    remote_file
+                        .write_all(&buffer[..n])
+                        .await
+                        .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))
+                })
+                .await?;
+
+            transfer.advance(n as u64);
+        }
+
+        transfer
+            .guard(async {
+                remote_file
+                    .close()
+                    .await
+                    .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))
+            })
+            .await
+    }
 }
 
 struct RemoteTextResult {
@@ -1789,56 +1856,70 @@ impl StorageProvider for SftpProvider {
             .map_err(|e| AppError::Io(format!("Cannot get local file size: {e}")))?
             .len();
 
-        // No `guard` here: aborting `create` after the server has received the OPEN would
-        // leave an empty/truncated remote file with no cleanup. Let the open complete; a
-        // cancellation is then picked up by the first `checkpoint` in the copy loop, which
-        // goes through the cleanup below.
-        let mut remote_file =
-            self.session.create(&remote_path).await.map_err(|e| {
-                AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
-            })?;
-
         transfer.start(total_bytes);
 
-        let copy_result: Result<(), AppError> = async {
-            let mut buffer = vec![0u8; TRANSFER_CHUNK_SIZE];
-            loop {
-                transfer.checkpoint().await?;
+        let tmp_path = Self::tmp_upload_path(&remote_path, transfer.id());
 
-                let n = local_file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| AppError::Io(format!("Error reading local file: {e}")))?;
-                if n == 0 {
-                    break;
+        // Attempt atomic upload via a temporary file first
+        match self.session.create(&tmp_path).await {
+            Ok(remote_file) => {
+                let copy_result = self
+                    .stream_upload(&mut local_file, remote_file, transfer)
+                    .await;
+
+                if let Err(err) = copy_result {
+                    // Transfer interrupted or failed: delete temporary file.
+                    // The original target file is completely untouched and intact.
+                    if let Err(rm_err) = self.session.remove_file(&tmp_path).await {
+                        eprintln!(
+                            "[Orbit SFTP] ⚠️ Could not remove partial temp file {tmp_path}: {rm_err}"
+                        );
+                    }
+                    return Err(err);
                 }
 
-                transfer
-                    .guard(async {
-                        remote_file
-                            .write_all(&buffer[..n])
-                            .await
-                            .map_err(|e| AppError::Sftp(format!("Error writing to SFTP: {e}")))
-                    })
-                    .await?;
+                // Complete upload to temp file: atomically rename to target
+                let mut rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                if rename_result.is_err() {
+                    // Some servers refuse rename if the target exists; remove and retry
+                    let _ = self.session.remove_file(&remote_path).await;
+                    rename_result = self.session.rename(&tmp_path, &remote_path).await;
+                }
 
-                transfer.advance(n as u64);
+                match rename_result {
+                    Ok(_) => {
+                        transfer.complete();
+                        return Ok(());
+                    }
+                    Err(rename_err) => {
+                        eprintln!(
+                            "[Orbit SFTP] ⚠️ Server refused rename ({rename_err}). Falling back to direct upload."
+                        );
+                        let _ = self.session.remove_file(&tmp_path).await;
+                        if let Err(seek_err) = local_file.rewind().await {
+                            return Err(AppError::Io(format!("Cannot rewind local file: {seek_err}")));
+                        }
+                        transfer.start(total_bytes);
+                    }
+                }
             }
-
-            transfer
-                .guard(async {
-                    remote_file
-                        .close()
-                        .await
-                        .map_err(|e| AppError::Sftp(format!("Error closing remote file: {e}")))
-                })
-                .await
+            Err(create_err) => {
+                eprintln!(
+                    "[Orbit SFTP] ⚠️ Could not create temp file {tmp_path} ({create_err}). Falling back to direct upload."
+                );
+            }
         }
-        .await;
+
+        // Direct upload fallback (if temp file or rename is forbidden by server)
+        let remote_file = self.session.create(&remote_path).await.map_err(|e| {
+            AppError::Sftp(format!("Cannot create remote file {remote_path}: {e}"))
+        })?;
+
+        let copy_result = self
+            .stream_upload(&mut local_file, remote_file, transfer)
+            .await;
 
         if let Err(err) = copy_result {
-            // Don't leave a truncated remote file behind an interrupted transfer
-            // (the remote handle was already released when the copy block exited).
             if let Err(rm_err) = self.session.remove_file(&remote_path).await {
                 eprintln!(
                     "[Orbit SFTP] ⚠️ Could not remove partial remote file {remote_path}: {rm_err}"
@@ -1879,12 +1960,7 @@ impl StorageProvider for SftpProvider {
         let total_bytes = meta.size.unwrap_or(0);
 
         let partial_path = partial_download_path(&local_path, transfer.id());
-        let mut local_file = tokio::fs::File::create(&partial_path).await.map_err(|e| {
-            AppError::Io(format!(
-                "Cannot create local file {}: {e}",
-                partial_path.display()
-            ))
-        })?;
+        let mut local_file = create_partial_download_file(&partial_path).await?;
 
         transfer.start(total_bytes);
 
@@ -2280,5 +2356,52 @@ docker:x:999:ubuntu,mathieu
             assert!(flag.load(Ordering::SeqCst));
         }
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_tmp_upload_path() {
+        assert_eq!(
+            SftpProvider::tmp_upload_path("/var/log/app.log", "tx-1234"),
+            "/var/log/.orbit-tmp-tx-1234"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path("/file.txt", "tx-99"),
+            "/.orbit-tmp-tx-99"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path("relative_file.txt", "abc"),
+            ".orbit-tmp-abc"
+        );
+        assert_eq!(
+            SftpProvider::tmp_upload_path("/deep/nested/path/to/target.bin", "tx!@#special-42"),
+            "/deep/nested/path/to/.orbit-tmp-txspecial-42"
+        );
+    }
+
+    #[test]
+    fn test_tmp_upload_path_security_sanitization() {
+        // Path traversal payload in transfer_id must be stripped
+        let path1 = SftpProvider::tmp_upload_path("/var/data/file.txt", "../../../../etc/shadow");
+        assert_eq!(path1, "/var/data/.orbit-tmp-etcshadow");
+        assert!(!path1.contains(".."));
+
+        // Backslash traversal attempt
+        let path2 = SftpProvider::tmp_upload_path("/srv/data.bin", "..\\..\\sensitive");
+        assert_eq!(path2, "/srv/.orbit-tmp-sensitive");
+        assert!(!path2.contains('\\'));
+
+        // Null byte injection attempt
+        let path3 = SftpProvider::tmp_upload_path("/srv/data.bin", "tx\0injected");
+        assert_eq!(path3, "/srv/.orbit-tmp-txinjected");
+        assert!(!path3.contains('\0'));
+
+        // All-special-characters payload falls back safely without escaping parent
+        let path4 = SftpProvider::tmp_upload_path("/dir/test.txt", "!@#$%^&*()/?<>");
+        assert_eq!(path4, "/dir/.orbit-tmp-tmp");
+
+        // Length bounding to 32 safe characters
+        let long_id = "a".repeat(100);
+        let path5 = SftpProvider::tmp_upload_path("/file.txt", &long_id);
+        assert_eq!(path5, format!("/.orbit-tmp-{}", "a".repeat(32)));
     }
 }

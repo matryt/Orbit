@@ -46,6 +46,22 @@ describe('summarizeGroup', () => {
   it('counts a completed file as fully transferred even without a final progress event', () => {
     assert.equal(summarizeGroup({ phase: 'ready' }, [child('completed', 0, 100)]).bytesTransferred, 100);
   });
+
+  it('reports paused when group.paused is true', () => {
+    const s = summarizeGroup({ phase: 'ready', paused: true }, [
+      child('paused', 40, 100),
+      child('queued', 0, 100),
+    ]);
+    assert.equal(s.status, 'paused');
+  });
+
+  it('reports paused when files are paused and none are transferring', () => {
+    const s = summarizeGroup({ phase: 'ready' }, [
+      child('paused', 40, 100),
+      child('queued', 0, 100),
+    ]);
+    assert.equal(s.status, 'paused');
+  });
 });
 
 describe('isGroupSettled', () => {

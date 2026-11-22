@@ -93,6 +93,21 @@ jobs:
           prerelease: false
           args: ${{ matrix.platform.args }}
 
+      - name: Stage native bundles for provenance attestation
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          mkdir -p dist-bundles
+          find src-tauri/target -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" \) -exec cp {} dist-bundles/ \;
+          echo "=== Staged native bundles for attestation ==="
+          ls -la dist-bundles
+
+      - name: Attest Build Provenance (in-situ)
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist-bundles/*'
+
   finalize-release:
     name: Finalize Release (Checksums & Attestations)
     needs: build-release
@@ -138,11 +153,6 @@ jobs:
           done < SHA256SUMS.txt
           
           echo "$TABLE" > checksum_table.md
-
-      - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: 'release-assets/*'
 
       - name: Upload SHA256SUMS to Release
         env:

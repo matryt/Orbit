@@ -31,6 +31,16 @@ test('paused transfers keep their slot', () => {
   assert.deepEqual(pickTransfersToStart(transfers, 2), ['b']);
 });
 
+test('skips queued transfers belonging to paused groups', () => {
+  const transfers = [
+    { ...item('c', 'queued'), groupId: 'g-active' },
+    { ...item('b', 'queued'), groupId: 'g-paused' },
+    { ...item('a', 'queued'), groupId: 'g-paused' },
+  ];
+  const paused = new Set(['g-paused']);
+  assert.deepEqual(pickTransfersToStart(transfers, 2, paused), ['c']);
+});
+
 test('returns nothing when the queue is full', () => {
   const transfers = [item('b', 'queued'), item('a', 'transferring')];
   assert.deepEqual(pickTransfersToStart(transfers, 1), []);
@@ -104,4 +114,14 @@ test('a cancelled transfer still stopping keeps its destination reserved', () =>
   const queued = { ...item('b', 'queued'), remotePath: '/same.txt' };
   assert.deepEqual(pickTransfersToStart([queued, stopping], 3), []);
   assert.deepEqual(pickTransfersToStart([queued, { ...stopping, inFlight: false }], 3), ['b']);
+});
+
+test('transfers cancelled upon session disconnect are never scheduled', () => {
+  // Simulate queue where profile 'p1' was disconnected: queued/paused items become cancelled
+  const disconnectedTx1 = { ...item('tx1', 'cancelled'), profileId: 'p1' };
+  const disconnectedTx2 = { ...item('tx2', 'cancelled'), profileId: 'p1' };
+  const otherSessionTx = { ...item('tx3', 'queued'), profileId: 'p2' };
+
+  const scheduled = pickTransfersToStart([otherSessionTx, disconnectedTx2, disconnectedTx1], 3);
+  assert.deepEqual(scheduled, ['tx3']);
 });
