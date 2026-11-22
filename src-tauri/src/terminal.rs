@@ -377,7 +377,7 @@ fn launch_windows(
     if wt_found {
         let mut cmd = Command::new("wt.exe");
         cmd.args(["-d", "."]).arg("ssh").args(ssh_args);
-        if let Ok(_) = cmd.spawn() {
+        if cmd.spawn().is_ok() {
             return Ok(());
         }
     }
@@ -418,7 +418,7 @@ fn launch_windows(
                 cmd.arg(h.trim());
             }
 
-            if let Ok(_) = cmd.spawn() {
+            if cmd.spawn().is_ok() {
                 return Ok(());
             }
         }
@@ -426,9 +426,10 @@ fn launch_windows(
 
     // Fallback 1 : PowerShell avec arguments littéraux (évite l'expansion locale de $SHELL)
     let ps_cmd = format_powershell_command_line(ssh_args);
-    if let Ok(_) = Command::new("powershell.exe")
+    if Command::new("powershell.exe")
         .args(["-NoExit", "-Command", &ps_cmd])
         .spawn()
+        .is_ok()
     {
         return Ok(());
     }
@@ -457,11 +458,12 @@ fn launch_linux(ssh_args: &[String]) -> Result<(), String> {
             } else {
                 "-e"
             };
-            if let Ok(_) = Command::new(trimmed)
+            if Command::new(trimmed)
                 .arg(opt)
                 .arg("ssh")
                 .args(ssh_args)
                 .spawn()
+                .is_ok()
             {
                 return Ok(());
             }
@@ -497,7 +499,7 @@ fn launch_linux(ssh_args: &[String]) -> Result<(), String> {
                 }
             }
 
-            if let Ok(_) = cmd.spawn() {
+            if cmd.spawn().is_ok() {
                 return Ok(());
             }
         }
