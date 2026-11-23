@@ -56,12 +56,14 @@ describe('permissions utilities', () => {
     assert.equal(octalToMode('0644'), 0o644);
     assert.equal(octalToMode('000'), 0o000);
     assert.equal(octalToMode('0000'), 0o000);
+    assert.equal(octalToMode('1777'), 0o1777);
+    assert.equal(octalToMode('4755'), 0o4755);
 
     // Invalid octal inputs
     assert.equal(octalToMode(''), null);
     assert.equal(octalToMode('789'), null);
     assert.equal(octalToMode('abc'), null);
-    assert.equal(octalToMode('07555'), null);
+    assert.equal(octalToMode('075555'), null);
     assert.equal(octalToMode('75'), null);
   });
 
@@ -84,10 +86,20 @@ describe('permissions utilities', () => {
     assert.equal(parsePermissionsString('rwxr-xr-x', true), 0o755);
     assert.equal(parsePermissionsString('rw-r--r--', false), 0o644);
 
-    // Fallbacks
+    // Special bits: setuid, setgid, sticky
+    // Uppercase S/T means special bit is set but execute is NOT set
+    assert.equal(parsePermissionsString('-rwSr--r--', false), 0o4644);
+    assert.equal(parsePermissionsString('-rw-r-Sr--', false), 0o2644);
+    assert.equal(parsePermissionsString('-rw-r--r-T', false), 0o1644);
+    // Lowercase s/t means special bit IS set and execute IS set
+    assert.equal(parsePermissionsString('-rwsr--r--', false), 0o4744);
+    assert.equal(parsePermissionsString('-rwxr-sr-x', false), 0o2755);
+    assert.equal(parsePermissionsString('-rwxr-xr-t', false), 0o1755);
+
+    // Fallbacks and invalid inputs
     assert.equal(parsePermissionsString(undefined, true), DEFAULT_DIR_MODE);
     assert.equal(parsePermissionsString(undefined, false), DEFAULT_FILE_MODE);
     assert.equal(parsePermissionsString('invalid', true), DEFAULT_DIR_MODE);
-    assert.equal(parsePermissionsString('invalid', false), DEFAULT_FILE_MODE);
+    assert.equal(parsePermissionsString('invalid!!', false), DEFAULT_FILE_MODE);
   });
 });

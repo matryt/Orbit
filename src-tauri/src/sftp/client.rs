@@ -1802,6 +1802,7 @@ impl StorageProvider for SftpProvider {
                 name,
                 path: entry.path(),
                 is_dir,
+                is_symlink: entry.file_type().is_symlink(),
                 size,
                 modified_at,
                 permissions: Some(permissions),
@@ -2117,46 +2118,93 @@ impl StorageProvider for SftpProvider {
             None
         };
 
-        let create_attrs = || {
-            let mut attrs = russh_sftp::protocol::FileAttributes::empty();
-            if let Some(m) = mode {
-                attrs.permissions = Some(m);
-            }
-            if let Some(u) = resolved_uid {
-                attrs.uid = Some(u);
-            }
-            if let Some(g) = resolved_gid {
-                attrs.gid = Some(g);
-            }
-            attrs
-        };
+        let change_ownership = resolved_uid.is_some() || resolved_gid.is_some();
 
         if recursive {
-            if let Ok(entries) = self.walk(path).await {
-                let mut sorted_entries = entries;
-                sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
+            let entries = self.walk(path).await?;
+            let mut sorted_entries = entries;
+            sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
 
-                for entry in sorted_entries {
-                    let child_path = crate::walk::join_remote(path, &entry.relative_path);
-                    if validate_path_safety(&child_path).is_ok() {
-                        let attrs = create_attrs();
-                        let _ = self.session.set_metadata(&child_path, attrs).await;
+            for entry in sorted_entries {
+                if entry.is_symlink {
+                    continue;
+                }
+                let child_path = crate::walk::join_remote(path, &entry.relative_path);
+                validate_path_safety(&child_path)?;
+
+                let mut child_attrs = russh_sftp::protocol::FileAttributes::empty();
+                if let Some(m) = mode {
+                    child_attrs.permissions = Some(m);
+                }
+                if change_ownership {
+                    let mut c_uid = resolved_uid;
+                    let mut c_gid = resolved_gid;
+                    if c_uid.is_none() || c_gid.is_none() {
+                        if let Ok(meta) = self.session.metadata(&child_path).await {
+                            if c_uid.is_none() {
+                                c_uid = meta.uid;
+                            }
+                            if c_gid.is_none() {
+                                c_gid = meta.gid;
+                            }
+                        }
+                    }
+                    if let Some(u) = c_uid {
+                        child_attrs.uid = Some(u);
+                    }
+                    if let Some(g) = c_gid {
+                        child_attrs.gid = Some(g);
                     }
                 }
+                self.session
+                    .set_metadata(&child_path, child_attrs)
+                    .await
+                    .map_err(|e| {
+                        AppError::Sftp(format!(
+                            "Échec de modification des attributs de '{child_path}': {e}"
+                        ))
+                    })?;
             }
         }
 
-        let attrs = create_attrs();
-        self.session.set_metadata(path, attrs).await.map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.to_lowercase().contains("permission denied") {
-                AppError::PermissionDenied(format!("Permission refusée pour modifier '{path}' (droits administrateur / sudo requis pour changer le propriétaire)"))
-            } else {
-                AppError::Sftp(format!(
-                    "Échec de modification des attributs de '{path}': {e}"
-                ))
+        let mut root_attrs = russh_sftp::protocol::FileAttributes::empty();
+        if let Some(m) = mode {
+            root_attrs.permissions = Some(m);
+        }
+        if change_ownership {
+            let mut r_uid = resolved_uid;
+            let mut r_gid = resolved_gid;
+            if r_uid.is_none() || r_gid.is_none() {
+                if let Ok(meta) = self.session.metadata(path).await {
+                    if r_uid.is_none() {
+                        r_uid = meta.uid;
+                    }
+                    if r_gid.is_none() {
+                        r_gid = meta.gid;
+                    }
+                }
             }
-        })?;
+            if let Some(u) = r_uid {
+                root_attrs.uid = Some(u);
+            }
+            if let Some(g) = r_gid {
+                root_attrs.gid = Some(g);
+            }
+        }
+
+        self.session
+            .set_metadata(path, root_attrs)
+            .await
+            .map_err(|e| {
+                let err_str = e.to_string();
+                if err_str.to_lowercase().contains("permission denied") {
+                    AppError::PermissionDenied(format!("Permission refusée pour modifier '{path}' (droits administrateur / sudo requis pour changer le propriétaire)"))
+                } else {
+                    AppError::Sftp(format!(
+                        "Échec de modification des attributs de '{path}': {e}"
+                    ))
+                }
+            })?;
 
         Ok(())
     }

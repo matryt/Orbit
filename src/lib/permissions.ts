@@ -66,16 +66,16 @@ export function modeToOctal(mode: number): string {
 }
 
 /**
- * Parses an octal string (e.g. "755", "0755", "644") into a numeric mode.
+ * Parses an octal string (e.g. "755", "0755", "644", "1777") into a numeric mode.
  * Returns null if the input is not a valid 3- or 4-digit octal string.
  */
 export function octalToMode(octalStr: string): number | null {
   const trimmed = octalStr.trim();
-  if (!/^(0?[0-7]{3})$/.test(trimmed)) {
+  if (!/^(0?[0-7]{3,4})$/.test(trimmed)) {
     return null;
   }
   const parsed = parseInt(trimmed, 8);
-  if (isNaN(parsed) || parsed < 0 || parsed > 0o777) {
+  if (isNaN(parsed) || parsed < 0 || parsed > 0o7777) {
     return null;
   }
   return parsed;
@@ -102,6 +102,8 @@ export function modeToSymbolic(mode: number, isDir = false): string {
 
 /**
  * Parses a permission string (e.g. "drwxr-xr-x", "-rw-r--r--", or "rwxr-xr-x") into a numeric mode.
+ * Validates the 9 permission positions and optional leading file-type prefix.
+ * Preserves valid 0 modes like "----------".
  * Falls back to 0o755 for directories and 0o644 for files if missing or invalid.
  */
 export function parsePermissionsString(permStr?: string, isDir = false): number {
@@ -109,25 +111,34 @@ export function parsePermissionsString(permStr?: string, isDir = false): number 
     return isDir ? DEFAULT_DIR_MODE : DEFAULT_FILE_MODE;
   }
 
-  // Take the last 9 characters to ignore optional leading file-type character (e.g. 'd', '-', 'l')
   const clean = permStr.trim();
-  if (clean.length < 9) {
+  const match = clean.match(/^([bcdlsp-])?([r-][w-][xsS-])([r-][w-][xsS-])([r-][w-][xtT-])$/);
+  if (!match) {
     return isDir ? DEFAULT_DIR_MODE : DEFAULT_FILE_MODE;
   }
 
-  const s = clean.slice(-9);
+  const u = match[2];
+  const g = match[3];
+  const o = match[4];
+
   let mode = 0;
-  if (s[0] === 'r') mode |= 0o400;
-  if (s[1] === 'w') mode |= 0o200;
-  if (s[2] === 'x' || s[2] === 's' || s[2] === 'S') mode |= 0o100;
+  // User permissions
+  if (u[0] === 'r') mode |= 0o400;
+  if (u[1] === 'w') mode |= 0o200;
+  if (u[2] === 'x' || u[2] === 's') mode |= 0o100;
+  if (u[2] === 's' || u[2] === 'S') mode |= 0o4000;
 
-  if (s[3] === 'r') mode |= 0o040;
-  if (s[4] === 'w') mode |= 0o020;
-  if (s[5] === 'x' || s[5] === 's' || s[5] === 'S') mode |= 0o010;
+  // Group permissions
+  if (g[0] === 'r') mode |= 0o040;
+  if (g[1] === 'w') mode |= 0o020;
+  if (g[2] === 'x' || g[2] === 's') mode |= 0o010;
+  if (g[2] === 's' || g[2] === 'S') mode |= 0o2000;
 
-  if (s[6] === 'r') mode |= 0o004;
-  if (s[7] === 'w') mode |= 0o002;
-  if (s[8] === 'x' || s[8] === 't' || s[8] === 'T') mode |= 0o001;
+  // Others permissions
+  if (o[0] === 'r') mode |= 0o004;
+  if (o[1] === 'w') mode |= 0o002;
+  if (o[2] === 'x' || o[2] === 't') mode |= 0o001;
+  if (o[2] === 't' || o[2] === 'T') mode |= 0o1000;
 
   return mode;
 }

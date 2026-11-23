@@ -141,6 +141,9 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
   const [matrix, setMatrix] = useState<PermissionMatrix>(() =>
     modeToBits(parsePermissionsString(file?.permissions, file?.is_dir))
   );
+  const [specialBits, setSpecialBits] = useState<number>(() =>
+    parsePermissionsString(file?.permissions, file?.is_dir) & 0o7000
+  );
   const [octalInput, setOctalInput] = useState<string>(() =>
     modeToOctal(parsePermissionsString(file?.permissions, file?.is_dir))
   );
@@ -153,10 +156,16 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
+  const modalRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
+
+  // Form initialization effect: resets only when modal opens or target file changes
   useEffect(() => {
     if (file && isOpen) {
       const initialMode = parsePermissionsString(file.permissions, file.is_dir);
       setMatrix(modeToBits(initialMode));
+      setSpecialBits(initialMode & 0o7000);
       setOctalInput(modeToOctal(initialMode));
       setOwnerInput(file.owner || '');
       setGroupInput(file.group || '');
@@ -164,50 +173,67 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
       setRecursive(false);
       setIsSubmitting(false);
       setSubmitError(null);
-
-      // Extract existing users and groups from the current directory
-      const initialUsers = Array.from(
-        new Set(
-          directoryFiles
-            .map((f) => f.owner)
-            .filter((o): o is string => Boolean(o && o.trim()))
-        )
-      );
-      if (file.owner && !initialUsers.includes(file.owner)) {
-        initialUsers.push(file.owner);
-      }
-
-      const initialGroups = Array.from(
-        new Set(
-          directoryFiles
-            .map((f) => f.group)
-            .filter((g): g is string => Boolean(g && g.trim()))
-        )
-      );
-      if (file.group && !initialGroups.includes(file.group)) {
-        initialGroups.push(file.group);
-      }
-
-      setUserOptions(initialUsers.sort());
-      setGroupOptions(initialGroups.sort());
-
-      // Fetch full system user/group lists
-      const req = isLocal
-        ? storageApi.listLocalIdentities()
-        : storageApi.listIdentities(profileId);
-
-      req
-        .then((res) => {
-          const mergedUsers = Array.from(new Set([...initialUsers, ...res.users])).sort();
-          const mergedGroups = Array.from(new Set([...initialGroups, ...res.groups])).sort();
-          setUserOptions(mergedUsers);
-          setGroupOptions(mergedGroups);
-        })
-        .catch(() => {
-          // Keep whatever was found in directoryFiles
-        });
     }
-  }, [file, isOpen, isLocal, profileId, directoryFiles]);
+  }, [file?.path, isOpen]);
+
+  // Suggestions loading effect: updates options without resetting unsaved user edits
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const initialUsers = Array.from(
+      new Set(
+        directoryFiles
+          .map((f) => f.owner)
+          .filter((o): o is string => Boolean(o && o.trim()))
+      )
+    );
+    if (file?.owner && !initialUsers.includes(file.owner)) {
+      initialUsers.push(file.owner);
+    }
+
+    const initialGroups = Array.from(
+      new Set(
+        directoryFiles
+          .map((g) => g.group)
+          .filter((g): g is string => Boolean(g && g.trim()))
+      )
+    );
+    if (file?.group && !initialGroups.includes(file.group)) {
+      initialGroups.push(file.group);
+    }
+
+    setUserOptions(initialUsers.sort());
+    setGroupOptions(initialGroups.sort());
+
+    const req = isLocal
+      ? storageApi.listLocalIdentities()
+      : storageApi.listIdentities(profileId);
+
+    req
+      .then((res) => {
+        const mergedUsers = Array.from(new Set([...initialUsers, ...res.users])).sort();
+        const mergedGroups = Array.from(new Set([...initialGroups, ...res.groups])).sort();
+        setUserOptions(mergedUsers);
+        setGroupOptions(mergedGroups);
+      })
+      .catch(() => {
+        // Keep whatever was found in directoryFiles
+      });
+  }, [isOpen, isLocal, profileId, directoryFiles, file?.owner, file?.group]);
+
+  // Focus management: initial focus and restoration
+  useEffect(() => {
+    if (isOpen) {
+      previousActiveElementRef.current = document.activeElement as HTMLElement | null;
+      const timer = setTimeout(() => {
+        closeButtonRef.current?.focus();
+      }, 50);
+      return () => clearTimeout(timer);
+    } else if (previousActiveElementRef.current) {
+      previousActiveElementRef.current.focus();
+      previousActiveElementRef.current = null;
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -220,6 +246,26 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, isSubmitting, onClose]);
+
+  // Trap Tab focus inside modal dialog
+  const handleModalKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Tab' && modalRef.current) {
+      const focusable = modalRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      if (focusable.length > 0) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+  };
 
   if (!isOpen || !file) return null;
 
@@ -248,6 +294,9 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
     const parsed = octalToMode(value);
     if (parsed !== null) {
       setMatrix(modeToBits(parsed));
+      if (value.trim().length >= 4) {
+        setSpecialBits(parsed & 0o7000);
+      }
       setOctalError(false);
     } else {
       setOctalError(true);
@@ -263,8 +312,10 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
     try {
       const owner = ownerInput.trim();
       const group = groupInput.trim();
+      // Combine special bits with current 9-bit rwx mode
+      const finalMode = (specialBits & 0o7000) | currentMode;
       await onSave(
-        currentMode,
+        finalMode,
         owner || null,
         group || null,
         file.is_dir && recursive
@@ -281,6 +332,11 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
       <div
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="permissions-modal-title"
+        onKeyDown={handleModalKeyDown}
         onClick={(e) => e.stopPropagation()}
         className="w-full max-w-md bg-[#161926] border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col text-zinc-200"
       >
@@ -291,16 +347,20 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
               <KeyRound className="w-4 h-4" />
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-white truncate">Permissions et droits</h3>
+              <h3 id="permissions-modal-title" className="text-sm font-semibold text-white truncate">
+                Permissions et droits
+              </h3>
               <p className="text-[11px] text-zinc-400 truncate max-w-[280px]">
                 {file.name}
               </p>
             </div>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             onClick={onClose}
             disabled={isSubmitting}
+            aria-label="Fermer la boîte de dialogue"
             className="p-1.5 rounded-md hover:bg-white/10 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
           >
             <X className="w-4 h-4" />
@@ -357,6 +417,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.user.read}
                       onChange={() => handleCheckboxChange('user', 'read')}
+                      aria-label="Propriétaire: Lecture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -365,6 +426,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.user.write}
                       onChange={() => handleCheckboxChange('user', 'write')}
+                      aria-label="Propriétaire: Écriture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -373,6 +435,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.user.execute}
                       onChange={() => handleCheckboxChange('user', 'execute')}
+                      aria-label="Propriétaire: Exécution"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -389,6 +452,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.group.read}
                       onChange={() => handleCheckboxChange('group', 'read')}
+                      aria-label="Groupe: Lecture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -397,6 +461,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.group.write}
                       onChange={() => handleCheckboxChange('group', 'write')}
+                      aria-label="Groupe: Écriture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -405,6 +470,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.group.execute}
                       onChange={() => handleCheckboxChange('group', 'execute')}
+                      aria-label="Groupe: Exécution"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -421,6 +487,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.others.read}
                       onChange={() => handleCheckboxChange('others', 'read')}
+                      aria-label="Autres: Lecture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -429,6 +496,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.others.write}
                       onChange={() => handleCheckboxChange('others', 'write')}
+                      aria-label="Autres: Écriture"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -437,6 +505,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
                       type="checkbox"
                       checked={matrix.others.execute}
                       onChange={() => handleCheckboxChange('others', 'execute')}
+                      aria-label="Autres: Exécution"
                       className="rounded border-zinc-700 bg-surface-muted text-indigo-500 focus:ring-indigo-500/20 focus:ring-offset-0 cursor-pointer"
                     />
                   </td>
@@ -448,10 +517,11 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
           {/* Octal & Symbolic values */}
           <div className="grid grid-cols-2 gap-3 items-center">
             <div>
-              <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+              <label htmlFor="octal-permissions-input" className="block text-[11px] font-medium text-zinc-400 mb-1">
                 Valeur octale
               </label>
               <input
+                id="octal-permissions-input"
                 type="text"
                 value={octalInput}
                 onChange={(e) => handleOctalChange(e.target.value)}

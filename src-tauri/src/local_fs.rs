@@ -208,6 +208,7 @@ pub fn list_local_directory(
             name: file_name,
             path: path_str,
             is_dir,
+            is_symlink,
             size,
             modified_at,
             permissions,
@@ -294,20 +295,27 @@ pub fn resolve_user_to_uid(user: &str) -> Result<u32, AppError> {
     unsafe {
         let mut pwd = std::mem::zeroed::<libc::passwd>();
         let mut result = std::ptr::null_mut();
-        let mut buf = vec![0u8; 1024];
-        let res = libc::getpwnam_r(
-            c_user.as_ptr(),
-            &mut pwd,
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            &mut result,
-        );
-        if res == 0 && !result.is_null() && !pwd.pw_name.is_null() {
-            Ok(pwd.pw_uid)
-        } else {
-            Err(AppError::NotFound(format!(
-                "Utilisateur local '{trimmed}' introuvable"
-            )))
+        let mut buf_size = 1024;
+        loop {
+            let mut buf = vec![0u8; buf_size];
+            let res = libc::getpwnam_r(
+                c_user.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            );
+            if res == libc::ERANGE && buf_size < 1024 * 64 {
+                buf_size *= 2;
+                continue;
+            }
+            if res == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+                return Ok(pwd.pw_uid);
+            } else {
+                return Err(AppError::NotFound(format!(
+                    "Utilisateur local '{trimmed}' introuvable"
+                )));
+            }
         }
     }
 }
@@ -323,20 +331,27 @@ pub fn resolve_group_to_gid(group: &str) -> Result<u32, AppError> {
     unsafe {
         let mut grp = std::mem::zeroed::<libc::group>();
         let mut result = std::ptr::null_mut();
-        let mut buf = vec![0u8; 1024];
-        let res = libc::getgrnam_r(
-            c_group.as_ptr(),
-            &mut grp,
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            &mut result,
-        );
-        if res == 0 && !result.is_null() && !grp.gr_name.is_null() {
-            Ok(grp.gr_gid)
-        } else {
-            Err(AppError::NotFound(format!(
-                "Groupe local '{trimmed}' introuvable"
-            )))
+        let mut buf_size = 1024;
+        loop {
+            let mut buf = vec![0u8; buf_size];
+            let res = libc::getgrnam_r(
+                c_group.as_ptr(),
+                &mut grp,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            );
+            if res == libc::ERANGE && buf_size < 1024 * 64 {
+                buf_size *= 2;
+                continue;
+            }
+            if res == 0 && !result.is_null() && !grp.gr_name.is_null() {
+                return Ok(grp.gr_gid);
+            } else {
+                return Err(AppError::NotFound(format!(
+                    "Groupe local '{trimmed}' introuvable"
+                )));
+            }
         }
     }
 }
@@ -385,12 +400,36 @@ pub fn set_local_permissions(
             sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
 
             for entry in sorted_entries {
+                if entry.is_symlink {
+                    continue;
+                }
                 let child = p.join(&entry.relative_path);
+                if let Ok(meta) = child.symlink_metadata() {
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                }
                 if let Some(m) = mode {
-                    let _ = std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m));
+                    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m)).map_err(
+                        |e| {
+                            AppError::Io(format!(
+                                "Échec de modification des permissions de '{}': {e}",
+                                child.display()
+                            ))
+                        },
+                    )?;
                 }
                 if resolved_uid.is_some() || resolved_gid.is_some() {
-                    let _ = std::os::unix::fs::chown(&child, resolved_uid, resolved_gid);
+                    std::os::unix::fs::chown(&child, resolved_uid, resolved_gid).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            AppError::PermissionDenied(format!(
+                                "Permission refusée pour changer le propriétaire de '{}' (privilèges administrateur / sudo requis)",
+                                child.display()
+                            ))
+                        } else {
+                            AppError::from(e)
+                        }
+                    })?;
                 }
             }
         }
