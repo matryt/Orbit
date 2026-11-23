@@ -427,16 +427,6 @@ pub fn set_local_permissions(
                         continue;
                     }
                 }
-                if let Some(m) = mode {
-                    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m)).map_err(
-                        |e| {
-                            AppError::Io(format!(
-                                "Échec de modification des permissions de '{}': {e}",
-                                child.display()
-                            ))
-                        },
-                    )?;
-                }
                 if resolved_uid.is_some() || resolved_gid.is_some() {
                     std::os::unix::fs::chown(&child, resolved_uid, resolved_gid).map_err(|e| {
                         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -449,13 +439,19 @@ pub fn set_local_permissions(
                         }
                     })?;
                 }
+                if let Some(m) = mode {
+                    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m)).map_err(
+                        |e| {
+                            AppError::Io(format!(
+                                "Échec de modification des permissions de '{}': {e}",
+                                child.display()
+                            ))
+                        },
+                    )?;
+                }
             }
         }
 
-        if let Some(m) = mode {
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m))
-                .map_err(AppError::from)?;
-        }
         if resolved_uid.is_some() || resolved_gid.is_some() {
             std::os::unix::fs::chown(p, resolved_uid, resolved_gid).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -467,6 +463,10 @@ pub fn set_local_permissions(
                     AppError::from(e)
                 }
             })?;
+        }
+        if let Some(m) = mode {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m))
+                .map_err(AppError::from)?;
         }
         Ok(())
     }

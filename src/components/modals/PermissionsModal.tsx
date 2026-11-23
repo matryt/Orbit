@@ -294,9 +294,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
     const parsed = octalToMode(value);
     if (parsed !== null) {
       setMatrix(modeToBits(parsed));
-      if (value.trim().length >= 4) {
-        setSpecialBits(parsed & 0o7000);
-      }
+      setSpecialBits(parsed & 0o7000);
       setOctalError(false);
     } else {
       setOctalError(true);
