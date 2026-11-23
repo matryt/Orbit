@@ -686,4 +686,42 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_local_permissions_does_not_follow_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = create_test_dir();
+
+        // Target file located outside the folder being chmod'd
+        let external_target = temp_dir.join("external_secret.txt");
+        std::fs::write(&external_target, "secret").unwrap();
+        std::fs::set_permissions(&external_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Folder containing a normal file and a symlink to external_target
+        let folder = temp_dir.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let symlink_path = folder.join("link_to_secret.txt");
+        std::os::unix::fs::symlink(&external_target, &symlink_path).unwrap();
+
+        let normal_child = folder.join("normal.txt");
+        std::fs::write(&normal_child, "normal").unwrap();
+
+        // Run recursive chmod on folder to 0o777
+        set_local_permissions(&folder.to_string_lossy(), Some(0o777), None, None, true).unwrap();
+
+        // Normal child must be updated
+        let normal_meta = std::fs::metadata(&normal_child).unwrap();
+        assert_eq!(normal_meta.permissions().mode() & 0o777, 0o777);
+
+        // Security assertion: external target permissions must NOT be modified
+        let target_meta = std::fs::metadata(&external_target).unwrap();
+        assert_eq!(
+            target_meta.permissions().mode() & 0o777,
+            0o600,
+            "Security assertion failed: recursive chmod followed symlink outside target directory!"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
