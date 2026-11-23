@@ -47,13 +47,31 @@ pub fn format_unix_mode(mode: u32, is_dir: bool) -> String {
     let prefix = if is_dir { 'd' } else { '-' };
     let r_usr = if mode & 0o400 != 0 { 'r' } else { '-' };
     let w_usr = if mode & 0o200 != 0 { 'w' } else { '-' };
-    let x_usr = if mode & 0o100 != 0 { 'x' } else { '-' };
+    let x_usr = if mode & 0o4000 != 0 {
+        if mode & 0o100 != 0 { 's' } else { 'S' }
+    } else if mode & 0o100 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     let r_grp = if mode & 0o040 != 0 { 'r' } else { '-' };
     let w_grp = if mode & 0o020 != 0 { 'w' } else { '-' };
-    let x_grp = if mode & 0o010 != 0 { 'x' } else { '-' };
+    let x_grp = if mode & 0o2000 != 0 {
+        if mode & 0o010 != 0 { 's' } else { 'S' }
+    } else if mode & 0o010 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     let r_oth = if mode & 0o004 != 0 { 'r' } else { '-' };
     let w_oth = if mode & 0o002 != 0 { 'w' } else { '-' };
-    let x_oth = if mode & 0o001 != 0 { 'x' } else { '-' };
+    let x_oth = if mode & 0o1000 != 0 {
+        if mode & 0o001 != 0 { 't' } else { 'T' }
+    } else if mode & 0o001 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     format!(
         "{}{}{}{}{}{}{}{}{}{}",
         prefix, r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth
@@ -627,6 +645,14 @@ mod tests {
 
         let file_mode = format_unix_mode(0o644, false);
         assert_eq!(file_mode, "-rw-r--r--");
+
+        // Special bits: setuid, setgid, sticky
+        assert_eq!(format_unix_mode(0o4755, false), "-rwsr-xr-x");
+        assert_eq!(format_unix_mode(0o4644, false), "-rwSr--r--");
+        assert_eq!(format_unix_mode(0o2755, false), "-rwxr-sr-x");
+        assert_eq!(format_unix_mode(0o2744, false), "-rwxr-Sr--");
+        assert_eq!(format_unix_mode(0o1755, true), "drwxr-xr-t");
+        assert_eq!(format_unix_mode(0o1744, true), "drwxr--r-T");
     }
 
     #[cfg(unix)]

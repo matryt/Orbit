@@ -269,7 +269,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
 
   if (!isOpen || !file) return null;
 
-  const currentMode = bitsToMode(matrix);
+  const currentMode = (specialBits & 0o7000) | bitsToMode(matrix);
   const symbolic = modeToSymbolic(currentMode, file.is_dir);
 
   const handleCheckboxChange = (
@@ -284,7 +284,7 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
       },
     };
     setMatrix(updated);
-    const newMode = bitsToMode(updated);
+    const newMode = (specialBits & 0o7000) | bitsToMode(updated);
     setOctalInput(modeToOctal(newMode));
     setOctalError(false);
   };
@@ -312,10 +312,8 @@ export const PermissionsModal: React.FC<PermissionsModalProps> = ({
     try {
       const owner = ownerInput.trim();
       const group = groupInput.trim();
-      // Combine special bits with current 9-bit rwx mode
-      const finalMode = (specialBits & 0o7000) | currentMode;
       await onSave(
-        finalMode,
+        currentMode,
         owner || null,
         group || null,
         file.is_dir && recursive

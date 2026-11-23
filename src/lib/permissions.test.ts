@@ -47,6 +47,8 @@ describe('permissions utilities', () => {
     assert.equal(modeToOctal(0o700), '0700');
     assert.equal(modeToOctal(0o000), '0000');
     assert.equal(modeToOctal(0o777), '0777');
+    assert.equal(modeToOctal(0o4755), '4755');
+    assert.equal(modeToOctal(0o1777), '1777');
   });
 
   it('parses octal strings into numeric mode', () => {
@@ -73,6 +75,14 @@ describe('permissions utilities', () => {
     assert.equal(modeToSymbolic(0o644, false), '-rw-r--r--');
     assert.equal(modeToSymbolic(0o700, true), 'drwx------');
     assert.equal(modeToSymbolic(0o000, false), '----------');
+
+    // Special bits
+    assert.equal(modeToSymbolic(0o4755, false), '-rwsr-xr-x');
+    assert.equal(modeToSymbolic(0o4644, false), '-rwSr--r--');
+    assert.equal(modeToSymbolic(0o2755, false), '-rwxr-sr-x');
+    assert.equal(modeToSymbolic(0o2744, false), '-rwxr-Sr--');
+    assert.equal(modeToSymbolic(0o1755, true), 'drwxr-xr-t');
+    assert.equal(modeToSymbolic(0o1744, true), 'drwxr--r-T');
   });
 
   it('parses symbolic permission strings', () => {

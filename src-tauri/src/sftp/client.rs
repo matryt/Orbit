@@ -1647,13 +1647,31 @@ fn format_permissions(mode: Option<u32>, is_dir: bool) -> String {
     if let Some(m) = mode {
         let r_usr = if m & 0o400 != 0 { 'r' } else { '-' };
         let w_usr = if m & 0o200 != 0 { 'w' } else { '-' };
-        let x_usr = if m & 0o100 != 0 { 'x' } else { '-' };
+        let x_usr = if m & 0o4000 != 0 {
+            if m & 0o100 != 0 { 's' } else { 'S' }
+        } else if m & 0o100 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         let r_grp = if m & 0o040 != 0 { 'r' } else { '-' };
         let w_grp = if m & 0o020 != 0 { 'w' } else { '-' };
-        let x_grp = if m & 0o010 != 0 { 'x' } else { '-' };
+        let x_grp = if m & 0o2000 != 0 {
+            if m & 0o010 != 0 { 's' } else { 'S' }
+        } else if m & 0o010 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         let r_oth = if m & 0o004 != 0 { 'r' } else { '-' };
         let w_oth = if m & 0o002 != 0 { 'w' } else { '-' };
-        let x_oth = if m & 0o001 != 0 { 'x' } else { '-' };
+        let x_oth = if m & 0o1000 != 0 {
+            if m & 0o001 != 0 { 't' } else { 'T' }
+        } else if m & 0o001 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         format!(
             "{}{}{}{}{}{}{}{}{}",
             r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth
@@ -2140,13 +2158,16 @@ impl StorageProvider for SftpProvider {
                     let mut c_uid = resolved_uid;
                     let mut c_gid = resolved_gid;
                     if c_uid.is_none() || c_gid.is_none() {
-                        if let Ok(meta) = self.session.metadata(&child_path).await {
-                            if c_uid.is_none() {
-                                c_uid = meta.uid;
-                            }
-                            if c_gid.is_none() {
-                                c_gid = meta.gid;
-                            }
+                        let meta = self.session.metadata(&child_path).await.map_err(|e| {
+                            AppError::Sftp(format!(
+                                "Échec de lecture des métadonnées de '{child_path}': {e}"
+                            ))
+                        })?;
+                        if c_uid.is_none() {
+                            c_uid = meta.uid;
+                        }
+                        if c_gid.is_none() {
+                            c_gid = meta.gid;
                         }
                     }
                     if let Some(u) = c_uid {
@@ -2175,13 +2196,14 @@ impl StorageProvider for SftpProvider {
             let mut r_uid = resolved_uid;
             let mut r_gid = resolved_gid;
             if r_uid.is_none() || r_gid.is_none() {
-                if let Ok(meta) = self.session.metadata(path).await {
-                    if r_uid.is_none() {
-                        r_uid = meta.uid;
-                    }
-                    if r_gid.is_none() {
-                        r_gid = meta.gid;
-                    }
+                let meta = self.session.metadata(path).await.map_err(|e| {
+                    AppError::Sftp(format!("Échec de lecture des métadonnées de '{path}': {e}"))
+                })?;
+                if r_uid.is_none() {
+                    r_uid = meta.uid;
+                }
+                if r_gid.is_none() {
+                    r_gid = meta.gid;
                 }
             }
             if let Some(u) = r_uid {

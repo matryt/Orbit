@@ -58,11 +58,11 @@ export function modeToBits(mode: number): PermissionMatrix {
 }
 
 /**
- * Formats a mode as a 4-digit octal string (e.g. "0755", "0644").
+ * Formats a mode as a 4-digit octal string (e.g. "0755", "0644", "4755").
  */
 export function modeToOctal(mode: number): string {
-  const m = mode & 0o777;
-  return `0${m.toString(8).padStart(3, '0')}`;
+  const m = mode & 0o7777;
+  return m.toString(8).padStart(4, '0');
 }
 
 /**
@@ -82,20 +82,29 @@ export function octalToMode(octalStr: string): number | null {
 }
 
 /**
- * Formats a numeric mode as a 10-character symbolic string (e.g. "-rwxr-xr-x", "drwxr-xr-x").
+ * Formats a numeric mode as a 10-character symbolic string (e.g. "-rwxr-xr-x", "drwxr-xr-x", "-rwsr-xr-x").
+ * Represents special bits (setuid, setgid, sticky) using standard Unix s/S and t/T notation.
  */
 export function modeToSymbolic(mode: number, isDir = false): string {
-  const m = mode & 0o777;
+  const m = mode & 0o7777;
   const prefix = isDir ? 'd' : '-';
   const r_usr = m & 0o400 ? 'r' : '-';
   const w_usr = m & 0o200 ? 'w' : '-';
-  const x_usr = m & 0o100 ? 'x' : '-';
+  const x_usr = m & 0o4000
+    ? (m & 0o100 ? 's' : 'S')
+    : (m & 0o100 ? 'x' : '-');
+
   const r_grp = m & 0o040 ? 'r' : '-';
   const w_grp = m & 0o020 ? 'w' : '-';
-  const x_grp = m & 0o010 ? 'x' : '-';
+  const x_grp = m & 0o2000
+    ? (m & 0o010 ? 's' : 'S')
+    : (m & 0o010 ? 'x' : '-');
+
   const r_oth = m & 0o004 ? 'r' : '-';
   const w_oth = m & 0o002 ? 'w' : '-';
-  const x_oth = m & 0o001 ? 'x' : '-';
+  const x_oth = m & 0o1000
+    ? (m & 0o001 ? 't' : 'T')
+    : (m & 0o001 ? 'x' : '-');
 
   return `${prefix}${r_usr}${w_usr}${x_usr}${r_grp}${w_grp}${x_grp}${r_oth}${w_oth}${x_oth}`;
 }
