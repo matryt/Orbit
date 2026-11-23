@@ -87,6 +87,10 @@ pub fn run() {
             commands::local_rename,
             commands::check_app_update,
             commands::open_in_external_terminal,
+            commands::storage_set_permissions,
+            commands::local_set_permissions,
+            commands::storage_list_identities,
+            commands::local_list_identities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

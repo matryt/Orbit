@@ -55,7 +55,7 @@ fn join_relative(parent: &str, name: &str) -> String {
     }
 }
 
-fn join_remote(root: &str, relative: &str) -> String {
+pub fn join_remote(root: &str, relative: &str) -> String {
     if relative.is_empty() {
         root.to_string()
     } else if root.ends_with('/') {

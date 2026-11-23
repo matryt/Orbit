@@ -283,6 +283,172 @@ pub fn rename_local_item(old_path: &str, new_path: &str) -> Result<(), AppError>
     std::fs::rename(old_p, new_p).map_err(AppError::from)
 }
 
+#[cfg(unix)]
+pub fn resolve_user_to_uid(user: &str) -> Result<u32, AppError> {
+    let trimmed = user.trim();
+    if let Ok(uid) = trimmed.parse::<u32>() {
+        return Ok(uid);
+    }
+    let c_user = std::ffi::CString::new(trimmed)
+        .map_err(|_| AppError::InvalidPath("Nom d'utilisateur invalide".into()))?;
+    unsafe {
+        let mut pwd = std::mem::zeroed::<libc::passwd>();
+        let mut result = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        let res = libc::getpwnam_r(
+            c_user.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        );
+        if res == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+            Ok(pwd.pw_uid)
+        } else {
+            Err(AppError::NotFound(format!(
+                "Utilisateur local '{trimmed}' introuvable"
+            )))
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn resolve_group_to_gid(group: &str) -> Result<u32, AppError> {
+    let trimmed = group.trim();
+    if let Ok(gid) = trimmed.parse::<u32>() {
+        return Ok(gid);
+    }
+    let c_group = std::ffi::CString::new(trimmed)
+        .map_err(|_| AppError::InvalidPath("Nom de groupe invalide".into()))?;
+    unsafe {
+        let mut grp = std::mem::zeroed::<libc::group>();
+        let mut result = std::ptr::null_mut();
+        let mut buf = vec![0u8; 1024];
+        let res = libc::getgrnam_r(
+            c_group.as_ptr(),
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        );
+        if res == 0 && !result.is_null() && !grp.gr_name.is_null() {
+            Ok(grp.gr_gid)
+        } else {
+            Err(AppError::NotFound(format!(
+                "Groupe local '{trimmed}' introuvable"
+            )))
+        }
+    }
+}
+
+pub fn set_local_permissions(
+    path: &str,
+    mode: Option<u32>,
+    owner: Option<&str>,
+    group: Option<&str>,
+    recursive: bool,
+) -> Result<(), AppError> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Err(AppError::NotFound(format!("Fichier introuvable: {path}")));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let resolved_uid = if let Some(user_str) = owner {
+            let trimmed = user_str.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(resolve_user_to_uid(trimmed)?)
+            }
+        } else {
+            None
+        };
+
+        let resolved_gid = if let Some(group_str) = group {
+            let trimmed = group_str.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(resolve_group_to_gid(trimmed)?)
+            }
+        } else {
+            None
+        };
+
+        if recursive && p.is_dir() {
+            let walk_res = crate::walk::walk_local(p)?;
+            let mut sorted_entries = walk_res.entries;
+            sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
+
+            for entry in sorted_entries {
+                let child = p.join(&entry.relative_path);
+                if let Some(m) = mode {
+                    let _ = std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m));
+                }
+                if resolved_uid.is_some() || resolved_gid.is_some() {
+                    let _ = std::os::unix::fs::chown(&child, resolved_uid, resolved_gid);
+                }
+            }
+        }
+
+        if let Some(m) = mode {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m))
+                .map_err(AppError::from)?;
+        }
+        if resolved_uid.is_some() || resolved_gid.is_some() {
+            std::os::unix::fs::chown(p, resolved_uid, resolved_gid).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    AppError::PermissionDenied(format!(
+                        "Permission refusée pour changer le propriétaire de '{}' (privilèges administrateur / sudo requis)",
+                        p.display()
+                    ))
+                } else {
+                    AppError::from(e)
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (mode, owner, group, recursive);
+        Err(AppError::Config(
+            "La modification des permissions et propriétaires POSIX n'est pas supportée sur ce système".into(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+pub fn list_local_identities() -> (Vec<String>, Vec<String>) {
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
+
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        let parsed = crate::sftp::client::parse_passwd(&passwd, "");
+        users.extend(parsed.users.into_values());
+    }
+    if let Ok(group) = std::fs::read_to_string("/etc/group") {
+        let parsed = crate::sftp::client::parse_group(&group);
+        groups.extend(parsed.into_values());
+    }
+
+    users.sort();
+    users.dedup();
+    groups.sort();
+    groups.dedup();
+    (users, groups)
+}
+
+#[cfg(not(unix))]
+pub fn list_local_identities() -> (Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +588,37 @@ mod tests {
 
         let file_mode = format_unix_mode(0o644, false);
         assert_eq!(file_mode, "-rw-r--r--");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_local_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = create_test_dir();
+        let file_path = temp_dir.join("perm_test.txt");
+        std::fs::write(&file_path, "hello permissions").unwrap();
+
+        set_local_permissions(&file_path.to_string_lossy(), Some(0o600), None, None, false)
+            .unwrap();
+        let meta = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+
+        // Recursive test on folder
+        let sub_dir = temp_dir.join("sub");
+        std::fs::create_dir(&sub_dir).unwrap();
+        let sub_file = sub_dir.join("sub_file.txt");
+        std::fs::write(&sub_file, "nested").unwrap();
+
+        set_local_permissions(&sub_dir.to_string_lossy(), Some(0o750), None, None, true).unwrap();
+        let sub_dir_meta = std::fs::metadata(&sub_dir).unwrap();
+        assert_eq!(sub_dir_meta.permissions().mode() & 0o777, 0o750);
+        let sub_file_meta = std::fs::metadata(&sub_file).unwrap();
+        assert_eq!(sub_file_meta.permissions().mode() & 0o777, 0o750);
+
+        // Test user resolution
+        let root_uid = resolve_user_to_uid("0").unwrap();
+        assert_eq!(root_uid, 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

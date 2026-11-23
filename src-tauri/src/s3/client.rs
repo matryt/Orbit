@@ -847,6 +847,19 @@ impl StorageProvider for S3Provider {
         transfer.complete();
         Ok(())
     }
+
+    async fn set_permissions(
+        &self,
+        _path: &str,
+        _mode: Option<u32>,
+        _owner: Option<&str>,
+        _group: Option<&str>,
+        _recursive: bool,
+    ) -> Result<(), AppError> {
+        Err(AppError::Config(
+            "La modification des permissions et propriétaires POSIX n'est pas supportée sur le stockage S3".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

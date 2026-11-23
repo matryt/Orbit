@@ -1359,6 +1359,38 @@ impl SftpProvider {
         maps
     }
 
+    pub async fn resolve_identity_str_to_id(
+        &self,
+        name_or_id: &str,
+        is_group: bool,
+    ) -> Result<u32, AppError> {
+        let trimmed = name_or_id.trim();
+        if let Ok(id) = trimmed.parse::<u32>() {
+            return Ok(id);
+        }
+
+        let identities = self.get_or_load_identities().await;
+        if is_group {
+            identities
+                .groups
+                .iter()
+                .find(|(_, name)| name.as_str() == trimmed)
+                .map(|(gid, _)| *gid)
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Groupe distant '{trimmed}' introuvable"))
+                })
+        } else {
+            identities
+                .users
+                .iter()
+                .find(|(_, name)| name.as_str() == trimmed)
+                .map(|(uid, _)| *uid)
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Utilisateur distant '{trimmed}' introuvable"))
+                })
+        }
+    }
+
     async fn load_system_identities(
         session: &SftpSession,
         current_username: &str,
@@ -2055,12 +2087,97 @@ impl StorageProvider for SftpProvider {
         Ok(())
     }
 
+    async fn set_permissions(
+        &self,
+        path: &str,
+        mode: Option<u32>,
+        owner: Option<&str>,
+        group: Option<&str>,
+        recursive: bool,
+    ) -> Result<(), AppError> {
+        validate_path_safety(path)?;
+
+        let resolved_uid = if let Some(u) = owner {
+            if u.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_identity_str_to_id(u, false).await?)
+            }
+        } else {
+            None
+        };
+
+        let resolved_gid = if let Some(g) = group {
+            if g.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_identity_str_to_id(g, true).await?)
+            }
+        } else {
+            None
+        };
+
+        let create_attrs = || {
+            let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+            if let Some(m) = mode {
+                attrs.permissions = Some(m);
+            }
+            if let Some(u) = resolved_uid {
+                attrs.uid = Some(u);
+            }
+            if let Some(g) = resolved_gid {
+                attrs.gid = Some(g);
+            }
+            attrs
+        };
+
+        if recursive {
+            if let Ok(entries) = self.walk(path).await {
+                let mut sorted_entries = entries;
+                sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
+
+                for entry in sorted_entries {
+                    let child_path = crate::walk::join_remote(path, &entry.relative_path);
+                    if validate_path_safety(&child_path).is_ok() {
+                        let attrs = create_attrs();
+                        let _ = self.session.set_metadata(&child_path, attrs).await;
+                    }
+                }
+            }
+        }
+
+        let attrs = create_attrs();
+        self.session.set_metadata(path, attrs).await.map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.to_lowercase().contains("permission denied") {
+                AppError::PermissionDenied(format!("Permission refusée pour modifier '{path}' (droits administrateur / sudo requis pour changer le propriétaire)"))
+            } else {
+                AppError::Sftp(format!(
+                    "Échec de modification des attributs de '{path}': {e}"
+                ))
+            }
+        })?;
+
+        Ok(())
+    }
+
     fn is_elevated(&self) -> bool {
         self.is_elevated
     }
 
     fn sudo_capability(&self) -> SudoCapability {
         self.sudo_capability
+    }
+
+    async fn list_identities(&self) -> Result<(Vec<String>, Vec<String>), AppError> {
+        let maps = self.get_or_load_identities().await;
+        let mut users: Vec<String> = maps.users.into_values().collect();
+        let mut groups: Vec<String> = maps.groups.into_values().collect();
+        users.sort();
+        users.dedup();
+        groups.sort();
+        groups.dedup();
+        Ok((users, groups))
     }
 }
 

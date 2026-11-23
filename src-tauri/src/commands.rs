@@ -597,3 +597,64 @@ pub async fn open_in_external_terminal(
     crate::terminal::launch_terminal(profile, &profiles, remote_path.as_deref())
         .map_err(AppError::Io)
 }
+
+#[tauri::command]
+pub async fn storage_set_permissions(
+    profile_id: Option<String>,
+    path: String,
+    mode: Option<u32>,
+    owner: Option<String>,
+    group: Option<String>,
+    recursive: bool,
+    sessions: State<'_, SessionManager>,
+) -> Result<(), AppError> {
+    let provider = sessions.get_provider(profile_id.as_deref()).await?;
+    provider
+        .set_permissions(&path, mode, owner.as_deref(), group.as_deref(), recursive)
+        .await
+}
+
+#[tauri::command]
+pub async fn local_set_permissions(
+    path: String,
+    mode: Option<u32>,
+    owner: Option<String>,
+    group: Option<String>,
+    recursive: bool,
+) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || {
+        crate::local_fs::set_local_permissions(
+            &path,
+            mode,
+            owner.as_deref(),
+            group.as_deref(),
+            recursive,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[derive(serde::Serialize)]
+pub struct SystemIdentities {
+    pub users: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn storage_list_identities(
+    profile_id: Option<String>,
+    sessions: State<'_, SessionManager>,
+) -> Result<SystemIdentities, AppError> {
+    let provider = sessions.get_provider(profile_id.as_deref()).await?;
+    let (users, groups) = provider.list_identities().await?;
+    Ok(SystemIdentities { users, groups })
+}
+
+#[tauri::command]
+pub async fn local_list_identities() -> Result<SystemIdentities, AppError> {
+    let (users, groups) = tokio::task::spawn_blocking(crate::local_fs::list_local_identities)
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?;
+    Ok(SystemIdentities { users, groups })
+}
