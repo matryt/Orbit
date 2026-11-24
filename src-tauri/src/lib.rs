@@ -28,10 +28,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .manage(SessionManager::new())
         .manage(transfer::TransferManager::new())
         .manage(Arc::new(HostKeyPromptManager::new()))
         .setup(|_app| {
+            #[cfg(desktop)]
+            _app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 let window = _app.get_webview_window("main").unwrap();

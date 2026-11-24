@@ -2,6 +2,16 @@ import { create } from 'zustand';
 import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferGroup, TransferItem, UpdateCheckResult } from '../types';
 import { MOCK_REMOTE_FILES } from '../data/mockData';
 import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
+import {
+  SnoozeDuration,
+  UpdateSnooze,
+  clearSnooze,
+  createSnooze,
+  isUpdateSnoozed,
+  loadSnooze,
+  normalizeVersion,
+  saveSnooze,
+} from '../lib/updateSnooze';
 import { buildNewFolderPath, buildRenamePath, canOpenTerminal, resolveTerminalTargetPath } from '../lib/pathUtils';
 import {
   findFileDirCollisions,
@@ -176,9 +186,27 @@ interface OrbitState {
   isUpdateModalOpen: boolean;
   updateCheckError: string | null;
   lastUpdateCheckTime: number;
+  /** Persisted "remind me later" choice, bound to one release version. */
+  updateSnooze: UpdateSnooze | null;
+  /** Version whose prompt was closed without a choice: not shown again during this session. */
+  dismissedUpdateVersion: string | null;
+  /** True while an in-app update downloads or installs; background checks are suspended. */
+  isInstallingUpdate: boolean;
+  setInstallingUpdate: (installing: boolean) => void;
   checkForUpdates: (notifyIfUpToDate?: boolean) => Promise<void>;
   setUpdateModalOpen: (open: boolean) => void;
+  /** Closes the prompt; automatic checks will not reopen it for this version until restart. */
   dismissUpdate: () => void;
+  snoozeUpdate: (duration: SnoozeDuration) => void;
+  clearUpdateSnooze: () => void;
+}
+
+/** Whether an automatic (non user-initiated) check may open the update prompt. */
+function shouldAutoPromptUpdate(state: OrbitState, result: UpdateCheckResult | null): boolean {
+  if (!result?.has_update) return false;
+  const version = normalizeVersion(result.latest_version);
+  if (state.dismissedUpdateVersion === version) return false;
+  return !isUpdateSnoozed(state.updateSnooze, version, Date.now());
 }
 
 let remoteNavGen = 0;
@@ -1332,16 +1360,20 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   isUpdateModalOpen: false,
   updateCheckError: null,
   lastUpdateCheckTime: 0,
+  updateSnooze: loadSnooze(),
+  dismissedUpdateVersion: null,
+  isInstallingUpdate: false,
+  setInstallingUpdate: (installing) => set({ isInstallingUpdate: installing }),
 
   checkForUpdates: async (notifyIfUpToDate = false) => {
-    // 1. Prevent duplicate in-flight checks
-    if (get().isCheckingUpdate) return;
+    // 1. Prevent duplicate in-flight checks, and keep the install progress on screen
+    if (get().isCheckingUpdate || get().isInstallingUpdate) return;
 
     // 2. Cache successful checks for 15 minutes unless manually requested
     const now = Date.now();
     const { availableUpdate, lastUpdateCheckTime } = get();
     if (!notifyIfUpToDate && availableUpdate && now - lastUpdateCheckTime < 15 * 60 * 1000) {
-      if (availableUpdate.has_update) {
+      if (shouldAutoPromptUpdate(get(), availableUpdate)) {
         set({ isUpdateModalOpen: true });
       }
       return;
@@ -1351,7 +1383,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     try {
       const result = await storageApi.checkAppUpdate();
       set({ availableUpdate: result, isCheckingUpdate: false, lastUpdateCheckTime: Date.now() });
-      if (result.has_update || notifyIfUpToDate) {
+      // A manual check always shows its result; automatic ones honor snooze and dismissal.
+      if (notifyIfUpToDate || shouldAutoPromptUpdate(get(), result)) {
         set({ isUpdateModalOpen: true });
       }
     } catch (err: any) {
@@ -1365,5 +1398,30 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   setUpdateModalOpen: (open) => set({ isUpdateModalOpen: open }),
-  dismissUpdate: () => set({ isUpdateModalOpen: false }),
+  dismissUpdate: () => {
+    const { availableUpdate } = get();
+    set({
+      isUpdateModalOpen: false,
+      dismissedUpdateVersion: availableUpdate?.has_update
+        ? normalizeVersion(availableUpdate.latest_version)
+        : get().dismissedUpdateVersion,
+    });
+  },
+
+  snoozeUpdate: (duration) => {
+    const { availableUpdate } = get();
+    if (!availableUpdate?.has_update) {
+      set({ isUpdateModalOpen: false });
+      return;
+    }
+    const snooze = createSnooze(availableUpdate.latest_version, duration, Date.now());
+    saveSnooze(snooze);
+    // An explicit choice replaces any earlier session dismissal, so a timed reminder can expire.
+    set({ updateSnooze: snooze, dismissedUpdateVersion: null, isUpdateModalOpen: false });
+  },
+
+  clearUpdateSnooze: () => {
+    clearSnooze();
+    set({ updateSnooze: null, dismissedUpdateVersion: null });
+  },
 }));
