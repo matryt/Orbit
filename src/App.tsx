@@ -12,6 +12,10 @@ import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
 import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
 import { UpdateModal } from './components/modals/UpdateModal';
 import { TransferConflictModal } from './components/modals/TransferConflictModal';
+import { LocalEditConflictModal } from './components/modals/LocalEditConflictModal';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import type { LocalEditInfo } from './types';
 
 const UPDATE_RECHECK_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -25,7 +29,46 @@ export function App() {
     checkForUpdates,
     isNewConnectionModalOpen,
     isExportModalOpen,
+    loadLocalEdits,
+    applyLocalEditStatus,
+    applyLocalEditClosed,
+    confirmCloseLocalEdits,
   } = useOrbitStore();
+
+  // Local edit sessions: initial state, then backend events.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const track = (p: Promise<() => void>) =>
+      p.then((un) => (disposed ? un() : unlisteners.push(un))).catch((err) =>
+        console.error('Failed to listen to local edit events:', err)
+      );
+    track(listen<LocalEditInfo>('local-edit://status', (e) => applyLocalEditStatus(e.payload)));
+    track(listen<string>('local-edit://closed', (e) => applyLocalEditClosed(e.payload)));
+    loadLocalEdits();
+    return () => {
+      disposed = true;
+      unlisteners.forEach((un) => un());
+    };
+  }, [loadLocalEdits, applyLocalEditStatus, applyLocalEditClosed]);
+
+  // Closing the window ends every local edit session: ask first.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (!(await confirmCloseLocalEdits())) event.preventDefault();
+      })
+      .then((un) => (disposed ? un() : (unlisten = un)))
+      .catch((err) => console.error('Failed to register close handler:', err));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [confirmCloseLocalEdits]);
 
   // Load saved profiles from disk on startup & check for updates silently
   useEffect(() => {
@@ -192,6 +235,7 @@ export function App() {
       <HostKeyVerificationModal />
       <UpdateModal />
       <TransferConflictModal />
+      <LocalEditConflictModal />
     </div>
   );
 }

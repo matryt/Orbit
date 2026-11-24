@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
+import { LocalEditsIndicator } from '../localEdit/LocalEditsIndicator';
 
 export const Header: React.FC = () => {
   const {
@@ -206,6 +207,9 @@ export const Header: React.FC = () => {
 
       {/* Right: Actions, Filter and Dual Pane toggle */}
       <div className="flex items-center gap-2">
+        {/* Files opened in a local editor */}
+        <LocalEditsIndicator />
+
         {/* Available update pill */}
         {availableUpdate?.has_update && (
           <button

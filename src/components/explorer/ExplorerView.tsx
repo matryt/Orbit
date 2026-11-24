@@ -26,6 +26,7 @@ import {
   ShieldAlert,
   Terminal,
   KeyRound,
+  FilePen,
 } from 'lucide-react';
 import { PermissionsModal } from '../modals/PermissionsModal';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -95,6 +96,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setActiveDrag,
     openExternalTerminal,
     activeProfileId,
+    openLocalEdit,
+    isElevated,
   } = useOrbitStore();
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
@@ -1028,6 +1031,28 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                     <span>Aperçu rapide</span>
                   </div>
                   <kbd className="text-[10px] text-zinc-500 bg-white/5 px-1 py-0.5 rounded font-mono">Espace</kbd>
+                </button>
+              )}
+
+              {/* Edit in a local text editor (remote files; uploaded back on each save) */}
+              {!isLocal && !contextMenu.file.is_dir && isTauri() && (
+                <button
+                  type="button"
+                  disabled={isElevated}
+                  onClick={() => {
+                    const target = contextMenu.file;
+                    setContextMenu(null);
+                    if (target) openLocalEdit(target.path);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                  title={
+                    isElevated
+                      ? "Désactivé en mode sudo"
+                      : "Ouvrir dans l'éditeur de texte du système ; chaque enregistrement est renvoyé sur le serveur"
+                  }
+                >
+                  <FilePen className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Modifier localement</span>
                 </button>
               )}
 

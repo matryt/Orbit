@@ -43,6 +43,18 @@ pub struct FileEntry {
     pub etag: Option<String>,
 }
 
+/// Identity of a remote file revision, used to detect changes made by someone else.
+///
+/// Two fingerprints are equal when the remote file was (very likely) not modified in between.
+/// SFTP only offers a one-second `mtime` resolution, so a same-size change within the same
+/// second goes unnoticed; S3 adds the ETag, which changes with the content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFingerprint {
+    pub size: u64,
+    pub modified: Option<String>,
+    pub etag: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferProgress {
     pub transfer_id: String,

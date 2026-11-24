@@ -10,7 +10,7 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::models::{FileEntry, S3ConnectConfig};
+use crate::models::{FileEntry, RemoteFingerprint, S3ConnectConfig};
 use crate::provider::StorageProvider;
 use crate::transfer::{
     TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
@@ -510,6 +510,37 @@ impl StorageProvider for S3Provider {
         }
 
         Ok(())
+    }
+
+    async fn fingerprint(&self, path: &str) -> Result<RemoteFingerprint, AppError> {
+        let key = Self::normalize_key(path);
+        if key.is_empty() || key.ends_with('/') {
+            return Err(AppError::InvalidPath(format!("{path} est un dossier")));
+        }
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.as_service_error().is_some_and(|se| se.is_not_found()) {
+                    AppError::NotFound(format!("Objet introuvable : {path}"))
+                } else {
+                    AppError::S3(format!(
+                        "Impossible de lire les métadonnées de {path} : {e}"
+                    ))
+                }
+            })?;
+        Ok(RemoteFingerprint {
+            size: resp.content_length().unwrap_or(0).max(0) as u64,
+            modified: resp
+                .last_modified()
+                .and_then(|dt| dt.to_millis().ok())
+                .map(|ms| ms.to_string()),
+            etag: resp.e_tag().map(|e| e.trim_matches('"').to_string()),
+        })
     }
 
     async fn read_preview(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, AppError> {

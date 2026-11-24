@@ -15,7 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
-    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, SudoCapability,
+    FileEntry, HostKeyDecision, HostKeyPromptRequest, RemoteFingerprint, SftpConnectConfig,
+    SudoCapability,
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
@@ -2229,6 +2230,26 @@ impl StorageProvider for SftpProvider {
             })?;
 
         Ok(())
+    }
+
+    async fn fingerprint(&self, path: &str) -> Result<RemoteFingerprint, AppError> {
+        validate_path_safety(path)?;
+        let meta = self.session.metadata(path).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("no such file") {
+                AppError::NotFound(format!("Fichier distant introuvable : {path}"))
+            } else {
+                AppError::Sftp(format!("Cannot stat {path}: {e}"))
+            }
+        })?;
+        if meta.is_dir() {
+            return Err(AppError::InvalidPath(format!("{path} est un dossier")));
+        }
+        Ok(RemoteFingerprint {
+            size: meta.size.unwrap_or(0),
+            modified: meta.mtime.map(|t| t.to_string()),
+            etag: None,
+        })
     }
 
     fn is_elevated(&self) -> bool {

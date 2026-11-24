@@ -6,6 +6,7 @@ use tauri::ipc::Channel;
 use crate::config_service::ConfigService;
 use crate::error::AppError;
 use crate::keyring_service::KeyringService;
+use crate::local_edit::{LocalEditAction, LocalEditInfo, LocalEditManager};
 use crate::models::{
     ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, S3ConnectConfig,
     SftpConnectConfig, TransferProgress,
@@ -313,10 +314,13 @@ pub async fn get_session_info(
 
 #[tauri::command]
 pub async fn disconnect(
+    app: tauri::AppHandle,
     profile_id: String,
     state: State<'_, SessionManager>,
     transfers: State<'_, TransferManager>,
+    local_edits: State<'_, LocalEditManager>,
 ) -> Result<(), AppError> {
+    local_edits.close_for_profile(&app, &profile_id).await;
     transfers.cancel_for_profile(&profile_id).await;
     state.remove_provider(&profile_id).await;
     Ok(())
@@ -657,4 +661,42 @@ pub async fn local_list_identities() -> Result<SystemIdentities, AppError> {
         .await
         .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?;
     Ok(SystemIdentities { users, groups })
+}
+
+/// Opens a remote file in a local text editor; every save is uploaded back.
+#[tauri::command]
+pub async fn local_edit_open(
+    app: tauri::AppHandle,
+    profile_id: String,
+    remote_path: String,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<LocalEditInfo, AppError> {
+    local_edits.open(&app, &profile_id, &remote_path).await
+}
+
+#[tauri::command]
+pub async fn local_edit_list(
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<Vec<LocalEditInfo>, AppError> {
+    Ok(local_edits.list().await)
+}
+
+#[tauri::command]
+pub async fn local_edit_resolve(
+    id: String,
+    action: LocalEditAction,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<(), AppError> {
+    local_edits.send(&id, action).await
+}
+
+/// Stops syncing a file and deletes its local copy.
+#[tauri::command]
+pub async fn local_edit_close(
+    app: tauri::AppHandle,
+    id: String,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<(), AppError> {
+    local_edits.close(&app, &id).await;
+    Ok(())
 }

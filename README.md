@@ -26,6 +26,7 @@
   - Single-pane remote browser by default.
   - Dual-pane (**Local | Remote**) view toggled instantly via the toolbar or `Cmd/Ctrl + B`.
   - Search filter (`Cmd/Ctrl + F`) and clickable breadcrumb navigation.
+- ✏️ **Edit Locally**: Right-click a remote file → *Modifier localement* to open it in your system text editor (TextEdit / Notepad). Every save is uploaded back atomically, with conflict detection if the server copy changed meanwhile. The local copy lives in a private (`0700`) cache folder and is deleted when you finish, disconnect or quit.
 - 🏷️ **File Metadata & Permissions**: View permissions, owners, and groups (`owner:group`), size, and modification timestamps.
 - 📦 **Connection Profiles Management**: Save, edit, reconnect, or export/import connection profiles as clean JSON (with secrets safely kept in the OS keychain) to easily share configurations.
 

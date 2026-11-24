@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config_service;
 pub mod error;
 pub mod keyring_service;
+pub mod local_edit;
 pub mod local_fs;
 pub mod models;
 pub mod provider;
@@ -31,8 +32,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(SessionManager::new())
         .manage(transfer::TransferManager::new())
+        .manage(local_edit::LocalEditManager::new())
         .manage(Arc::new(HostKeyPromptManager::new()))
         .setup(|_app| {
+            // Sessions do not survive a restart: drop copies left by a crash or forced quit.
+            local_edit::purge_root(_app.handle());
+
             #[cfg(desktop)]
             _app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -96,7 +101,16 @@ pub fn run() {
             commands::local_set_permissions,
             commands::storage_list_identities,
             commands::local_list_identities,
+            commands::local_edit_open,
+            commands::local_edit_list,
+            commands::local_edit_resolve,
+            commands::local_edit_close,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                local_edit::purge_root(app);
+            }
+        });
 }

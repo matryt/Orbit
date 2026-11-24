@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::models::{FileEntry, SudoCapability};
+use crate::models::{FileEntry, RemoteFingerprint, SudoCapability};
 use crate::transfer::TransferHandle;
 use crate::walk::WalkEntry;
 use async_trait::async_trait;
@@ -51,6 +51,32 @@ pub trait StorageProvider: Send + Sync {
                 Err(_) => Err(err),
             },
         }
+    }
+
+    /// Returns the fingerprint of the regular file at `path`.
+    ///
+    /// The default implementation lists the parent directory; providers override it with a
+    /// single metadata request.
+    async fn fingerprint(&self, path: &str) -> Result<RemoteFingerprint, AppError> {
+        let trimmed = path.trim_end_matches('/');
+        let parent = match trimmed.rfind('/') {
+            Some(0) | None => "/",
+            Some(idx) => &trimmed[..idx],
+        };
+        let entry = self
+            .list_dir(parent)
+            .await?
+            .into_iter()
+            .find(|e| e.path == trimmed)
+            .ok_or_else(|| AppError::NotFound(format!("Fichier distant introuvable : {path}")))?;
+        if entry.is_dir {
+            return Err(AppError::InvalidPath(format!("{path} est un dossier")));
+        }
+        Ok(RemoteFingerprint {
+            size: entry.size,
+            modified: Some(entry.modified_at),
+            etag: entry.etag,
+        })
     }
 
     fn is_elevated(&self) -> bool {
