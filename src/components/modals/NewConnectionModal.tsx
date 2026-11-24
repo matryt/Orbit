@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { StorageType, ConnectionProfile } from '../../types';
 import { storageApi } from '../../services/storageApi';
+import { parsePortInput, resolvePort } from '../../lib/portUtils';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import {
   X,
@@ -49,7 +50,7 @@ export const NewConnectionModal: React.FC = () => {
 
   // SFTP state
   const [host, setHost] = useState('');
-  const [port, setPort] = useState(22);
+  const [port, setPort] = useState<number | ''>(22);
   const [username, setUsername] = useState('');
   const [authType, setAuthType] = useState<'key' | 'password'>('key');
   const [keyPath, setKeyPath] = useState('~/.ssh/id_ed25519');
@@ -63,7 +64,7 @@ export const NewConnectionModal: React.FC = () => {
   const [bastionMode, setBastionMode] = useState<'profile' | 'custom'>('profile');
   const [bastionProfileId, setBastionProfileId] = useState('');
   const [bastionHost, setBastionHost] = useState('');
-  const [bastionPort, setBastionPort] = useState(22);
+  const [bastionPort, setBastionPort] = useState<number | ''>(22);
   const [bastionUsername, setBastionUsername] = useState('');
   const [bastionAuthType, setBastionAuthType] = useState<'key' | 'password'>('key');
   const [bastionKeyPath, setBastionKeyPath] = useState('~/.ssh/id_ed25519');
@@ -75,7 +76,7 @@ export const NewConnectionModal: React.FC = () => {
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyType, setProxyType] = useState<'socks5' | 'http'>('socks5');
   const [proxyHost, setProxyHost] = useState('');
-  const [proxyPort, setProxyPort] = useState(1080);
+  const [proxyPort, setProxyPort] = useState<number | ''>(1080);
   const [proxyUsername, setProxyUsername] = useState('');
   const [proxyPassword, setProxyPassword] = useState('');
   const [showProxyPassword, setShowProxyPassword] = useState(false);
@@ -369,7 +370,7 @@ export const NewConnectionModal: React.FC = () => {
           bastionParam = {
             enabled: true,
             host: bastionHost.trim(),
-            port: Number(bastionPort) || 22,
+            port: resolvePort(bastionPort, 22),
             username: bastionUsername.trim(),
             authType: bastionAuthType,
             keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
@@ -385,7 +386,7 @@ export const NewConnectionModal: React.FC = () => {
           enabled: true,
           proxyType,
           host: proxyHost.trim(),
-          port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
+          port: resolvePort(proxyPort, proxyType === 'http' ? 8080 : 1080),
           username: proxyUsername.trim() || undefined,
           password: proxyPassword.trim() || undefined,
         };
@@ -395,7 +396,7 @@ export const NewConnectionModal: React.FC = () => {
         storageApi.testSftp({
           profile_id: editingProfile?.id || `test-${Date.now()}`,
           host: host.trim(),
-          port: Number(port) || 22,
+          port: resolvePort(port, 22),
           username: username.trim(),
           password: authType === 'password' ? password.trim() : undefined,
           key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
@@ -483,7 +484,7 @@ export const NewConnectionModal: React.FC = () => {
           bastionConfig = {
             enabled: true,
             host: bastionHost.trim(),
-            port: Number(bastionPort) || 22,
+            port: resolvePort(bastionPort, 22),
             username: bastionUsername.trim(),
             authType: bastionAuthType,
             keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
@@ -503,7 +504,7 @@ export const NewConnectionModal: React.FC = () => {
           enabled: true,
           proxyType,
           host: proxyHost.trim(),
-          port: Number(proxyPort) || (proxyType === 'http' ? 8080 : 1080),
+          port: resolvePort(proxyPort, proxyType === 'http' ? 8080 : 1080),
           username: proxyUsername.trim() || undefined,
         };
         proxySecretToSave = proxyPassword.trim();
@@ -533,7 +534,7 @@ export const NewConnectionModal: React.FC = () => {
             }
           : {
               host: host.trim(),
-              port: Number(port) || 22,
+              port: resolvePort(port, 22),
               username: username.trim(),
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
@@ -563,7 +564,7 @@ export const NewConnectionModal: React.FC = () => {
             }
           : {
               host: host.trim(),
-              port: Number(port) || 22,
+              port: resolvePort(port, 22),
               username: username.trim(),
               authType,
               keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
@@ -773,10 +774,18 @@ export const NewConnectionModal: React.FC = () => {
                   </label>
                   <input
                     type="number"
+                    min={0}
+                    max={65535}
+                    placeholder="22"
                     value={port}
                     onChange={(e) => {
-                      setPort(Number(e.target.value));
+                      setPort(parsePortInput(e.target.value));
                       setTestResult(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (['e', 'E', '+', '-', '.'].includes(e.key)) {
+                        e.preventDefault();
+                      }
                     }}
                     className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
                   />
@@ -1114,12 +1123,20 @@ export const NewConnectionModal: React.FC = () => {
                                   </label>
                                   <input
                                     type="number"
+                                    min={0}
+                                    max={65535}
+                                    placeholder="22"
                                     value={bastionPort}
                                     onChange={(e) => {
-                                      setBastionPort(Number(e.target.value));
+                                      setBastionPort(parsePortInput(e.target.value));
                                       setTestResult(null);
                                     }}
-                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-sky-500/50"
+                                    onKeyDown={(e) => {
+                                      if (['e', 'E', '+', '-', '.'].includes(e.key)) {
+                                        e.preventDefault();
+                                      }
+                                    }}
+                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white placeholder-zinc-500 font-mono focus:outline-none focus:border-sky-500/50"
                                   />
                                 </div>
                               </div>
@@ -1234,7 +1251,7 @@ export const NewConnectionModal: React.FC = () => {
                               type="button"
                               onClick={() => {
                                 setProxyType('socks5');
-                                if (proxyPort === 8080) setProxyPort(1080);
+                                if (resolvePort(proxyPort, 8080) === 8080) setProxyPort(1080);
                                 setTestResult(null);
                               }}
                               className={`py-1 rounded text-[11px] font-medium ${proxyType === 'socks5' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-zinc-400 hover:text-white'}`}
@@ -1245,7 +1262,7 @@ export const NewConnectionModal: React.FC = () => {
                               type="button"
                               onClick={() => {
                                 setProxyType('http');
-                                if (proxyPort === 1080) setProxyPort(8080);
+                                if (resolvePort(proxyPort, 1080) === 1080) setProxyPort(8080);
                                 setTestResult(null);
                               }}
                               className={`py-1 rounded text-[11px] font-medium ${proxyType === 'http' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'text-zinc-400 hover:text-white'}`}
@@ -1285,12 +1302,20 @@ export const NewConnectionModal: React.FC = () => {
                               </label>
                               <input
                                 type="number"
+                                min={0}
+                                max={65535}
+                                placeholder={proxyType === 'http' ? '8080' : '1080'}
                                 value={proxyPort}
                                 onChange={(e) => {
-                                  setProxyPort(Number(e.target.value));
+                                  setProxyPort(parsePortInput(e.target.value));
                                   setTestResult(null);
                                 }}
-                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-emerald-500/50"
+                                onKeyDown={(e) => {
+                                  if (['e', 'E', '+', '-', '.'].includes(e.key)) {
+                                    e.preventDefault();
+                                  }
+                                }}
+                                className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white placeholder-zinc-500 font-mono focus:outline-none focus:border-emerald-500/50"
                               />
                             </div>
                           </div>
