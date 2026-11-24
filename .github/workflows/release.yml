@@ -61,11 +61,30 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # In-app updates verify every artifact against the public key embedded in tauri.conf.json.
+      # Fail fast rather than shipping a build whose updater can never validate a release.
+      - name: Check updater signing configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if grep -q 'REPLACE_WITH_UPDATER_PUBLIC_KEY' src-tauri/tauri.conf.json; then
+            echo "::error::plugins.updater.pubkey is still a placeholder in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY repository secret (updater signing key)"
+            exit 1
+          fi
+
       # Build frontend and compile Tauri native bundles
       - name: Build and Package with Tauri
         uses: tauri-apps/tauri-action@2a8db2c169af2fdc695133781e27ecba52daea75 # v0.5.17
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts (.app.tar.gz / installers) and produces their .sig files.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # NOTE: Pour activer la signature Apple officielle et la notarisation
           # lorsque vous aurez un compte Apple Developer ($99/an), décommentez les lignes suivantes :
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -92,6 +111,10 @@ jobs:
           releaseDraft: ${{ inputs.draft || false }}
           prerelease: false
           args: ${{ matrix.platform.args }}
+          # Publish latest.json for the in-app updater; on Windows point it at the NSIS installer,
+          # which is the recommended download, so updates do not mix NSIS and MSI installs.
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
 
       - name: Stage native bundles for provenance attestation
         if: github.ref_type == 'tag'

@@ -13,6 +13,8 @@ import { HostKeyVerificationModal } from './components/modals/HostKeyVerificatio
 import { UpdateModal } from './components/modals/UpdateModal';
 import { TransferConflictModal } from './components/modals/TransferConflictModal';
 
+const UPDATE_RECHECK_INTERVAL_MS = 60 * 60 * 1000;
+
 export function App() {
   const {
     toggleDualPane,
@@ -30,6 +32,13 @@ export function App() {
     loadPersistedProfiles();
     checkForUpdates(false);
   }, [loadPersistedProfiles, checkForUpdates]);
+
+  // Re-check hourly so long-running sessions see new releases and expired snoozes.
+  // One unauthenticated GitHub API call per hour stays far below the rate limit.
+  useEffect(() => {
+    const timer = window.setInterval(() => checkForUpdates(false), UPDATE_RECHECK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [checkForUpdates]);
 
   // Singleton OS drag-and-drop listener (macOS Finder / Windows Explorer)
   useEffect(() => {
