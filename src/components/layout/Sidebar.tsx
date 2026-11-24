@@ -89,7 +89,7 @@ export const Sidebar: React.FC = () => {
         data-tauri-drag-region
         className="h-11 flex-shrink-0 flex items-center px-4"
       >
-        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider pl-16">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider pl-16 pointer-events-none">
           Orbit
         </span>
       </div>

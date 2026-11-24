@@ -64,10 +64,11 @@ jobs:
       - name: Install Linux build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
-          NEEDRESTART_MODE: a
+          NEEDRESTART_MODE: l
         run: |
-          sudo NEEDRESTART_MODE=a DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo NEEDRESTART_MODE=a DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get autopurge -y needrestart || true
+          sudo NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
