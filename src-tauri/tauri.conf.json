@@ -51,7 +51,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA0RTk1MzU5NkQxNzhFQTYKUldTbWpoZHRXVlBwQkFNckMrdnQxeVNuMmhJK3VwQWpjUCtPdTFMSHN2S2JqaHJPZldxZHV1aSsK",
       "endpoints": [
         "https://github.com/matryt/Orbit/releases/latest/download/latest.json"
       ],
