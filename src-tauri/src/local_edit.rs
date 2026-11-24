@@ -8,9 +8,9 @@
 //! Security notes:
 //! - Every directory is created `0700` and every file `0600` on Unix, under the app cache dir.
 //!   The whole tree is wiped at startup and on exit; a session's directory when it is closed.
-//! - The file is always opened with a text editor (`open -t` on macOS, Notepad on Windows),
-//!   never with the default handler of its extension, so a remote `.sh`, `.command` or `.js`
-//!   cannot be executed by opening it. Binary files are refused.
+//! - The file is always opened with a text editor (`open -t` on macOS, Notepad on Windows,
+//!   or an explicit text editor on Linux), never with the default handler of its extension,
+//!   so a remote `.sh`, `.command` or `.js` cannot be executed by opening it. Binary files are refused.
 //! - The upload destination is the remote path recorded when the session was opened; it is
 //!   never derived from the local file name.
 //! - Disabled on elevated (sudo) sessions.
@@ -196,11 +196,7 @@ impl LocalEditManager {
             .state::<SessionManager>()
             .get_provider(Some(profile_id))
             .await?;
-        if provider.is_elevated() {
-            return Err(AppError::PermissionDenied(
-                "L'édition locale est désactivée sur une session élevée (sudo).".into(),
-            ));
-        }
+        ensure_not_elevated(provider.as_ref())?;
 
         let baseline = provider.fingerprint(remote_path).await?;
         if baseline.size > MAX_EDIT_SIZE {
@@ -669,6 +665,89 @@ fn start_watcher(
     Ok(watcher)
 }
 
+/// Candidates for graphical text editors on Linux desktop environments.
+pub const LINUX_GUI_EDITORS: &[&str] = &[
+    "gnome-text-editor",
+    "gedit",
+    "kate",
+    "kwrite",
+    "xed",
+    "mousepad",
+    "pluma",
+    "leafpad",
+];
+
+/// Resolves the preferred text editor command on Linux.
+///
+/// Priority:
+/// 1. `$VISUAL` if set and available in PATH (or absolute path)
+/// 2. Common graphical text editors in desktop environments (GNOME, KDE, XFCE, MATE...)
+/// 3. `$EDITOR` if set and available
+/// 4. `None` (blocked: returns an explicit error rather than executing with default handler)
+pub fn resolve_linux_editor_from<F>(
+    visual: Option<&str>,
+    editor: Option<&str>,
+    exists: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
+    if let Some(v) = visual {
+        let trimmed = v.trim();
+        let bin = trimmed.split_whitespace().next().unwrap_or(trimmed);
+        if !bin.is_empty() && exists(bin) {
+            return Some(trimmed.to_string());
+        }
+    }
+    for &candidate in LINUX_GUI_EDITORS {
+        if exists(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    if let Some(e) = editor {
+        let trimmed = e.trim();
+        let bin = trimmed.split_whitespace().next().unwrap_or(trimmed);
+        if !bin.is_empty() && exists(bin) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn command_exists(cmd: &str) -> bool {
+    let path = Path::new(cmd);
+    if path.is_absolute() || cmd.contains('/') {
+        return path.is_file();
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(cmd);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn resolve_linux_editor() -> Option<String> {
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    resolve_linux_editor_from(visual.as_deref(), editor.as_deref(), command_exists)
+}
+
+/// Verifies that the storage provider is not elevated (sudo).
+pub fn ensure_not_elevated(provider: &dyn StorageProvider) -> Result<(), AppError> {
+    if provider.is_elevated() {
+        return Err(AppError::PermissionDenied(
+            "L'édition locale est désactivée sur une session élevée (sudo).".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Opens `path` with a text editor, whatever its extension.
 fn open_in_text_editor(path: &Path) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
@@ -687,7 +766,17 @@ fn open_in_text_editor(path: &Path) -> Result<(), AppError> {
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
+        let editor_str = resolve_linux_editor().ok_or_else(|| {
+            AppError::Io(
+                "Aucun éditeur de texte détecté. Veuillez installer un éditeur (ex. gedit, kate) ou définir la variable d'environnement $VISUAL.".into(),
+            )
+        })?;
+        let mut parts = editor_str.split_whitespace();
+        let bin = parts.next().unwrap_or(&editor_str);
+        let mut c = std::process::Command::new(bin);
+        for arg in parts {
+            c.arg(arg);
+        }
         c.arg(path);
         c
     };
@@ -833,7 +922,7 @@ pub fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
             }
         }
     }
-    let mut file = match options.open(path) {
+    let file = match options.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -857,8 +946,15 @@ pub fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
             MAX_EDIT_SIZE / (1024 * 1024)
         )));
     }
-    let mut content = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut content)?;
+    let initial_cap = (meta.len() as usize).min(MAX_EDIT_SIZE as usize);
+    let mut content = Vec::with_capacity(initial_cap);
+    file.take(MAX_EDIT_SIZE + 1).read_to_end(&mut content)?;
+    if content.len() as u64 > MAX_EDIT_SIZE {
+        return Err(AppError::Transfer(format!(
+            "Fichier trop volumineux (max {} Mo).",
+            MAX_EDIT_SIZE / (1024 * 1024)
+        )));
+    }
     Ok(Some(content))
 }
 
@@ -982,5 +1078,157 @@ mod tests {
         std::os::unix::fs::symlink(&sub, &link).unwrap();
         assert!(create_private_dir(&link).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_regular_file_rejects_oversized_file() {
+        let dir = temp_dir();
+        let path = dir.join("oversized.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_EDIT_SIZE + 1).unwrap();
+        let err = read_regular_file(&path).unwrap_err();
+        assert!(matches!(err, AppError::Transfer(_)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_linux_editor_prefers_visual() {
+        let editor = resolve_linux_editor_from(Some("code --wait"), Some("nano"), |cmd| {
+            cmd == "code" || cmd == "gedit" || cmd == "nano"
+        });
+        assert_eq!(editor.as_deref(), Some("code --wait"));
+    }
+
+    #[test]
+    fn resolve_linux_editor_finds_candidate() {
+        let editor =
+            resolve_linux_editor_from(None, Some("nano"), |cmd| cmd == "gedit" || cmd == "nano");
+        assert_eq!(editor.as_deref(), Some("gedit"));
+    }
+
+    #[test]
+    fn resolve_linux_editor_falls_back_to_editor_or_none() {
+        let with_editor = resolve_linux_editor_from(None, Some("my-custom-editor"), |cmd| {
+            cmd == "my-custom-editor"
+        });
+        assert_eq!(with_editor.as_deref(), Some("my-custom-editor"));
+
+        let none = resolve_linux_editor_from(None, None, |_| false);
+        assert_eq!(none, None);
+    }
+
+    struct MockTestProvider {
+        elevated: bool,
+        entries: Vec<crate::models::FileEntry>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageProvider for MockTestProvider {
+        async fn list_dir(&self, _path: &str) -> Result<Vec<crate::models::FileEntry>, AppError> {
+            Ok(self.entries.clone())
+        }
+        async fn read_preview(&self, _path: &str, _max_bytes: usize) -> Result<Vec<u8>, AppError> {
+            Ok(vec![])
+        }
+        async fn upload_file(
+            &self,
+            _local: PathBuf,
+            _remote: String,
+            _handle: &mut TransferHandle,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn download_file(
+            &self,
+            _remote: String,
+            _local: PathBuf,
+            _handle: &mut TransferHandle,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn delete(&self, _path: &str, _is_dir: bool) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn create_dir(&self, _path: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn rename(&self, _from: &str, _to: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn set_permissions(
+            &self,
+            _path: &str,
+            _mode: Option<u32>,
+            _owner: Option<&str>,
+            _group: Option<&str>,
+            _recursive: bool,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+        fn is_elevated(&self) -> bool {
+            self.elevated
+        }
+    }
+
+    #[test]
+    fn test_ensure_not_elevated_rejects_sudo() {
+        let elevated = MockTestProvider {
+            elevated: true,
+            entries: vec![],
+        };
+        let err = ensure_not_elevated(&elevated).unwrap_err();
+        assert!(matches!(err, AppError::PermissionDenied(_)));
+
+        let standard = MockTestProvider {
+            elevated: false,
+            entries: vec![],
+        };
+        assert!(ensure_not_elevated(&standard).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_default_fingerprint_file_and_directory() {
+        use crate::models::FileEntry;
+        let file_entry = FileEntry {
+            name: "app.log".into(),
+            path: "/var/log/app.log".into(),
+            is_dir: false,
+            size: 4096,
+            modified_at: "2026-11-24T22:00:00Z".into(),
+            permissions: Some("0644".into()),
+            owner: None,
+            group: None,
+            is_symlink: false,
+            etag: Some("etag123".into()),
+        };
+        let dir_entry = FileEntry {
+            name: "nginx".into(),
+            path: "/var/log/nginx".into(),
+            is_dir: true,
+            size: 0,
+            modified_at: "2026-11-24T22:00:00Z".into(),
+            permissions: Some("0755".into()),
+            owner: None,
+            group: None,
+            is_symlink: false,
+            etag: None,
+        };
+        let provider = MockTestProvider {
+            elevated: false,
+            entries: vec![file_entry, dir_entry],
+        };
+
+        let fp = provider.fingerprint("/var/log/app.log").await.unwrap();
+        assert_eq!(fp.size, 4096);
+        assert_eq!(fp.etag.as_deref(), Some("etag123"));
+
+        let dir_err = provider.fingerprint("/var/log/nginx").await.unwrap_err();
+        assert!(matches!(dir_err, AppError::InvalidPath(_)));
+
+        let not_found_err = provider
+            .fingerprint("/var/log/missing.txt")
+            .await
+            .unwrap_err();
+        assert!(matches!(not_found_err, AppError::NotFound(_)));
     }
 }

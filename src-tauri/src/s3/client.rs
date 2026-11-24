@@ -931,4 +931,28 @@ mod tests {
             "nested/folder/"
         );
     }
+
+    #[tokio::test]
+    async fn test_s3_fingerprint_rejects_directories_and_empty() {
+        let provider = S3Provider::new(S3ConnectConfig {
+            profile_id: "test-profile".into(),
+            bucket: "my-bucket".into(),
+            endpoint: None,
+            region: Some("us-east-1".into()),
+            access_key: "dummy".into(),
+            secret_key: Some("dummy".into()),
+            force_path_style: None,
+        })
+        .await
+        .unwrap();
+
+        let err_root = provider.fingerprint("/").await.unwrap_err();
+        assert!(matches!(err_root, AppError::InvalidPath(_)));
+
+        let err_dir = provider.fingerprint("folder/").await.unwrap_err();
+        assert!(matches!(err_dir, AppError::InvalidPath(_)));
+
+        let err_empty = provider.fingerprint("").await.unwrap_err();
+        assert!(matches!(err_empty, AppError::InvalidPath(_)));
+    }
 }
