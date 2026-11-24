@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { APP_VERSION } from '../../version';
 import { isTauri } from '../../services/storageApi';
-import { SnoozeDuration, isUpdateSnoozed } from '../../lib/updateSnooze';
+import { SnoozeDuration, isUpdateSnoozed, normalizeVersion } from '../../lib/updateSnooze';
 import {
   Rocket,
   CheckCircle,
@@ -24,8 +24,14 @@ type InstallPhase =
   | { kind: 'idle' }
   | { kind: 'downloading'; downloaded: number; total: number | null }
   | { kind: 'installing' }
-  | { kind: 'ready' }
+  /** `version` is the release actually installed, which a later check may have superseded. */
+  | { kind: 'ready'; version: string }
   | { kind: 'error'; message: string };
+
+// The check only fetches latest.json; the download timeout bounds the whole transfer,
+// so it must leave room for slow connections.
+const CHECK_TIMEOUT_MS = 15_000;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
 const SNOOZE_OPTIONS: { duration: SnoozeDuration; label: string }[] = [
   { duration: '1h', label: 'Dans 1 heure' },
@@ -60,10 +66,18 @@ export const UpdateModal: React.FC = () => {
     updateSnooze,
     clearUpdateSnooze,
     transfers,
+    setInstallingUpdate,
   } = useOrbitStore();
 
   const [phase, setPhase] = useState<InstallPhase>({ kind: 'idle' });
   const [isSnoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
+
+  const isBusy = phase.kind === 'downloading' || phase.kind === 'installing';
+
+  // Suspend background checks while installing so they cannot replace the progress view.
+  useEffect(() => {
+    setInstallingUpdate(isBusy);
+  }, [isBusy, setInstallingUpdate]);
 
   // Reset transient UI each time the prompt reopens, unless an install already finished.
   useEffect(() => {
@@ -75,10 +89,16 @@ export const UpdateModal: React.FC = () => {
 
   if (!isUpdateModalOpen) return null;
 
-  const isBusy = phase.kind === 'downloading' || phase.kind === 'installing';
+  // Cancelled transfers may still be stopping in the backend (`inFlight`): count them too.
   const activeTransferCount = transfers.filter(
-    (t) => t.status === 'queued' || t.status === 'transferring' || t.status === 'paused',
+    (t) => t.status === 'queued' || t.status === 'transferring' || t.status === 'paused' || t.inFlight,
   ).length;
+  // A newer release found after an install must not be presented as the installed one.
+  const installedVersion = phase.kind === 'ready' ? phase.version : null;
+  const newerThanInstalled =
+    installedVersion !== null &&
+    !!availableUpdate?.has_update &&
+    normalizeVersion(availableUpdate.latest_version) !== installedVersion;
   const snoozedForThisVersion =
     !!availableUpdate?.has_update &&
     isUpdateSnoozed(updateSnooze, availableUpdate.latest_version, Date.now());
@@ -96,7 +116,8 @@ export const UpdateModal: React.FC = () => {
     if (!availableUpdate) return;
     const url = availableUpdate.download_url || availableUpdate.release_url;
     await handleOpenLink(url);
-    setUpdateModalOpen(false);
+    // Record the dismissal so hourly checks do not reopen the prompt for this release.
+    dismissUpdate();
   };
 
   const handleInstall = async () => {
@@ -110,7 +131,7 @@ export const UpdateModal: React.FC = () => {
     setPhase({ kind: 'downloading', downloaded: 0, total: null });
     try {
       const { check } = await import('@tauri-apps/plugin-updater');
-      const update = await check();
+      const update = await check({ timeout: CHECK_TIMEOUT_MS });
       if (!update) {
         // GitHub lists a newer release but its signed updater manifest is missing.
         setPhase({
@@ -136,8 +157,8 @@ export const UpdateModal: React.FC = () => {
             setPhase({ kind: 'installing' });
             break;
         }
-      });
-      setPhase({ kind: 'ready' });
+      }, { timeout: DOWNLOAD_TIMEOUT_MS });
+      setPhase({ kind: 'ready', version: normalizeVersion(update.version) });
     } catch (err: unknown) {
       console.warn('In-app update failed:', err);
       const message = typeof err === 'string' ? err : err instanceof Error ? err.message : String(err);
@@ -207,12 +228,12 @@ export const UpdateModal: React.FC = () => {
 
         {/* Content */}
         <div className="p-6 overflow-y-auto flex-1">
-          {isCheckingUpdate ? (
+          {isCheckingUpdate && phase.kind === 'idle' ? (
             <div className="py-12 flex flex-col items-center justify-center gap-3 text-center">
               <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
               <p className="text-sm text-zinc-300">Recherche de mise à jour sur GitHub...</p>
             </div>
-          ) : updateCheckError ? (
+          ) : updateCheckError && phase.kind === 'idle' ? (
             <div className="py-6 flex flex-col items-center justify-center gap-3 text-center">
               <div className="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
                 <AlertTriangle className="w-6 h-6" />
@@ -227,7 +248,7 @@ export const UpdateModal: React.FC = () => {
                 Réessayer
               </button>
             </div>
-          ) : availableUpdate?.has_update ? (
+          ) : availableUpdate && (availableUpdate.has_update || phase.kind !== 'idle') ? (
             <div className="space-y-4">
               {/* Badge new release */}
               <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-transparent border border-indigo-500/20 flex items-center justify-between">
@@ -295,7 +316,16 @@ export const UpdateModal: React.FC = () => {
               {phase.kind === 'ready' && (
                 <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-2 text-xs text-emerald-300">
                   <CheckCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>Mise à jour installée. Redémarrez Orbit pour l'appliquer.</span>
+                  <span>
+                    Orbit <span className="font-mono">v{phase.version}</span> est installée. Redémarrez Orbit pour
+                    l'appliquer.
+                    {newerThanInstalled && (
+                      <span className="block mt-1 text-emerald-300/70">
+                        Une version plus récente ({availableUpdate.latest_version}) est sortie depuis : elle vous sera
+                        proposée après le redémarrage.
+                      </span>
+                    )}
+                  </span>
                 </div>
               )}
 
@@ -371,19 +401,11 @@ export const UpdateModal: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2">
-            {!availableUpdate?.has_update ? (
-              <button
-                type="button"
-                onClick={() => setUpdateModalOpen(false)}
-                className="px-3.5 py-1.5 rounded-lg hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition-colors"
-              >
-                Fermer
-              </button>
-            ) : phase.kind === 'ready' ? (
+            {phase.kind === 'ready' ? (
               <>
                 <button
                   type="button"
-                  onClick={() => setUpdateModalOpen(false)}
+                  onClick={handleClose}
                   className="px-3.5 py-1.5 rounded-lg hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition-colors"
                 >
                   Plus tard
@@ -397,6 +419,14 @@ export const UpdateModal: React.FC = () => {
                   <span>Redémarrer maintenant</span>
                 </button>
               </>
+            ) : !availableUpdate?.has_update && phase.kind === 'idle' ? (
+              <button
+                type="button"
+                onClick={() => setUpdateModalOpen(false)}
+                className="px-3.5 py-1.5 rounded-lg hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition-colors"
+              >
+                Fermer
+              </button>
             ) : (
               <>
                 <div className="relative">

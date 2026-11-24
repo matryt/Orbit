@@ -190,6 +190,9 @@ interface OrbitState {
   updateSnooze: UpdateSnooze | null;
   /** Version whose prompt was closed without a choice: not shown again during this session. */
   dismissedUpdateVersion: string | null;
+  /** True while an in-app update downloads or installs; background checks are suspended. */
+  isInstallingUpdate: boolean;
+  setInstallingUpdate: (installing: boolean) => void;
   checkForUpdates: (notifyIfUpToDate?: boolean) => Promise<void>;
   setUpdateModalOpen: (open: boolean) => void;
   /** Closes the prompt; automatic checks will not reopen it for this version until restart. */
@@ -1359,10 +1362,12 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   lastUpdateCheckTime: 0,
   updateSnooze: loadSnooze(),
   dismissedUpdateVersion: null,
+  isInstallingUpdate: false,
+  setInstallingUpdate: (installing) => set({ isInstallingUpdate: installing }),
 
   checkForUpdates: async (notifyIfUpToDate = false) => {
-    // 1. Prevent duplicate in-flight checks
-    if (get().isCheckingUpdate) return;
+    // 1. Prevent duplicate in-flight checks, and keep the install progress on screen
+    if (get().isCheckingUpdate || get().isInstallingUpdate) return;
 
     // 2. Cache successful checks for 15 minutes unless manually requested
     const now = Date.now();
@@ -1411,7 +1416,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }
     const snooze = createSnooze(availableUpdate.latest_version, duration, Date.now());
     saveSnooze(snooze);
-    set({ updateSnooze: snooze, isUpdateModalOpen: false });
+    // An explicit choice replaces any earlier session dismissal, so a timed reminder can expire.
+    set({ updateSnooze: snooze, dismissedUpdateVersion: null, isUpdateModalOpen: false });
   },
 
   clearUpdateSnooze: () => {

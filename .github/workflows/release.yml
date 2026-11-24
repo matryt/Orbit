@@ -79,7 +79,7 @@ jobs:
 
       # Build frontend and compile Tauri native bundles
       - name: Build and Package with Tauri
-        uses: tauri-apps/tauri-action@2a8db2c169af2fdc695133781e27ecba52daea75 # v0.5.17
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the updater artifacts (.app.tar.gz / installers) and produces their .sig files.
@@ -107,14 +107,15 @@ jobs:
               > ```bash
               > xattr -cr /Applications/Orbit.app
               > ```
-            * **Windows 10 / 11 (x64)** : Téléchargez l'installeur `.exe` (NSIS) ou `.msi`.
+            * **Windows 10 / 11 (x64)** : Téléchargez l'installeur `Orbit_x.y.z_x64-setup.exe`.
+
+            Les versions suivantes s'installent directement depuis Orbit (menu de mise à jour).
           releaseDraft: ${{ inputs.draft || false }}
           prerelease: false
           args: ${{ matrix.platform.args }}
-          # Publish latest.json for the in-app updater; on Windows point it at the NSIS installer,
-          # which is the recommended download, so updates do not mix NSIS and MSI installs.
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          # Publish latest.json for the in-app updater. Windows only ships the NSIS installer
+          # (see src-tauri/tauri.windows.conf.json), so every client gets a matching payload.
+          uploadUpdaterJson: true
 
       - name: Stage native bundles for provenance attestation
         if: github.ref_type == 'tag'
