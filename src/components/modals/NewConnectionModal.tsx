@@ -774,7 +774,7 @@ export const NewConnectionModal: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1}
+                    min={0}
                     max={65535}
                     placeholder="22"
                     value={port}
@@ -1123,7 +1123,7 @@ export const NewConnectionModal: React.FC = () => {
                                   </label>
                                   <input
                                     type="number"
-                                    min={1}
+                                    min={0}
                                     max={65535}
                                     placeholder="22"
                                     value={bastionPort}
@@ -1302,7 +1302,7 @@ export const NewConnectionModal: React.FC = () => {
                               </label>
                               <input
                                 type="number"
-                                min={1}
+                                min={0}
                                 max={65535}
                                 placeholder={proxyType === 'http' ? '8080' : '1080'}
                                 value={proxyPort}
