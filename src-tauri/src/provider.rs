@@ -24,6 +24,18 @@ pub trait StorageProvider: Send + Sync {
         local_path: PathBuf,
         transfer: &mut TransferHandle,
     ) -> Result<(), AppError>;
+    async fn set_permissions(
+        &self,
+        path: &str,
+        mode: Option<u32>,
+        owner: Option<&str>,
+        group: Option<&str>,
+        recursive: bool,
+    ) -> Result<(), AppError>;
+
+    async fn list_identities(&self) -> Result<(Vec<String>, Vec<String>), AppError> {
+        Ok((Vec::new(), Vec::new()))
+    }
 
     /// Recursively lists `root`. Paths are relative to `root` and `/`-separated.
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, AppError> {

@@ -17,6 +17,11 @@ export interface SftpConnectParams {
   proxy?: ProxyConfig;
 }
 
+export interface SystemIdentities {
+  users: string[];
+  groups: string[];
+}
+
 export interface BackendTransferProgress {
   transfer_id: string;
   bytes_transferred: number;
@@ -254,6 +259,40 @@ export const storageApi = {
     });
   },
 
+  async setPermissions(
+    profileId: string | undefined,
+    path: string,
+    mode?: number | null,
+    owner?: string | null,
+    group?: string | null,
+    recursive = false
+  ): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] setPermissions:', path, mode?.toString(8), owner, group, recursive);
+      return;
+    }
+    await invoke('storage_set_permissions', {
+      profileId: profileId || null,
+      path,
+      mode: mode ?? null,
+      owner: owner || null,
+      group: group || null,
+      recursive,
+    });
+  },
+
+  async listIdentities(profileId?: string): Promise<SystemIdentities> {
+    if (!isTauri()) {
+      return {
+        users: ['root', 'www-data', 'ubuntu', 'nginx', 'node'],
+        groups: ['root', 'www-data', 'staff', 'admin', 'docker'],
+      };
+    }
+    return await invoke<SystemIdentities>('storage_list_identities', {
+      profileId: profileId || null,
+    });
+  },
+
   async readPreview(
     profileId: string | undefined,
     path: string,
@@ -412,6 +451,36 @@ export const storageApi = {
       return;
     }
     await invoke('local_rename', { oldPath, newPath });
+  },
+
+  async setLocalPermissions(
+    path: string,
+    mode?: number | null,
+    owner?: string | null,
+    group?: string | null,
+    recursive = false
+  ): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] setLocalPermissions:', path, mode?.toString(8), owner, group, recursive);
+      return;
+    }
+    await invoke('local_set_permissions', {
+      path,
+      mode: mode ?? null,
+      owner: owner || null,
+      group: group || null,
+      recursive,
+    });
+  },
+
+  async listLocalIdentities(): Promise<SystemIdentities> {
+    if (!isTauri()) {
+      return {
+        users: ['root', 'staff', 'admin'],
+        groups: ['root', 'staff', 'wheel', 'admin'],
+      };
+    }
+    return await invoke<SystemIdentities>('local_list_identities');
   },
 
   async saveSecret(profileId: string, secret: string): Promise<void> {

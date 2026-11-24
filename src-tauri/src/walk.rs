@@ -20,6 +20,7 @@ pub struct WalkEntry {
     /// Path relative to the walked root, `/`-separated (e.g. `photos/2024/a.jpg`).
     pub relative_path: String,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
 }
 
@@ -55,7 +56,7 @@ fn join_relative(parent: &str, name: &str) -> String {
     }
 }
 
-fn join_remote(root: &str, relative: &str) -> String {
+pub fn join_remote(root: &str, relative: &str) -> String {
     if relative.is_empty() {
         root.to_string()
     } else if root.ends_with('/') {
@@ -86,6 +87,7 @@ pub async fn walk_remote<P: StorageProvider + ?Sized>(
             entries.push(WalkEntry {
                 relative_path,
                 is_dir: item.is_dir,
+                is_symlink: item.is_symlink,
                 size: if item.is_dir { 0 } else { item.size },
             });
             if entries.len() > MAX_WALK_ENTRIES {
@@ -127,7 +129,8 @@ pub fn walk_local(root: &Path) -> Result<LocalWalkResult, AppError> {
             let file_type = item.file_type()?;
             let relative_path = join_relative(&relative_dir, &name);
 
-            let (is_dir, size) = if file_type.is_symlink() {
+            let is_symlink = file_type.is_symlink();
+            let (is_dir, size) = if is_symlink {
                 match std::fs::metadata(item.path()) {
                     Ok(target) if target.is_file() => (false, target.len()),
                     // Symlinked directories (possible loops) and special files are skipped.
@@ -158,6 +161,7 @@ pub fn walk_local(root: &Path) -> Result<LocalWalkResult, AppError> {
             entries.push(WalkEntry {
                 relative_path,
                 is_dir,
+                is_symlink,
                 size,
             });
             if entries.len() > MAX_WALK_ENTRIES {
@@ -205,26 +209,31 @@ mod tests {
                 WalkEntry {
                     relative_path: "a".into(),
                     is_dir: true,
+                    is_symlink: false,
                     size: 0
                 },
                 WalkEntry {
                     relative_path: "a/b".into(),
                     is_dir: true,
+                    is_symlink: false,
                     size: 0
                 },
                 WalkEntry {
                     relative_path: "a/b/deep.txt".into(),
                     is_dir: false,
+                    is_symlink: false,
                     size: 2
                 },
                 WalkEntry {
                     relative_path: "empty".into(),
                     is_dir: true,
+                    is_symlink: false,
                     size: 0
                 },
                 WalkEntry {
                     relative_path: "top.txt".into(),
                     is_dir: false,
+                    is_symlink: false,
                     size: 5
                 },
             ]

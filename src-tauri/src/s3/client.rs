@@ -222,6 +222,7 @@ impl StorageProvider for S3Provider {
                             name,
                             path: full_path,
                             is_dir: true,
+                            is_symlink: false,
                             size: 0,
                             modified_at: chrono::Utc::now().to_rfc3339(),
                             permissions: Some("drwxr-xr-x".into()),
@@ -258,6 +259,7 @@ impl StorageProvider for S3Provider {
                                 name,
                                 path: full_path,
                                 is_dir: true,
+                                is_symlink: false,
                                 size: 0,
                                 modified_at,
                                 permissions: Some("drwxr-xr-x".into()),
@@ -286,6 +288,7 @@ impl StorageProvider for S3Provider {
                         name,
                         path: full_path,
                         is_dir: false,
+                        is_symlink: false,
                         size,
                         modified_at,
                         permissions: Some("-rw-r--r--".into()),
@@ -576,6 +579,7 @@ impl StorageProvider for S3Provider {
                     files.push(WalkEntry {
                         relative_path: relative.to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         size: obj.size().unwrap_or(0).max(0) as u64,
                     });
                 }
@@ -597,6 +601,7 @@ impl StorageProvider for S3Provider {
             .map(|relative_path| WalkEntry {
                 relative_path,
                 is_dir: true,
+                is_symlink: false,
                 size: 0,
             })
             .collect();
@@ -846,6 +851,19 @@ impl StorageProvider for S3Provider {
 
         transfer.complete();
         Ok(())
+    }
+
+    async fn set_permissions(
+        &self,
+        _path: &str,
+        _mode: Option<u32>,
+        _owner: Option<&str>,
+        _group: Option<&str>,
+        _recursive: bool,
+    ) -> Result<(), AppError> {
+        Err(AppError::Config(
+            "La modification des permissions et propriétaires POSIX n'est pas supportée sur le stockage S3".into(),
+        ))
     }
 }
 
