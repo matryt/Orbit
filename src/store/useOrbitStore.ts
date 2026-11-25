@@ -62,6 +62,7 @@ interface OrbitState {
   loadPersistedProfiles: () => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
   addProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
+  importProfiles: (profiles: ConnectionProfile[]) => Promise<number>;
   updateProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   connectProfile: (profileId: string, secret?: string) => Promise<void>;
@@ -195,6 +196,8 @@ interface OrbitState {
   setNewConnectionModalOpen: (open: boolean) => void;
   isExportModalOpen: boolean;
   setExportModalOpen: (open: boolean) => void;
+  isImportModalOpen: boolean;
+  setImportModalOpen: (open: boolean) => void;
   isNewFolderModalOpen: boolean;
   setNewFolderModalOpen: (open: boolean) => void;
 
@@ -526,6 +529,25 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     if (profile.type === 'sftp' || profile.type === 's3') {
       await get().connectProfile(profile.id, secret);
     }
+  },
+
+  importProfiles: async (newProfiles) => {
+    try {
+      await storageApi.importProfiles(newProfiles);
+    } catch (err) {
+      console.error('Failed to persist imported profiles to connections.json:', err);
+    }
+    set((state) => {
+      const existingMap = new Map(state.profiles.map((p) => [p.id, p]));
+      for (const p of newProfiles) {
+        existingMap.set(p.id, p);
+      }
+      const updated = Array.from(existingMap.values());
+      return {
+        profiles: updated,
+      };
+    });
+    return newProfiles.length;
   },
 
   editingProfile: null,
@@ -1383,6 +1405,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   isExportModalOpen: false,
   setExportModalOpen: (open) => set({ isExportModalOpen: open }),
+
+  isImportModalOpen: false,
+  setImportModalOpen: (open) => set({ isImportModalOpen: open }),
 
   isNewFolderModalOpen: false,
   setNewFolderModalOpen: (open) => set({ isNewFolderModalOpen: open }),

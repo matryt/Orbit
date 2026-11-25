@@ -88,10 +88,10 @@ Ce document répertorie les vecteurs d'attaque potentiels, l'état actuel de la 
 
 ---
 
-## ⚠️ Prérequis avant un import de profils ou de `~/.ssh/config`
+## ⚠️ Prérequis avant un import de profils ou de `~/.ssh/config` — 🟢 Couvert
 
-L'import ferait entrer des valeurs non saisies par l'utilisateur. Avant de le livrer :
-1. Export par **liste blanche** et test qui injecte des champs inattendus (domaine 2).
-2. Tests de **non-collision** des clés de trousseau (`prod:bastion` vs `prod` + `:bastion`) et validation des IDs importés (domaine 2).
-3. **Validation des endpoints S3** importés (domaine 3).
-4. Appliquer `validate_ssh_host` aux hôtes importés dès l'import, pour un message d'erreur clair avant la connexion (domaine 4).
+L'import ferait entrer des valeurs non saisies par l'utilisateur. Tous les prérequis sont désormais implémentés et testés :
+1. ✅ **Export par liste blanche** stricte et test vérifiant l'exclusion des champs injectés inattendus (`profileExport.ts`, `networkProfile.test.ts`).
+2. ✅ **Non-collision des clés de trousseau** (`prod:bastion` vs `prod` + `:bastion`) : rejet / régénération des IDs contenant `:` lors de l'import (`profileImport.ts`, `profileImport.test.ts`, `sftp/ssh_config.rs`).
+3. ✅ **Validation des endpoints S3** importés contre les requêtes SSRF (rejet de `169.254.169.254`, `metadata.google.internal`, protocoles non-HTTP) (`profileImport.ts`, `profileImport.test.ts`).
+4. ✅ **Application de `validate_ssh_host`** aux hôtes cibles et bastions importés dès l'import de `~/.ssh/config` et JSON, avec génération d'avertissements clairs (`sftp/ssh_config.rs`, `profileImport.ts`).

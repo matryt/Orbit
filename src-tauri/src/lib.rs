@@ -89,6 +89,8 @@ pub fn run() {
             commands::delete_secret,
             commands::load_profiles,
             commands::save_profile,
+            commands::import_profiles,
+            commands::read_ssh_config,
             commands::delete_profile,
             commands::local_list_dir,
             commands::local_read_preview,

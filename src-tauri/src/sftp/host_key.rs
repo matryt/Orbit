@@ -33,7 +33,7 @@ pub fn validate_ssh_host(host: &str) -> Result<(), crate::error::AppError> {
             || c.is_whitespace()
             || matches!(
                 c,
-                ',' | '#' | '*' | '?' | '!' | '[' | ']' | '@' | '|' | '/' | '\\'
+                ',' | '#' | '*' | '?' | '!' | '[' | ']' | '@' | '|' | '/' | '\\' | ';'
             )
     }) {
         return Err(crate::error::AppError::Config(format!(

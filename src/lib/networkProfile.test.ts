@@ -70,4 +70,21 @@ describe('network profiles (bastion & proxy)', () => {
     assert.equal(sanitized.bastion?.host, undefined);
     assert.equal(sanitized.proxy, undefined);
   });
+
+  it('whitelists exported fields and discards unexpected or injected fields', () => {
+    const profileWithInjectedFields: any = {
+      id: 'prof-3',
+      name: 'Server with extra fields',
+      type: 'sftp',
+      host: 'server.corp.com',
+      port: 22,
+      injectedField: 'malicious_payload',
+      internalInternalState: 12345,
+    };
+
+    const sanitized: any = sanitizeProfileForExport(profileWithInjectedFields);
+    assert.equal(sanitized.injectedField, undefined);
+    assert.equal(sanitized.internalInternalState, undefined);
+    assert.equal(sanitized.host, 'server.corp.com');
+  });
 });

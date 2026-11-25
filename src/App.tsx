@@ -9,6 +9,7 @@ import { QuickLookModal } from './components/modals/QuickLookModal';
 import { TransferDrawer } from './components/transfers/TransferDrawer';
 import { NewConnectionModal } from './components/modals/NewConnectionModal';
 import { ExportProfilesModal } from './components/modals/ExportProfilesModal';
+import { ImportProfilesModal } from './components/modals/ImportProfilesModal';
 import { HostKeyVerificationModal } from './components/modals/HostKeyVerificationModal';
 import { UpdateModal } from './components/modals/UpdateModal';
 import { TransferConflictModal } from './components/modals/TransferConflictModal';
@@ -29,6 +30,7 @@ export function App() {
     checkForUpdates,
     isNewConnectionModalOpen,
     isExportModalOpen,
+    isImportModalOpen,
     loadLocalEdits,
     applyLocalEditStatus,
     applyLocalEditClosed,
@@ -232,6 +234,7 @@ export function App() {
       <QuickLookModal />
       {isNewConnectionModalOpen && <NewConnectionModal />}
       {isExportModalOpen && <ExportProfilesModal />}
+      {isImportModalOpen && <ImportProfilesModal />}
       <HostKeyVerificationModal />
       <UpdateModal />
       <TransferConflictModal />

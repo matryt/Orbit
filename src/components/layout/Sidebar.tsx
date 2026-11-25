@@ -6,6 +6,7 @@ import { ConnectionProfile } from '../../types';
 import {
   Plus,
   Download,
+  Upload,
   Server,
   Cloud,
   ShieldCheck,
@@ -30,6 +31,7 @@ export const Sidebar: React.FC = () => {
     setEditingProfile,
     setNewConnectionModalOpen,
     setExportModalOpen,
+    setImportModalOpen,
     isConnecting,
     checkForUpdates,
     availableUpdate,
@@ -120,13 +122,24 @@ export const Sidebar: React.FC = () => {
             <p className="text-[11px] text-zinc-500 mt-1 mb-3 leading-relaxed">
               Ajoutez votre premier serveur SFTP ou bucket S3.
             </p>
-            <button
-              onClick={() => setNewConnectionModalOpen(true)}
-              className="px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium shadow-sm transition-all flex items-center gap-1.5"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Ajouter</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setNewConnectionModalOpen(true)}
+                className="px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium shadow-sm transition-all flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Ajouter</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportModalOpen(true)}
+                className="px-2.5 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-medium border border-border-subtle transition-all flex items-center gap-1.5"
+                title="Importer depuis ~/.ssh/config ou JSON"
+              >
+                <Upload className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Importer</span>
+              </button>
+            </div>
           </div>
         ) : (
           profiles.map((profile) => {
@@ -297,11 +310,19 @@ export const Sidebar: React.FC = () => {
         <div className="flex items-center gap-1 pt-1">
           <button
             onClick={() => setExportModalOpen(true)}
-            className="flex-1 flex items-center justify-center gap-1 py-1 px-2 rounded text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
+            className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
             title="Exporter les profils au format JSON"
           >
             <Download className="w-3 h-3" />
-            <span>Exporter profils</span>
+            <span>Exporter</span>
+          </button>
+          <button
+            onClick={() => setImportModalOpen(true)}
+            className="flex-1 flex items-center justify-center gap-1 py-1 px-1.5 rounded text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors"
+            title="Importer des profils depuis ~/.ssh/config ou JSON"
+          >
+            <Upload className="w-3 h-3" />
+            <span>Importer</span>
           </button>
           <div className="flex items-center text-[10px] text-zinc-600 px-1" title="Trousseau OS activé">
             <ShieldCheck className="w-3.5 h-3.5 text-zinc-500" />

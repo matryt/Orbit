@@ -516,6 +516,23 @@ pub async fn save_profile(
 }
 
 #[tauri::command]
+pub async fn import_profiles(
+    profiles: Vec<ConnectionProfile>,
+    app: tauri::AppHandle,
+) -> Result<usize, AppError> {
+    ConfigService::import_profiles(&app, profiles)
+}
+
+#[tauri::command]
+pub async fn read_ssh_config(
+    path: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<crate::models::SshConfigImportResult, AppError> {
+    let existing_profiles = ConfigService::load_profiles(&app).unwrap_or_default();
+    crate::sftp::ssh_config::load_and_parse_ssh_config(path.as_deref(), &existing_profiles)
+}
+
+#[tauri::command]
 pub async fn delete_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), AppError> {
     ConfigService::delete_profile(&app, &profile_id)?;
     let mut err = None;

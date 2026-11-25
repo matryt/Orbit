@@ -51,6 +51,11 @@ export interface ConnectionProfile {
   proxy?: ProxyConfig;
 }
 
+export interface SshConfigImportResult {
+  profiles: ConnectionProfile[];
+  warnings: string[];
+}
+
 export interface FileEntry {
   name: string;
   path: string;
