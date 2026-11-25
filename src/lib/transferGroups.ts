@@ -142,6 +142,14 @@ export function withSafeLocalDestination<T extends TransferRequest>(request: T):
 }
 
 /**
+ * Local path of a remote file downloaded into `destDir`. The full remote name is converted
+ * before joining: on Windows a `\` in it must become part of the name, not a separator.
+ */
+export function localDownloadTarget(destDir: string, name: string): string {
+  return joinPath(destDir, localDestinationName('download', destDir, name));
+}
+
+/**
  * Name a remote entry takes in the local directory `destDir`: unchanged except below a Windows
  * directory, where names invalid on Windows are rewritten (see `toWindowsSafeName`).
  */
@@ -152,10 +160,21 @@ export function localDestinationName(direction: TransferItem['direction'], destD
 /**
  * Walk entries that are a file and a directory at the same destination path. S3 allows a key
  * `index` next to keys under `index/`; such a folder cannot be reproduced, so it is rejected
- * before anything is created. Downloads compare case-insensitively (local disks, see NameSet).
+ * before anything is created. Downloads compare case-insensitively (local disks, see NameSet)
+ * and, below a Windows `destRoot`, after the same name conversion as `planFolderTransfer`
+ * (a remote folder `a:b` and a file `a_b` both become `a_b`).
  */
-export function findFileDirCollisions(direction: TransferItem['direction'], entries: WalkEntry[]): string[] {
-  const norm = (p: string) => (direction === 'download' ? p.toLowerCase() : p);
+export function findFileDirCollisions(
+  direction: TransferItem['direction'],
+  entries: WalkEntry[],
+  destRoot = ''
+): string[] {
+  const windowsDownload = direction === 'download' && isWindowsLocalPath(destRoot);
+  const norm = (p: string) => {
+    if (direction !== 'download') return p;
+    const local = windowsDownload ? p.split('/').map(toWindowsSafeName).join('/') : p;
+    return local.toLowerCase();
+  };
   const dirs = new Set(entries.filter((e) => e.is_dir).map((e) => norm(e.relative_path)));
   return entries.filter((e) => !e.is_dir && dirs.has(norm(e.relative_path))).map((e) => e.relative_path);
 }

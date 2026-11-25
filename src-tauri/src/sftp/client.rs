@@ -426,7 +426,7 @@ fn push_sudo_probe_output(output: &mut Vec<u8>, data: &[u8]) -> bool {
     }
     // Only complete lines are considered, so a token split across two chunks is not misread.
     match output.iter().rposition(|&b| b == b'\n') {
-        Some(end) => find_sudo_probe_token(&String::from_utf8_lossy(&output[..end])).is_some(),
+        Some(end) => find_sudo_probe_token(&String::from_utf8_lossy(&output[..=end])).is_some(),
         None => false,
     }
 }
@@ -2701,6 +2701,19 @@ docker:x:999:ubuntu,mathieu
         assert_eq!(
             parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
             SudoCapability::PasswordRequired
+        );
+    }
+
+    #[test]
+    fn test_sudo_probe_output_stops_on_crlf_token_line() {
+        let mut output = Vec::new();
+        assert!(push_sudo_probe_output(
+            &mut output,
+            b"ORBIT_SUDO:NOPASSWD\r\n"
+        ));
+        assert_eq!(
+            parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
+            SudoCapability::Passwordless
         );
     }
 

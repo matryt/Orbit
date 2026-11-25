@@ -1233,7 +1233,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
             : await storageApi.walkRemote(profileId, sourcePath);
         if (isCancelled()) return;
 
-        const collisions = findFileDirCollisions(direction, entries);
+        const collisions = findFileDirCollisions(direction, entries, destRoot);
         if (collisions.length > 0) {
           const others = collisions.length - 1;
           setPhase(

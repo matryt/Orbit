@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { collapsedIndicatorLabel, findFileDirCollisions, folderDestination, isGroupSettled, needsConflictPlanning, listingToRefresh, shouldRefreshAfterSettle, planFolderTransfer, summarizeGroup, withSafeLocalDestination } from './transferGroups.ts';
+import { collapsedIndicatorLabel, findFileDirCollisions, folderDestination, isGroupSettled, localDownloadTarget, needsConflictPlanning, listingToRefresh, shouldRefreshAfterSettle, planFolderTransfer, summarizeGroup, withSafeLocalDestination } from './transferGroups.ts';
 import type { TransferItem, WalkEntry } from '../types/index.ts';
 
 const child = (status: TransferItem['status'], bytes = 0, total = 100, speed = 0) => ({
@@ -312,5 +312,28 @@ describe('Windows-invalid names on download', () => {
     assert.equal(withSafeLocalDestination(posix), posix);
     const upload = { ...req, direction: 'upload' as const };
     assert.equal(withSafeLocalDestination(upload), upload);
+  });
+
+  it('keeps a backslash of a remote name inside the single-file download name', () => {
+    assert.equal(localDownloadTarget('C:\\dl', 'a\\b.txt'), 'C:\\dl\\a_b.txt');
+    assert.equal(localDownloadTarget('C:\\dl\\', '..\\evil.txt'), 'C:\\dl\\.._evil.txt');
+    assert.equal(localDownloadTarget('C:\\', '12:00.log'), 'C:\\12_00.log');
+    // POSIX destinations keep `\\` as a literal character.
+    assert.equal(localDownloadTarget('/Users/me', 'a\\b.txt'), '/Users/me/a\\b.txt');
+    assert.equal(localDownloadTarget('/Users/me/', '12:00.log'), '/Users/me/12:00.log');
+    // The rewritten request goes through `withSafeLocalDestination` unchanged.
+    const req = { direction: 'download' as const, localPath: localDownloadTarget('C:\\dl', 'a\\b.txt'), remotePath: '/srv/a\\b.txt', fileName: 'a\\b.txt' };
+    assert.equal(withSafeLocalDestination(req).localPath, 'C:\\dl\\a_b.txt');
+  });
+
+  it('detects a file and a folder that collide once converted for Windows', () => {
+    const entries: WalkEntry[] = [
+      { relative_path: 'a:b', is_dir: true, size: 0 },
+      { relative_path: 'a:b/x', is_dir: false, size: 1 },
+      { relative_path: 'a_b', is_dir: false, size: 1 },
+    ];
+    assert.deepEqual(findFileDirCollisions('download', entries, 'C:\\dl\\app'), ['a_b']);
+    assert.deepEqual(findFileDirCollisions('download', entries, '/Users/me/app'), []);
+    assert.deepEqual(findFileDirCollisions('upload', entries, '/srv/app'), []);
   });
 });

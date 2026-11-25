@@ -20,13 +20,6 @@ Ce document répertorie les vecteurs d'attaque potentiels, l'état actuel de la 
 | **8. chmod / chown récursif SFTP** | 🟡 **Partiel** | Liens symboliques non suivis en local (`O_NOFOLLOW`). chown passe par SFTP `setstat` (aucune commande shell construite). | Récursion distante face à des liens symboliques (nécessite un faux serveur SFTP). |
 | **9. Chaîne de dépendances** | 🔴 **Non couvert** | Dependabot (mises à jour). | Aucun `cargo audit` / `cargo-deny` / `npm audit` bloquant en CI. |
 
---- | :---: | :--- | :--- |
-| **1. Traversée de répertoire (Zip Slip)** | 🟡 **Partiel** | Rejet de `..`, `a/../b`, `../etc/passwd` dans `walk.rs` et `transferGroups.ts`. | Encodages alternatifs (`%2e%2e`), flux alternatifs NTFS (`file:evil`), liens symboliques pointant vers des fichiers cibles sensibles lors des téléchargements. |
-| **2. Trousseau & Fuite de secrets** | 🟡 **Partiel** | Sanitization des mots de passe de bastion/proxy à l'export (`profileExport.ts`). | Aucune isolation des clés de trousseau (`KeyringService` n'a pas de tests unitaires). Risque de collision d'IDs forgés (`id: "prod:bastion"`). |
-| **3. Endpoints S3 & SSRF** | 🟡 **Partiel** | Validation stricte du format du nom de bucket (longueur, caractères, IP) dans `s3Utils.ts`. | Aucune validation des endpoints personnalisés contre les métadonnées cloud privées (SSRF type `169.254.169.254` AWS IMDSv1). |
-| **4. Intégrité de `known_hosts`** | 🟡 **Partiel** | Préservation des autres algorithmes et CA lors de l'écriture dans `host_key.rs`. | Pas de tests de fuzzing sur fichier `known_hosts` corrompu (lignes tronquées, base64 invalide) ni d'injection CRLF dans les commentaires. |
-| **5. Détection Sudo & Bannières SSH** | 🟡 **Partiel** | Détection basique des jetons `ORBIT_SUDO:NOPASSWD` / `PASSWD` dans `client.rs`. | Sorties hostiles contenant des séquences d'échappement ANSI, bannières volumineuses (memory bomb), ou faux positifs dans les messages d'accueil. |
-
 ---
 
 ## 🎯 Spécifications détaillées des tests à implémenter
