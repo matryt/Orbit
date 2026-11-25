@@ -2245,6 +2245,11 @@ impl StorageProvider for SftpProvider {
         if meta.is_dir() {
             return Err(AppError::InvalidPath(format!("{path} est un dossier")));
         }
+        if !meta.is_regular() {
+            return Err(AppError::InvalidPath(format!(
+                "{path} n'est pas un fichier ordinaire"
+            )));
+        }
         Ok(RemoteFingerprint {
             size: meta.size.unwrap_or(0),
             modified: meta.mtime.map(|t| t.to_string()),

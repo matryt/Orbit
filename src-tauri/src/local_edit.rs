@@ -266,6 +266,18 @@ impl LocalEditManager {
         };
         tauri::async_runtime::spawn(worker.run(rx));
 
+        if app
+            .state::<SessionManager>()
+            .get_provider(Some(profile_id))
+            .await
+            .is_err()
+        {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(AppError::NotFound(format!(
+                "Session déconnectée pendant la préparation : {profile_id}"
+            )));
+        }
+
         let snapshot = snapshot_info(&info);
         self.sessions.lock().await.insert(
             id.clone(),
@@ -565,8 +577,17 @@ impl Worker {
             Ok(()) => {
                 self.last_uploaded = content;
                 // The upload changed the remote mtime/etag: adopt it as the new baseline.
-                self.baseline = provider.fingerprint(&remote_path).await.ok();
-                self.set_status(LocalEditStatus::Synced, None, true);
+                if let Ok(new_baseline) = provider.fingerprint(&remote_path).await {
+                    self.baseline = Some(new_baseline);
+                }
+                // Only report Synced if no newer local save occurred while the upload was in flight.
+                let still_matches = match read_regular_file(&self.editor_path) {
+                    Ok(Some(current)) => current == self.last_uploaded,
+                    _ => true,
+                };
+                if still_matches {
+                    self.set_status(LocalEditStatus::Synced, None, true);
+                }
             }
             Err(e) => self.set_status(LocalEditStatus::Error, Some(e.to_string()), false),
         }
@@ -619,23 +640,21 @@ impl Worker {
         .await;
 
         match result {
-            Ok((content, fingerprint)) => {
-                // Update the reference before touching the working file, so the watcher event
-                // caused by the write below is recognised as "nothing to upload".
-                self.last_uploaded = content.clone();
-                self.baseline = Some(fingerprint);
-                match write_private_file(&self.editor_path, &content) {
-                    Ok(()) => self.set_status(
+            Ok((content, fingerprint)) => match write_private_file(&self.editor_path, &content) {
+                Ok(()) => {
+                    self.last_uploaded = content;
+                    self.baseline = Some(fingerprint);
+                    self.set_status(
                         LocalEditStatus::Synced,
                         Some(
                             "Version du serveur rechargée : rouvrez le fichier dans l'éditeur."
                                 .into(),
                         ),
                         true,
-                    ),
-                    Err(e) => self.set_status(LocalEditStatus::Error, Some(e.to_string()), false),
+                    );
                 }
-            }
+                Err(e) => self.set_status(LocalEditStatus::Error, Some(e.to_string()), false),
+            },
             Err(e) => self.set_status(LocalEditStatus::Conflict, Some(e.to_string()), false),
         }
     }
