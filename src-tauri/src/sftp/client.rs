@@ -764,10 +764,21 @@ impl SftpProvider {
 
         // Resolved lazily: waiting for the server's EXT_INFO costs up to a second.
         let mut rsa_hashes: Option<Vec<Option<russh::keys::HashAlg>>> = None;
-        let key_count = connected.keys.len();
+        let total_keys = connected.keys.len();
+        // When discovering identities automatically without an explicit key filter, bound
+        // attempts to 4 so the server's MaxAuthTries budget (default 6) leaves room for default key files.
+        let (keys_to_try, key_count) = if wanted.is_none() && total_keys > 4 {
+            logs.push(format!(
+                "[{}] [{target_label}] {total_keys} clés dans l'agent : limitation à 4 tentatives pour préserver le budget MaxAuthTries",
+                now()
+            ));
+            (connected.keys.into_iter().take(4).collect::<Vec<_>>(), 4)
+        } else {
+            (connected.keys.clone(), total_keys)
+        };
         let mut server_rejected = false;
 
-        for key in connected.keys.clone() {
+        for key in keys_to_try {
             let fingerprint = key.fingerprint(russh::keys::HashAlg::Sha256);
             let label = if key.comment().is_empty() {
                 fingerprint.to_string()
@@ -1404,10 +1415,7 @@ impl SftpProvider {
                     key_path: bastion.key_path.as_deref(),
                     passphrase: bastion.passphrase.as_deref(),
                     password: bastion.password.as_deref(),
-                    agent_socket: bastion
-                        .agent_socket
-                        .as_deref()
-                        .or(config.agent_socket.as_deref()),
+                    agent_socket: bastion.agent_socket.as_deref(),
                 },
                 "Bastion",
                 &mut logs,

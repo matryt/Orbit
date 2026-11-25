@@ -115,4 +115,62 @@ describe('profileImport security & validation', () => {
     assert.equal(warnings.length, 1);
     assert.ok(warnings[0].includes('Bad Host Name'));
   });
+
+  it('strictly validates useSudo boolean and port ranges', () => {
+    const raw = {
+      id: 'prof-test-sudo',
+      name: 'Test Sudo',
+      type: 'sftp',
+      host: '10.0.0.5',
+      port: 22.5, // float -> fallback to 22
+      useSudo: 'false', // string truthy -> must be false
+    };
+
+    const res = sanitizeImportedProfile(raw, new Set());
+    assert.ok(res.profile);
+    assert.equal(res.profile.port, 22);
+    assert.equal(res.profile.useSudo, false);
+
+    const rawTrue = {
+      id: 'prof-test-sudo-true',
+      name: 'Test Sudo True',
+      type: 'sftp',
+      host: '10.0.0.5',
+      port: 65536, // out of range -> fallback to 22
+      useSudo: true,
+    };
+    const resTrue = sanitizeImportedProfile(rawTrue, new Set());
+    assert.ok(resTrue.profile);
+    assert.equal(resTrue.profile.port, 22);
+    assert.equal(resTrue.profile.useSudo, true);
+  });
+
+  it('remaps bastion.profileId when duplicate or unsafe IDs are regenerated in a batch', () => {
+    const jsonStr = JSON.stringify([
+      {
+        id: 'unsafe:bastion:id',
+        name: 'Jump Server',
+        type: 'sftp',
+        host: 'jump.corp.com',
+      },
+      {
+        id: 'target-1',
+        name: 'Target Behind Jump',
+        type: 'sftp',
+        host: 'internal.corp.com',
+        bastion: {
+          enabled: true,
+          profileId: 'unsafe:bastion:id',
+        },
+      },
+    ]);
+
+    const { profiles } = parseAndValidateProfilesJson(jsonStr, []);
+    assert.equal(profiles.length, 2);
+    const jump = profiles.find((p) => p.name === 'Jump Server')!;
+    const target = profiles.find((p) => p.name === 'Target Behind Jump')!;
+
+    assert.ok(!jump.id.includes(':'));
+    assert.equal(target.bastion?.profileId, jump.id);
+  });
 });

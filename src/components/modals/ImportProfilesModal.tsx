@@ -141,12 +141,28 @@ export const ImportProfilesModal: React.FC = () => {
     setIsImporting(true);
     setImportSuccessMessage(null);
     try {
-      const profilesToImport =
+      const rawProfilesToImport =
         activeTab === 'ssh'
           ? detectedSshProfiles.filter((p) => selectedProfileIds.has(p.id))
           : parsedJsonProfiles;
 
-      if (profilesToImport.length === 0) return;
+      if (rawProfilesToImport.length === 0) return;
+
+      const existingIds = new Set(existingProfiles.map((p) => p.id));
+      const importedIds = new Set(rawProfilesToImport.map((p) => p.id));
+
+      const profilesToImport = rawProfilesToImport.map((p) => {
+        if (p.bastion?.profileId && !importedIds.has(p.bastion.profileId) && !existingIds.has(p.bastion.profileId)) {
+          return {
+            ...p,
+            bastion: {
+              ...p.bastion,
+              profileId: undefined,
+            },
+          };
+        }
+        return p;
+      });
 
       const count = await importProfiles(profilesToImport);
       setImportSuccessMessage(`${count} profil(s) importé(s) avec succès !`);

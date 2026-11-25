@@ -122,19 +122,22 @@ pub fn candidate_endpoints(
     env_sock: Option<&str>,
     home: Option<&Path>,
 ) -> Vec<AgentCandidate> {
+    if let Some(p) = explicit.map(str::trim).filter(|p| !p.is_empty()) {
+        if p.eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+        return vec![AgentCandidate {
+            endpoint: AgentEndpoint::Socket(expand_home(p, home)),
+            source: "socket du profil",
+        }];
+    }
+
     let mut out: Vec<AgentCandidate> = Vec::new();
     let mut push = |endpoint: AgentEndpoint, source: &'static str| {
         if !out.iter().any(|c| c.endpoint == endpoint) {
             out.push(AgentCandidate { endpoint, source });
         }
     };
-
-    if let Some(p) = explicit.map(str::trim).filter(|p| !p.is_empty()) {
-        push(
-            AgentEndpoint::Socket(expand_home(p, home)),
-            "socket du profil",
-        );
-    }
 
     if let Some(p) = env_sock.map(str::trim).filter(|p| !p.is_empty()) {
         push(AgentEndpoint::Socket(PathBuf::from(p)), "SSH_AUTH_SOCK");
@@ -273,11 +276,23 @@ pub async fn connect_agent(
             }
         };
 
-        let identities = match client.request_identities().await {
-            Ok(ids) => ids,
-            Err(e) => {
+        let identities = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.request_identities(),
+        )
+        .await
+        {
+            Ok(Ok(ids)) => ids,
+            Ok(Err(e)) => {
                 logs.push(format!(
                     "Agent {} : lecture des identités impossible ({e})",
+                    candidate.describe()
+                ));
+                continue;
+            }
+            Err(_) => {
+                logs.push(format!(
+                    "Agent {} : délai d'attente dépassé (3s) lors de la lecture des identités",
                     candidate.describe()
                 ));
                 continue;
@@ -365,13 +380,20 @@ mod tests {
             Some("/home/dev/agent.sock"),
             Some(&home),
         );
-        // The explicit socket expands to the same path as SSH_AUTH_SOCK: kept once, first.
+        // The explicit socket is exclusive and prevents probing other endpoints
+        assert_eq!(cands.len(), 1);
         assert_eq!(
             cands[0].endpoint,
             AgentEndpoint::Socket(PathBuf::from("/home/dev/agent.sock"))
         );
         assert_eq!(cands[0].source, "socket du profil");
-        assert!(cands.iter().all(|c| c.source != "SSH_AUTH_SOCK"));
+    }
+
+    #[test]
+    fn test_candidate_none_disables_agent() {
+        let home = PathBuf::from("/home/dev");
+        let cands = candidate_endpoints(Some("none"), Some("/tmp/agent.sock"), Some(&home));
+        assert_eq!(cands.len(), 0);
     }
 
     #[test]

@@ -2,11 +2,11 @@
 //!
 //! Maps `Host` entries into Orbit SFTP `ConnectionProfile`s:
 //! - `HostName` -> `profile.host` (defaults to the concrete Host alias if omitted)
-//! - `User` -> `profile.username`
+//! - `User` -> `profile.username` (falls back to local user if omitted)
 //! - `Port` -> `profile.port` (defaults to 22)
 //! - `IdentityFile` -> `profile.key_path` (with `~` expanded to user home)
-//! - `IdentityAgent` -> `profile.agent_socket` (with `~` expanded to user home)
-//! - `ProxyJump` -> `profile.bastion` (links directly to another parsed host profile or existing profile, or inline bastion)
+//! - `IdentityAgent` -> `profile.agent_socket` (`none` disables agent discovery)
+//! - `ProxyJump` -> `profile.bastion` (links directly to matching host or inline bastion)
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -60,11 +60,65 @@ impl DirectiveSet {
     }
 }
 
-/// A parsed concrete host entry ready for profile conversion.
 #[derive(Debug, Clone)]
-struct ParsedHostEntry {
-    name: String,
+enum SectionContext {
+    Global,
+    Host(Vec<String>),
+    IgnoredMatch,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigSection {
+    context: SectionContext,
     directives: DirectiveSet,
+}
+
+/// Matches a simple wildcard pattern (* and ?) case-insensitively.
+pub fn pattern_matches(pattern: &str, text: &str) -> bool {
+    let p_bytes = pattern.as_bytes();
+    let t_bytes = text.as_bytes();
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (None, 0);
+
+    while ti < t_bytes.len() {
+        if pi < p_bytes.len()
+            && (p_bytes[pi] == b'?' || p_bytes[pi].eq_ignore_ascii_case(&t_bytes[ti]))
+        {
+            pi += 1;
+            ti += 1;
+        } else if pi < p_bytes.len() && p_bytes[pi] == b'*' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_ti = ti;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < p_bytes.len() && p_bytes[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == p_bytes.len()
+}
+
+/// Evaluates OpenSSH pattern lists including negations (e.g. `*.corp, !bad.corp`).
+pub fn matches_ssh_patterns(patterns: &[String], host: &str) -> bool {
+    let mut matched = false;
+    for pat in patterns {
+        if let Some(negated) = pat.strip_prefix('!') {
+            if pattern_matches(negated, host) {
+                return false;
+            }
+        } else if pattern_matches(pat, host) {
+            matched = true;
+        }
+    }
+    matched
 }
 
 /// Parses `[user@]host[:port]` target from a `ProxyJump` directive.
@@ -109,7 +163,6 @@ pub fn parse_jump_target(target: &str) -> (Option<String>, String, Option<u16>) 
 /// Cleans an argument: strips inline comments (preceded by whitespace and `#`) and surrounding quotes.
 fn clean_arg(raw: &str) -> String {
     let trimmed = raw.trim();
-    // Strip trailing comment if not quoted
     let without_comment = if !trimmed.starts_with('"') && !trimmed.starts_with('\'') {
         if let Some(idx) = trimmed.find(" #") {
             trimmed[..idx].trim()
@@ -139,7 +192,6 @@ fn parse_line_directive(line: &str) -> Option<(String, String)> {
         return None;
     }
 
-    // Find first whitespace or '='
     let sep_pos = line.find(|c: char| c.is_whitespace() || c == '=')?;
     let key = line[..sep_pos].trim().to_lowercase();
     let rest = line[sep_pos..].trim_start();
@@ -157,6 +209,14 @@ fn parse_line_directive(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
+fn get_local_username() -> Option<String> {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+}
+
 /// Parses the contents of an SSH configuration file into `ConnectionProfile`s.
 pub fn parse_ssh_config(
     content: &str,
@@ -164,49 +224,10 @@ pub fn parse_ssh_config(
     home_dir: Option<&Path>,
 ) -> SshConfigImportResult {
     let mut warnings = Vec::new();
-    let mut global_defaults = DirectiveSet::default();
-    let mut parsed_entries: Vec<ParsedHostEntry> = Vec::new();
+    let mut sections: Vec<ConfigSection> = Vec::new();
 
-    // Context: None = global defaults, Some(vec_of_hostnames) = in host block
-    let mut current_hosts: Option<Vec<String>> = None;
+    let mut current_context = SectionContext::Global;
     let mut current_directives = DirectiveSet::default();
-
-    let commit_current_block = |hosts_opt: Option<Vec<String>>,
-                                directives: DirectiveSet,
-                                out: &mut Vec<ParsedHostEntry>,
-                                defaults: &mut DirectiveSet| {
-        match hosts_opt {
-            Some(hosts) => {
-                for h in hosts {
-                    out.push(ParsedHostEntry {
-                        name: h,
-                        directives: directives.clone(),
-                    });
-                }
-            }
-            None => {
-                // Was global defaults
-                if defaults.hostname.is_none() {
-                    defaults.hostname = directives.hostname;
-                }
-                if defaults.user.is_none() {
-                    defaults.user = directives.user;
-                }
-                if defaults.port.is_none() {
-                    defaults.port = directives.port;
-                }
-                if defaults.identity_file.is_none() {
-                    defaults.identity_file = directives.identity_file;
-                }
-                if defaults.proxy_jump.is_none() {
-                    defaults.proxy_jump = directives.proxy_jump;
-                }
-                if defaults.identity_agent.is_none() {
-                    defaults.identity_agent = directives.identity_agent;
-                }
-            }
-        }
-    };
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -216,117 +237,136 @@ pub fn parse_ssh_config(
 
         if let Some((key, value)) = parse_line_directive(trimmed) {
             if key == "host" {
-                // Commit previous block
-                commit_current_block(
-                    current_hosts.take(),
-                    current_directives,
-                    &mut parsed_entries,
-                    &mut global_defaults,
-                );
+                sections.push(ConfigSection {
+                    context: current_context,
+                    directives: current_directives,
+                });
                 current_directives = DirectiveSet::default();
 
-                // Split patterns by whitespace
                 let patterns: Vec<String> = value
                     .split_whitespace()
                     .map(clean_arg)
                     .filter(|p| !p.is_empty())
                     .collect();
 
-                let concrete: Vec<String> = patterns
-                    .into_iter()
-                    .filter(|p| !p.contains('*') && !p.contains('?'))
-                    .collect();
-
-                if concrete.is_empty() {
-                    // Wildcard host block (e.g. `Host *`) treated as global defaults
-                    current_hosts = None;
-                } else {
-                    current_hosts = Some(concrete);
-                }
+                current_context = SectionContext::Host(patterns);
             } else if key == "match" {
-                // Orbit does not evaluate Match conditional blocks; commit and treat as ignored
-                commit_current_block(
-                    current_hosts.take(),
-                    current_directives,
-                    &mut parsed_entries,
-                    &mut global_defaults,
-                );
+                sections.push(ConfigSection {
+                    context: current_context,
+                    directives: current_directives,
+                });
                 current_directives = DirectiveSet::default();
-                current_hosts = None;
+                current_context = SectionContext::IgnoredMatch;
             } else {
                 current_directives.set_directive(&key, value);
             }
         }
     }
 
-    // Commit final block
-    commit_current_block(
-        current_hosts.take(),
-        current_directives,
-        &mut parsed_entries,
-        &mut global_defaults,
-    );
+    sections.push(ConfigSection {
+        context: current_context,
+        directives: current_directives,
+    });
 
-    // First pass: generate safe unique IDs and base profiles for all valid concrete hosts.
-    // Map of lowercase host alias -> (profile_id, index in profiles)
+    // Collect all distinct concrete aliases in file order
+    let mut concrete_aliases: Vec<String> = Vec::new();
+    for sec in &sections {
+        if let SectionContext::Host(patterns) = &sec.context {
+            for pat in patterns {
+                if !pat.contains('*') && !pat.contains('?') && !pat.starts_with('!') {
+                    if !concrete_aliases.iter().any(|a| a.eq_ignore_ascii_case(pat)) {
+                        concrete_aliases.push(pat.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let local_user = get_local_username();
+
+    // First pass: generate base profiles evaluating sections in file order (first match wins)
     let mut alias_to_profile_idx: HashMap<String, usize> = HashMap::new();
     let mut intermediate_profiles: Vec<(ConnectionProfile, Option<String>)> = Vec::new();
 
-    for entry in parsed_entries {
-        let host_val = entry
-            .directives
-            .hostname
-            .clone()
-            .or_else(|| global_defaults.hostname.clone())
-            .unwrap_or_else(|| entry.name.clone());
+    for alias in concrete_aliases {
+        let mut merged = DirectiveSet::default();
+
+        for sec in &sections {
+            let applies = match &sec.context {
+                SectionContext::Global => true,
+                SectionContext::Host(patterns) => matches_ssh_patterns(patterns, &alias),
+                SectionContext::IgnoredMatch => false,
+            };
+
+            if applies {
+                if merged.hostname.is_none() {
+                    merged.hostname = sec.directives.hostname.clone();
+                }
+                if merged.user.is_none() {
+                    merged.user = sec.directives.user.clone();
+                }
+                if merged.port.is_none() {
+                    merged.port = sec.directives.port;
+                }
+                if merged.identity_file.is_none() {
+                    merged.identity_file = sec.directives.identity_file.clone();
+                }
+                if merged.proxy_jump.is_none() {
+                    merged.proxy_jump = sec.directives.proxy_jump.clone();
+                }
+                if merged.identity_agent.is_none() {
+                    merged.identity_agent = sec.directives.identity_agent.clone();
+                }
+            }
+        }
+
+        let host_val = merged.hostname.unwrap_or_else(|| alias.clone());
 
         if let Err(err) = validate_ssh_host(&host_val) {
             warnings.push(format!(
                 "Hôte '{}' ignoré car l'adresse '{}' est invalide : {}",
-                entry.name, host_val, err
+                alias, host_val, err
             ));
             continue;
         }
 
-        let user_val = entry
-            .directives
-            .user
-            .clone()
-            .or_else(|| global_defaults.user.clone());
+        let user_val = merged.user.or_else(|| local_user.clone());
+        let port_val = merged.port.unwrap_or(22);
 
-        let port_val = entry.directives.port.or(global_defaults.port).unwrap_or(22);
-
-        let identity_file_raw = entry
-            .directives
-            .identity_file
-            .clone()
-            .or_else(|| global_defaults.identity_file.clone());
-
-        let key_path = identity_file_raw.map(|p| {
+        let key_path = merged.identity_file.map(|p| {
             agent::expand_home(&p, home_dir)
                 .to_string_lossy()
                 .into_owned()
         });
 
-        let identity_agent_raw = entry
-            .directives
+        let is_none_agent = merged
             .identity_agent
-            .clone()
-            .or_else(|| global_defaults.identity_agent.clone())
-            .filter(|a| a.to_lowercase() != "none");
+            .as_deref()
+            .map(|a| a.trim().eq_ignore_ascii_case("none"))
+            .unwrap_or(false);
 
-        let agent_socket = identity_agent_raw.map(|a| {
-            agent::expand_home(&a, home_dir)
-                .to_string_lossy()
-                .into_owned()
-        });
+        let agent_socket = if is_none_agent {
+            Some("none".to_string())
+        } else {
+            merged.identity_agent.map(|a| {
+                agent::expand_home(&a, home_dir)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
 
         let is_pub = key_path
             .as_deref()
             .map(|kp| agent::is_public_key_path(Path::new(kp)))
             .unwrap_or(false);
 
-        let auth_type = if agent_socket.is_some() || is_pub {
+        let auth_type = if is_none_agent {
+            if key_path.is_some() {
+                Some("key".to_string())
+            } else {
+                None
+            }
+        } else if agent_socket.is_some() || is_pub {
             Some("agent".to_string())
         } else if key_path.is_some() {
             Some("key".to_string())
@@ -334,19 +374,15 @@ pub fn parse_ssh_config(
             None
         };
 
-        let proxy_jump_raw = entry
-            .directives
-            .proxy_jump
-            .clone()
-            .or_else(|| global_defaults.proxy_jump.clone())
-            .filter(|pj| pj.to_lowercase() != "none" && pj.to_lowercase() != "off");
+        let proxy_jump_raw = merged.proxy_jump.filter(|pj| {
+            !pj.trim().eq_ignore_ascii_case("none") && !pj.trim().eq_ignore_ascii_case("off")
+        });
 
-        // Safe ID generation: alphanumeric with prefix, never contains ':' to prevent keyring collision.
         let safe_id = format!("prof-ssh-{}", fastrand::u64(100_000_000..999_999_999));
 
         let profile = ConnectionProfile {
             id: safe_id,
-            name: entry.name.clone(),
+            name: alias.clone(),
             storage_type: "sftp".to_string(),
             endpoint: None,
             bucket: None,
@@ -365,7 +401,7 @@ pub fn parse_ssh_config(
         };
 
         let idx = intermediate_profiles.len();
-        alias_to_profile_idx.insert(entry.name.to_lowercase(), idx);
+        alias_to_profile_idx.insert(alias.to_lowercase(), idx);
         intermediate_profiles.push((profile, proxy_jump_raw));
     }
 
@@ -379,7 +415,6 @@ pub fn parse_ssh_config(
 
     for (mut profile, proxy_jump_opt) in intermediate_profiles {
         if let Some(pj) = proxy_jump_opt {
-            // Split hops; take the first hop if multiple are configured
             let hops: Vec<&str> = pj
                 .split(',')
                 .map(|s| s.trim())
@@ -395,15 +430,19 @@ pub fn parse_ssh_config(
             if let Some(&first_hop) = hops.first() {
                 let (jump_user, jump_host, jump_port) = parse_jump_target(first_hop);
 
-                // 1. Check if first_hop matches another host imported from the same config file
-                if let Some(&b_idx) = alias_to_profile_idx.get(&first_hop.to_lowercase()) {
+                // Look up matching bastion by host or full alias
+                let matching_idx = alias_to_profile_idx
+                    .get(&first_hop.to_lowercase())
+                    .or_else(|| alias_to_profile_idx.get(&jump_host.to_lowercase()));
+
+                if let Some(&b_idx) = matching_idx {
                     let b_prof = &base_profiles[b_idx];
                     profile.bastion = Some(BastionConfig {
                         enabled: true,
                         profile_id: Some(b_prof.id.clone()),
                         host: b_prof.host.clone(),
-                        port: b_prof.port,
-                        username: b_prof.username.clone(),
+                        port: jump_port.or(b_prof.port),
+                        username: jump_user.or_else(|| b_prof.username.clone()),
                         auth_type: b_prof.auth_type.clone(),
                         key_path: b_prof.key_path.clone(),
                         agent_socket: b_prof.agent_socket.clone(),
@@ -411,15 +450,16 @@ pub fn parse_ssh_config(
                         passphrase: None,
                     });
                 } else if let Some(existing) = existing_profiles.iter().find(|p| {
-                    p.name.eq_ignore_ascii_case(first_hop) || p.host.as_deref() == Some(&jump_host)
+                    p.name.eq_ignore_ascii_case(first_hop)
+                        || p.name.eq_ignore_ascii_case(&jump_host)
+                        || p.host.as_deref() == Some(&jump_host)
                 }) {
-                    // 2. Check if it matches an existing profile in Orbit
                     profile.bastion = Some(BastionConfig {
                         enabled: true,
                         profile_id: Some(existing.id.clone()),
                         host: existing.host.clone(),
-                        port: existing.port,
-                        username: existing.username.clone(),
+                        port: jump_port.or(existing.port),
+                        username: jump_user.or_else(|| existing.username.clone()),
                         auth_type: existing.auth_type.clone(),
                         key_path: existing.key_path.clone(),
                         agent_socket: existing.agent_socket.clone(),
@@ -427,7 +467,6 @@ pub fn parse_ssh_config(
                         passphrase: None,
                     });
                 } else {
-                    // 3. Inline bastion specification
                     if let Err(err) = validate_ssh_host(&jump_host) {
                         warnings.push(format!(
                             "Le bastion ProxyJump '{}' pour '{}' est invalide : {}",
@@ -532,11 +571,6 @@ mod tests {
     #[test]
     fn test_parse_ssh_config_basic_and_inheritance() {
         let config = r#"
-# Global configuration
-User defaultuser
-Port 2200
-IdentityFile ~/.ssh/id_default
-
 Host s1
     HostName 192.168.1.10
     User customuser
@@ -547,6 +581,12 @@ Host s2
 
 Host s3
     IdentityAgent ~/.1password/agent.sock
+
+# Global configuration applied as defaults
+Host *
+    User defaultuser
+    Port 2200
+    IdentityFile ~/.ssh/id_default
 "#;
         let home = PathBuf::from("/Users/alice");
         let res = parse_ssh_config(config, &[], Some(&home));
@@ -569,12 +609,56 @@ Host s3
 
         let s3 = &res.profiles[2];
         assert_eq!(s3.name, "s3");
-        assert_eq!(s3.host.as_deref(), Some("s3")); // defaults to name
+        assert_eq!(s3.host.as_deref(), Some("s3"));
         assert_eq!(
             s3.agent_socket.as_deref(),
             Some("/Users/alice/.1password/agent.sock")
         );
         assert_eq!(s3.auth_type.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn test_parse_ssh_config_first_wins_order() {
+        let config = r#"
+User globaluser
+
+Host app
+    User localuser
+"#;
+        // In OpenSSH, directives before any Host line come first in file order, so globaluser wins!
+        let res = parse_ssh_config(config, &[], None);
+        assert_eq!(res.profiles.len(), 1);
+        assert_eq!(res.profiles[0].username.as_deref(), Some("globaluser"));
+    }
+
+    #[test]
+    fn test_parse_ssh_config_wildcard_scoping() {
+        let config = r#"
+Host prod-*
+    User deploy
+
+Host dev
+    HostName 10.0.0.1
+"#;
+        let res = parse_ssh_config(config, &[], None);
+        assert_eq!(res.profiles.len(), 1);
+        assert_eq!(res.profiles[0].name, "dev");
+        // dev should not inherit deploy from prod-*
+        assert_ne!(res.profiles[0].username.as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn test_parse_ssh_config_identity_agent_none() {
+        let config = r#"
+Host server-no-agent
+    HostName 10.0.0.1
+    IdentityAgent none
+    IdentityFile ~/.ssh/id_rsa
+"#;
+        let res = parse_ssh_config(config, &[], None);
+        assert_eq!(res.profiles.len(), 1);
+        assert_eq!(res.profiles[0].agent_socket.as_deref(), Some("none"));
+        assert_eq!(res.profiles[0].auth_type.as_deref(), Some("key"));
     }
 
     #[test]
@@ -594,14 +678,19 @@ Host web-prod
 Host inline-jump
     HostName 10.0.2.10
     ProxyJump operator@jump.standalone.org:2202
+
+Host jump-override
+    HostName 10.0.3.10
+    ProxyJump override_user@bastion-prod:2229
 "#;
         let home = PathBuf::from("/Users/alice");
         let res = parse_ssh_config(config, &[], Some(&home));
-        assert_eq!(res.profiles.len(), 3);
+        assert_eq!(res.profiles.len(), 4);
 
         let bastion = &res.profiles[0];
         let web = &res.profiles[1];
         let inline = &res.profiles[2];
+        let override_p = &res.profiles[3];
 
         assert_eq!(bastion.name, "bastion-prod");
         assert_eq!(web.name, "web-prod");
@@ -624,11 +713,16 @@ Host inline-jump
         assert_eq!(inline_b.host.as_deref(), Some("jump.standalone.org"));
         assert_eq!(inline_b.username.as_deref(), Some("operator"));
         assert_eq!(inline_b.port, Some(2202));
+
+        let override_b = override_p.bastion.as_ref().unwrap();
+        assert!(override_b.enabled);
+        assert_eq!(override_b.profile_id.as_deref(), Some(bastion.id.as_str()));
+        assert_eq!(override_b.username.as_deref(), Some("override_user"));
+        assert_eq!(override_b.port, Some(2229));
     }
 
     #[test]
     fn test_parse_ssh_config_proxy_jump_forward_reference() {
-        // web is defined before its bastion
         let config = r#"
 Host web-forward
     HostName 10.0.1.99
@@ -664,7 +758,6 @@ Host srv-a srv-b *.internal
     Port 22
 "#;
         let res = parse_ssh_config(config, &[], None);
-        // *.internal is wildcard, srv-a and srv-b are concrete
         assert_eq!(res.profiles.len(), 2);
         assert_eq!(res.profiles[0].name, "srv-a");
         assert_eq!(res.profiles[0].username.as_deref(), Some("globaluser"));
@@ -689,7 +782,7 @@ Host bad-chars
         assert_eq!(res.warnings.len(), 2);
         assert!(res.warnings[0].contains("bad-injection"));
         assert!(res.warnings[0].contains("bad;host/injection"));
-        assert!(res.warnings[1].contains("bad-chars"));
+        assert!(res.warnings[1].contains("bad[host]"));
     }
 
     #[test]

@@ -53,9 +53,16 @@ export function validateS3EndpointUrl(endpoint: string | undefined): { valid: bo
  * Vérifie qu'un ID de profil est sain et ne contient pas de ':' pour empêcher toute collision
  * avec les secrets de trousseau (`{id}:bastion` ou `{id}:proxy`).
  */
-export function isSafeProfileId(id: string): boolean {
+export function isSafeProfileId(id: string | undefined | null): boolean {
   if (!id || typeof id !== 'string') return false;
   return /^[a-zA-Z0-9_\-]+$/.test(id) && !id.includes(':');
+}
+
+/**
+ * Valide qu'un numéro de port est un entier strict compris entre 1 et 65535.
+ */
+export function isValidPort(p: unknown): p is number {
+  return typeof p === 'number' && Number.isInteger(p) && p >= 1 && p <= 65535;
 }
 
 /**
@@ -72,7 +79,7 @@ export function generateSafeProfileId(): string {
 export function sanitizeImportedProfile(
   raw: any,
   existingIds: Set<string>
-): { profile: ConnectionProfile | null; warnings: string[] } {
+): { profile: ConnectionProfile | null; warnings: string[]; originalId?: string } {
   if (!raw || typeof raw !== 'object') {
     return { profile: null, warnings: ['Format de profil invalide (non-objet)'] };
   }
@@ -82,8 +89,9 @@ export function sanitizeImportedProfile(
   const warnings: string[] = [];
 
   // ID Validation & Collision Prevention
-  let id = typeof raw.id === 'string' ? raw.id.trim() : '';
-  if (!isSafeProfileId(id) || existingIds.has(id)) {
+  const rawId = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : undefined;
+  let id = rawId || '';
+  if (!id || !isSafeProfileId(id) || existingIds.has(id)) {
     id = generateSafeProfileId();
   }
 
@@ -94,10 +102,10 @@ export function sanitizeImportedProfile(
     const hostCheck = validateSshHostString(rawHost);
     if (!hostCheck.valid) {
       warnings.push(`Profil '${name}' ignoré : ${hostCheck.error}`);
-      return { profile: null, warnings };
+      return { profile: null, warnings, originalId: rawId };
     }
 
-    const port = typeof raw.port === 'number' && raw.port > 0 && raw.port <= 65535 ? raw.port : 22;
+    const port = isValidPort(raw.port) ? raw.port : 22;
     const username = typeof raw.username === 'string' ? raw.username.trim() : undefined;
     const authType: SshAuthType | undefined =
       raw.authType === 'agent' || raw.authType === 'key' || raw.authType === 'password'
@@ -106,12 +114,17 @@ export function sanitizeImportedProfile(
     const keyPath = typeof raw.keyPath === 'string' && raw.keyPath.trim() ? raw.keyPath.trim() : undefined;
     const agentSocket =
       typeof raw.agentSocket === 'string' && raw.agentSocket.trim() ? raw.agentSocket.trim() : undefined;
-    const useSudo = Boolean(raw.useSudo);
+    const useSudo = raw.useSudo === true;
 
     let bastion: BastionConfig | undefined = undefined;
     if (raw.bastion && typeof raw.bastion === 'object' && raw.bastion.enabled) {
       const bHost = typeof raw.bastion.host === 'string' ? raw.bastion.host.trim() : undefined;
       const bPid = typeof raw.bastion.profileId === 'string' ? raw.bastion.profileId.trim() : undefined;
+      const bAuthType: SshAuthType | undefined =
+        raw.bastion.authType === 'agent' || raw.bastion.authType === 'key' || raw.bastion.authType === 'password'
+          ? raw.bastion.authType
+          : undefined;
+
       if (bHost) {
         const bHostCheck = validateSshHostString(bHost);
         if (!bHostCheck.valid) {
@@ -119,16 +132,16 @@ export function sanitizeImportedProfile(
         } else {
           bastion = {
             enabled: true,
-            profileId: bPid && isSafeProfileId(bPid) ? bPid : undefined,
+            profileId: bPid || undefined,
             host: bHost,
-            port: typeof raw.bastion.port === 'number' && raw.bastion.port > 0 ? raw.bastion.port : 22,
+            port: isValidPort(raw.bastion.port) ? raw.bastion.port : 22,
             username: typeof raw.bastion.username === 'string' ? raw.bastion.username.trim() : undefined,
-            authType: raw.bastion.authType,
+            authType: bAuthType,
             keyPath: typeof raw.bastion.keyPath === 'string' ? raw.bastion.keyPath.trim() : undefined,
             agentSocket: typeof raw.bastion.agentSocket === 'string' ? raw.bastion.agentSocket.trim() : undefined,
           };
         }
-      } else if (bPid && isSafeProfileId(bPid)) {
+      } else if (bPid) {
         bastion = {
           enabled: true,
           profileId: bPid,
@@ -144,7 +157,7 @@ export function sanitizeImportedProfile(
           enabled: true,
           proxyType: raw.proxy.proxyType === 'http' ? 'http' : 'socks5',
           host: pHost,
-          port: typeof raw.proxy.port === 'number' && raw.proxy.port > 0 ? raw.proxy.port : 1080,
+          port: isValidPort(raw.proxy.port) ? raw.proxy.port : 1080,
           username: typeof raw.proxy.username === 'string' ? raw.proxy.username.trim() : undefined,
         };
       }
@@ -167,14 +180,14 @@ export function sanitizeImportedProfile(
       proxy,
     };
 
-    return { profile, warnings };
+    return { profile, warnings, originalId: rawId };
   } else {
     // S3 Profile
     const endpoint = typeof raw.endpoint === 'string' ? raw.endpoint.trim() : undefined;
     const epCheck = validateS3EndpointUrl(endpoint);
     if (!epCheck.valid) {
       warnings.push(`Profil S3 '${name}' ignoré : ${epCheck.error}`);
-      return { profile: null, warnings };
+      return { profile: null, warnings, originalId: rawId };
     }
 
     const bucket = typeof raw.bucket === 'string' ? raw.bucket.trim() : '';
@@ -193,7 +206,7 @@ export function sanitizeImportedProfile(
       status: 'idle',
     };
 
-    return { profile, warnings };
+    return { profile, warnings, originalId: rawId };
   }
 }
 
@@ -219,14 +232,31 @@ export function parseAndValidateProfilesJson(
 
   const items = Array.isArray(parsed) ? parsed : [parsed];
   const validProfiles: ConnectionProfile[] = [];
+  const idMapping = new Map<string, string>();
 
   for (const item of items) {
     const res = sanitizeImportedProfile(item, existingIds);
     if (res) {
       warnings.push(...res.warnings);
       if (res.profile) {
+        if (res.originalId && res.originalId !== res.profile.id) {
+          idMapping.set(res.originalId, res.profile.id);
+        }
         validProfiles.push(res.profile);
         existingIds.add(res.profile.id);
+      }
+    }
+  }
+
+  // Remap bastion.profileId if the referenced ID was changed/regenerated in this batch
+  for (const profile of validProfiles) {
+    if (profile.bastion?.profileId) {
+      if (idMapping.has(profile.bastion.profileId)) {
+        profile.bastion.profileId = idMapping.get(profile.bastion.profileId);
+      }
+      // If the referenced profileId is still not safe, strip it
+      if (!isSafeProfileId(profile.bastion.profileId)) {
+        profile.bastion.profileId = undefined;
       }
     }
   }

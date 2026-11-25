@@ -73,6 +73,7 @@ export const NewConnectionModal: React.FC = () => {
   const [bastionAuthType, setBastionAuthType] = useState<SshAuthType>('key');
   const [bastionKeyPath, setBastionKeyPath] = useState('~/.ssh/id_ed25519');
   const [bastionAgentKeyPath, setBastionAgentKeyPath] = useState('');
+  const [bastionAgentSocket, setBastionAgentSocket] = useState('');
   const [bastionPassphrase, setBastionPassphrase] = useState('');
   const [bastionPassword, setBastionPassword] = useState('');
   const [showBastionPassword, setShowBastionPassword] = useState(false);
@@ -146,6 +147,7 @@ export const NewConnectionModal: React.FC = () => {
             bastionAuth === 'key' && editingProfile.bastion.keyPath ? editingProfile.bastion.keyPath : '~/.ssh/id_ed25519'
           );
           setBastionAgentKeyPath(bastionAuth === 'agent' ? editingProfile.bastion.keyPath || '' : '');
+          setBastionAgentSocket(bastionAuth === 'agent' ? editingProfile.bastion.agentSocket || '' : '');
         }
         setShowNetworkSettings(true);
         storageApi.getSecret(`${editingProfile.id}:bastion`).then((sec) => {
@@ -164,6 +166,7 @@ export const NewConnectionModal: React.FC = () => {
         setBastionAuthType('key');
         setBastionKeyPath('~/.ssh/id_ed25519');
         setBastionAgentKeyPath('');
+        setBastionAgentSocket('');
         setBastionPassphrase('');
         setBastionPassword('');
       }
@@ -253,6 +256,8 @@ export const NewConnectionModal: React.FC = () => {
       : undefined;
   const effectiveAgentSocket = (): string | undefined =>
     authType === 'agent' ? agentSocket.trim() || undefined : undefined;
+  const effectiveBastionAgentSocket = (): string | undefined =>
+    bastionAuthType === 'agent' ? bastionAgentSocket.trim() || undefined : undefined;
 
   const handleBrowseKey = async () => {
     try {
@@ -418,6 +423,7 @@ export const NewConnectionModal: React.FC = () => {
             username: bastionUsername.trim(),
             authType: bastionAuthType,
             keyPath: effectiveBastionKeyPath(),
+            agentSocket: effectiveBastionAgentSocket(),
             password: bastionAuthType === 'password' ? bastionPassword.trim() || undefined : undefined,
             passphrase: bastionAuthType === 'key' ? bastionPassphrase.trim() || undefined : undefined,
           };
@@ -536,6 +542,7 @@ export const NewConnectionModal: React.FC = () => {
             username: bastionUsername.trim(),
             authType: bastionAuthType,
             keyPath: effectiveBastionKeyPath(),
+            agentSocket: effectiveBastionAgentSocket(),
           };
           bastionSecretToSave =
             bastionAuthType === 'password'
@@ -1321,13 +1328,22 @@ export const NewConnectionModal: React.FC = () => {
                                 </div>
 
                                 {bastionAuthType === 'agent' ? (
-                                  <input
-                                    type="text"
-                                    value={bastionAgentKeyPath}
-                                    onChange={(e) => setBastionAgentKeyPath(e.target.value)}
-                                    placeholder="Clé à utiliser dans l'agent (.pub, optionnel)"
-                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
-                                  />
+                                  <div className="space-y-2">
+                                    <input
+                                      type="text"
+                                      value={bastionAgentKeyPath}
+                                      onChange={(e) => setBastionAgentKeyPath(e.target.value)}
+                                      placeholder="Clé à utiliser dans l'agent (.pub, optionnel)"
+                                      className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={bastionAgentSocket}
+                                      onChange={(e) => setBastionAgentSocket(e.target.value)}
+                                      placeholder="Socket SSH agent (optionnel, ex: /tmp/ssh-xxx/agent.sock)"
+                                      className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                    />
+                                  </div>
                                 ) : bastionAuthType === 'key' ? (
                                   <div className="space-y-2">
                                     <div className="flex gap-1.5">
