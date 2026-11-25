@@ -1,5 +1,6 @@
 import type { TransferGroup, TransferItem, WalkEntry } from '../types';
-import { joinPath } from './transferConflicts.ts';
+import { joinPath, splitPath } from './transferConflicts.ts';
+import { isWindowsLocalPath, toWindowsSafeName } from './pathUtils.ts';
 import type { TransferRequest } from './transferConflicts.ts';
 import { isFinishedStatus } from './transferQueue.ts';
 
@@ -125,7 +126,27 @@ export function folderDestination(
   // the transfer write outside `destDir`. Backslash is a separator on Windows destinations.
   const unsafe =
     name === '' || name === '.' || name === '..' || name.includes('/') || (!remoteDest && name.includes('\\'));
-  return unsafe ? null : joinPath(destDir, name, remoteDest);
+  if (unsafe) return null;
+  return joinPath(destDir, localDestinationName(direction, destDir, name), remoteDest);
+}
+
+/**
+ * Rewrites the local destination of a download so its file name is valid on the local system
+ * (see `localDestinationName`). Other requests are returned unchanged.
+ */
+export function withSafeLocalDestination<T extends TransferRequest>(request: T): T {
+  if (request.direction !== 'download') return request;
+  const { dir, name } = splitPath(request.localPath);
+  const safeName = localDestinationName('download', dir, name);
+  return safeName === name ? request : { ...request, localPath: joinPath(dir, safeName) };
+}
+
+/**
+ * Name a remote entry takes in the local directory `destDir`: unchanged except below a Windows
+ * directory, where names invalid on Windows are rewritten (see `toWindowsSafeName`).
+ */
+export function localDestinationName(direction: TransferItem['direction'], destDir: string, name: string): string {
+  return direction === 'download' && isWindowsLocalPath(destDir) ? toWindowsSafeName(name) : name;
 }
 
 /**
@@ -156,8 +177,12 @@ export function planFolderTransfer(
     if (remote) return joinPath(root, relative, true);
     // Walk entries use `/`. Below a Windows root, and notably an extended-length `\\?\` one
     // where `/` is not a separator, every segment must be joined with `\`.
-    const windowsRoot = root.includes('\\') && !root.includes('/');
-    return joinPath(root, windowsRoot ? relative.split('/').join('\\') : relative);
+    const windowsRoot = isWindowsLocalPath(root);
+    if (!windowsRoot) return joinPath(root, relative);
+    // Downloaded remote names that are invalid on Windows are rewritten segment by segment;
+    // local upload sources are real Windows names and stay untouched.
+    const segments = relative.split('/');
+    return joinPath(root, (direction === 'download' ? segments.map(toWindowsSafeName) : segments).join('\\'));
   };
 
   const dirsToCreate = [
