@@ -33,11 +33,25 @@ pub struct FileEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
+    #[serde(default)]
+    pub is_symlink: bool,
     pub size: u64,
     pub modified_at: String,
     pub permissions: Option<String>,
     pub owner: Option<String>,
     pub group: Option<String>,
+    pub etag: Option<String>,
+}
+
+/// Identity of a remote file revision, used to detect changes made by someone else.
+///
+/// Two fingerprints are equal when the remote file was (very likely) not modified in between.
+/// SFTP only offers a one-second `mtime` resolution, so a same-size change within the same
+/// second goes unnoticed; S3 adds the ETag, which changes with the content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFingerprint {
+    pub size: u64,
+    pub modified: Option<String>,
     pub etag: Option<String>,
 }
 

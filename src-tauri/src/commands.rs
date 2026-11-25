@@ -6,6 +6,7 @@ use tauri::ipc::Channel;
 use crate::config_service::ConfigService;
 use crate::error::AppError;
 use crate::keyring_service::KeyringService;
+use crate::local_edit::{LocalEditAction, LocalEditInfo, LocalEditManager};
 use crate::models::{
     ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, S3ConnectConfig,
     SftpConnectConfig, TransferProgress,
@@ -313,10 +314,13 @@ pub async fn get_session_info(
 
 #[tauri::command]
 pub async fn disconnect(
+    app: tauri::AppHandle,
     profile_id: String,
     state: State<'_, SessionManager>,
     transfers: State<'_, TransferManager>,
+    local_edits: State<'_, LocalEditManager>,
 ) -> Result<(), AppError> {
+    local_edits.close_for_profile(&app, &profile_id).await;
     transfers.cancel_for_profile(&profile_id).await;
     state.remove_provider(&profile_id).await;
     Ok(())
@@ -596,4 +600,103 @@ pub async fn open_in_external_terminal(
 
     crate::terminal::launch_terminal(profile, &profiles, remote_path.as_deref())
         .map_err(AppError::Io)
+}
+
+#[tauri::command]
+pub async fn storage_set_permissions(
+    profile_id: Option<String>,
+    path: String,
+    mode: Option<u32>,
+    owner: Option<String>,
+    group: Option<String>,
+    recursive: bool,
+    sessions: State<'_, SessionManager>,
+) -> Result<(), AppError> {
+    let provider = sessions.get_provider(profile_id.as_deref()).await?;
+    provider
+        .set_permissions(&path, mode, owner.as_deref(), group.as_deref(), recursive)
+        .await
+}
+
+#[tauri::command]
+pub async fn local_set_permissions(
+    path: String,
+    mode: Option<u32>,
+    owner: Option<String>,
+    group: Option<String>,
+    recursive: bool,
+) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || {
+        crate::local_fs::set_local_permissions(
+            &path,
+            mode,
+            owner.as_deref(),
+            group.as_deref(),
+            recursive,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?
+}
+
+#[derive(serde::Serialize)]
+pub struct SystemIdentities {
+    pub users: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn storage_list_identities(
+    profile_id: Option<String>,
+    sessions: State<'_, SessionManager>,
+) -> Result<SystemIdentities, AppError> {
+    let provider = sessions.get_provider(profile_id.as_deref()).await?;
+    let (users, groups) = provider.list_identities().await?;
+    Ok(SystemIdentities { users, groups })
+}
+
+#[tauri::command]
+pub async fn local_list_identities() -> Result<SystemIdentities, AppError> {
+    let (users, groups) = tokio::task::spawn_blocking(crate::local_fs::list_local_identities)
+        .await
+        .map_err(|e| AppError::Io(format!("Task execution failed: {e}")))?;
+    Ok(SystemIdentities { users, groups })
+}
+
+/// Opens a remote file in a local text editor; every save is uploaded back.
+#[tauri::command]
+pub async fn local_edit_open(
+    app: tauri::AppHandle,
+    profile_id: String,
+    remote_path: String,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<LocalEditInfo, AppError> {
+    local_edits.open(&app, &profile_id, &remote_path).await
+}
+
+#[tauri::command]
+pub async fn local_edit_list(
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<Vec<LocalEditInfo>, AppError> {
+    Ok(local_edits.list().await)
+}
+
+#[tauri::command]
+pub async fn local_edit_resolve(
+    id: String,
+    action: LocalEditAction,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<(), AppError> {
+    local_edits.send(&id, action).await
+}
+
+/// Stops syncing a file and deletes its local copy.
+#[tauri::command]
+pub async fn local_edit_close(
+    app: tauri::AppHandle,
+    id: String,
+    local_edits: State<'_, LocalEditManager>,
+) -> Result<(), AppError> {
+    local_edits.close(&app, &id).await;
+    Ok(())
 }

@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -15,6 +15,11 @@ export interface SftpConnectParams {
   sudo_password?: string;
   bastion?: BastionConfig;
   proxy?: ProxyConfig;
+}
+
+export interface SystemIdentities {
+  users: string[];
+  groups: string[];
 }
 
 export interface BackendTransferProgress {
@@ -254,6 +259,40 @@ export const storageApi = {
     });
   },
 
+  async setPermissions(
+    profileId: string | undefined,
+    path: string,
+    mode?: number | null,
+    owner?: string | null,
+    group?: string | null,
+    recursive = false
+  ): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] setPermissions:', path, mode?.toString(8), owner, group, recursive);
+      return;
+    }
+    await invoke('storage_set_permissions', {
+      profileId: profileId || null,
+      path,
+      mode: mode ?? null,
+      owner: owner || null,
+      group: group || null,
+      recursive,
+    });
+  },
+
+  async listIdentities(profileId?: string): Promise<SystemIdentities> {
+    if (!isTauri()) {
+      return {
+        users: ['root', 'www-data', 'ubuntu', 'nginx', 'node'],
+        groups: ['root', 'www-data', 'staff', 'admin', 'docker'],
+      };
+    }
+    return await invoke<SystemIdentities>('storage_list_identities', {
+      profileId: profileId || null,
+    });
+  },
+
   async readPreview(
     profileId: string | undefined,
     path: string,
@@ -412,6 +451,60 @@ export const storageApi = {
       return;
     }
     await invoke('local_rename', { oldPath, newPath });
+  },
+
+  async setLocalPermissions(
+    path: string,
+    mode?: number | null,
+    owner?: string | null,
+    group?: string | null,
+    recursive = false
+  ): Promise<void> {
+    if (!isTauri()) {
+      console.log('[Mock] setLocalPermissions:', path, mode?.toString(8), owner, group, recursive);
+      return;
+    }
+    await invoke('local_set_permissions', {
+      path,
+      mode: mode ?? null,
+      owner: owner || null,
+      group: group || null,
+      recursive,
+    });
+  },
+
+  async listLocalIdentities(): Promise<SystemIdentities> {
+    if (!isTauri()) {
+      return {
+        users: ['root', 'staff', 'admin'],
+        groups: ['root', 'staff', 'wheel', 'admin'],
+      };
+    }
+    return await invoke<SystemIdentities>('local_list_identities');
+  },
+
+  /** Downloads a remote file, opens it in a local text editor and uploads it back on each save. */
+  async localEditOpen(profileId: string, remotePath: string): Promise<LocalEditInfo> {
+    if (!isTauri()) {
+      throw new Error("L'édition locale n'est disponible que dans l'application.");
+    }
+    return await invoke<LocalEditInfo>('local_edit_open', { profileId, remotePath });
+  },
+
+  async localEditList(): Promise<LocalEditInfo[]> {
+    if (!isTauri()) return [];
+    return await invoke<LocalEditInfo[]>('local_edit_list');
+  },
+
+  async localEditResolve(id: string, action: LocalEditAction): Promise<void> {
+    if (!isTauri()) return;
+    await invoke('local_edit_resolve', { id, action });
+  },
+
+  /** Stops syncing the file and deletes its local copy. */
+  async localEditClose(id: string): Promise<void> {
+    if (!isTauri()) return;
+    await invoke('local_edit_close', { id });
   },
 
   async saveSecret(profileId: string, secret: string): Promise<void> {

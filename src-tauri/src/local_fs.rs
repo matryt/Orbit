@@ -47,13 +47,31 @@ pub fn format_unix_mode(mode: u32, is_dir: bool) -> String {
     let prefix = if is_dir { 'd' } else { '-' };
     let r_usr = if mode & 0o400 != 0 { 'r' } else { '-' };
     let w_usr = if mode & 0o200 != 0 { 'w' } else { '-' };
-    let x_usr = if mode & 0o100 != 0 { 'x' } else { '-' };
+    let x_usr = if mode & 0o4000 != 0 {
+        if mode & 0o100 != 0 { 's' } else { 'S' }
+    } else if mode & 0o100 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     let r_grp = if mode & 0o040 != 0 { 'r' } else { '-' };
     let w_grp = if mode & 0o020 != 0 { 'w' } else { '-' };
-    let x_grp = if mode & 0o010 != 0 { 'x' } else { '-' };
+    let x_grp = if mode & 0o2000 != 0 {
+        if mode & 0o010 != 0 { 's' } else { 'S' }
+    } else if mode & 0o010 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     let r_oth = if mode & 0o004 != 0 { 'r' } else { '-' };
     let w_oth = if mode & 0o002 != 0 { 'w' } else { '-' };
-    let x_oth = if mode & 0o001 != 0 { 'x' } else { '-' };
+    let x_oth = if mode & 0o1000 != 0 {
+        if mode & 0o001 != 0 { 't' } else { 'T' }
+    } else if mode & 0o001 != 0 {
+        'x'
+    } else {
+        '-'
+    };
     format!(
         "{}{}{}{}{}{}{}{}{}{}",
         prefix, r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth
@@ -208,6 +226,7 @@ pub fn list_local_directory(
             name: file_name,
             path: path_str,
             is_dir,
+            is_symlink,
             size,
             modified_at,
             permissions,
@@ -281,6 +300,210 @@ pub fn rename_local_item(old_path: &str, new_path: &str) -> Result<(), AppError>
     }
 
     std::fs::rename(old_p, new_p).map_err(AppError::from)
+}
+
+#[cfg(unix)]
+pub fn resolve_user_to_uid(user: &str) -> Result<u32, AppError> {
+    let trimmed = user.trim();
+    if let Ok(uid) = trimmed.parse::<u32>() {
+        return Ok(uid);
+    }
+    let c_user = std::ffi::CString::new(trimmed)
+        .map_err(|_| AppError::InvalidPath("Nom d'utilisateur invalide".into()))?;
+    unsafe {
+        let mut pwd = std::mem::zeroed::<libc::passwd>();
+        let mut result = std::ptr::null_mut();
+        let mut buf_size = 1024;
+        loop {
+            let mut buf = vec![0u8; buf_size];
+            let res = libc::getpwnam_r(
+                c_user.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            );
+            if res == libc::ERANGE && buf_size < 1024 * 64 {
+                buf_size *= 2;
+                continue;
+            }
+            if res == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+                return Ok(pwd.pw_uid);
+            } else {
+                return Err(AppError::NotFound(format!(
+                    "Utilisateur local '{trimmed}' introuvable"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn resolve_group_to_gid(group: &str) -> Result<u32, AppError> {
+    let trimmed = group.trim();
+    if let Ok(gid) = trimmed.parse::<u32>() {
+        return Ok(gid);
+    }
+    let c_group = std::ffi::CString::new(trimmed)
+        .map_err(|_| AppError::InvalidPath("Nom de groupe invalide".into()))?;
+    unsafe {
+        let mut grp = std::mem::zeroed::<libc::group>();
+        let mut result = std::ptr::null_mut();
+        let mut buf_size = 1024;
+        loop {
+            let mut buf = vec![0u8; buf_size];
+            let res = libc::getgrnam_r(
+                c_group.as_ptr(),
+                &mut grp,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            );
+            if res == libc::ERANGE && buf_size < 1024 * 64 {
+                buf_size *= 2;
+                continue;
+            }
+            if res == 0 && !result.is_null() && !grp.gr_name.is_null() {
+                return Ok(grp.gr_gid);
+            } else {
+                return Err(AppError::NotFound(format!(
+                    "Groupe local '{trimmed}' introuvable"
+                )));
+            }
+        }
+    }
+}
+
+pub fn set_local_permissions(
+    path: &str,
+    mode: Option<u32>,
+    owner: Option<&str>,
+    group: Option<&str>,
+    recursive: bool,
+) -> Result<(), AppError> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Err(AppError::NotFound(format!("Fichier introuvable: {path}")));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let resolved_uid = if let Some(user_str) = owner {
+            let trimmed = user_str.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(resolve_user_to_uid(trimmed)?)
+            }
+        } else {
+            None
+        };
+
+        let resolved_gid = if let Some(group_str) = group {
+            let trimmed = group_str.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(resolve_group_to_gid(trimmed)?)
+            }
+        } else {
+            None
+        };
+
+        if recursive && p.is_dir() {
+            let walk_res = crate::walk::walk_local(p)?;
+            let mut sorted_entries = walk_res.entries;
+            sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
+
+            for entry in sorted_entries {
+                if entry.is_symlink {
+                    continue;
+                }
+                let child = p.join(&entry.relative_path);
+                if let Ok(meta) = child.symlink_metadata() {
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                }
+                if resolved_uid.is_some() || resolved_gid.is_some() {
+                    std::os::unix::fs::chown(&child, resolved_uid, resolved_gid).map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            AppError::PermissionDenied(format!(
+                                "Permission refusée pour changer le propriétaire de '{}' (privilèges administrateur / sudo requis)",
+                                child.display()
+                            ))
+                        } else {
+                            AppError::from(e)
+                        }
+                    })?;
+                }
+                if let Some(m) = mode {
+                    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(m)).map_err(
+                        |e| {
+                            AppError::Io(format!(
+                                "Échec de modification des permissions de '{}': {e}",
+                                child.display()
+                            ))
+                        },
+                    )?;
+                }
+            }
+        }
+
+        if resolved_uid.is_some() || resolved_gid.is_some() {
+            std::os::unix::fs::chown(p, resolved_uid, resolved_gid).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    AppError::PermissionDenied(format!(
+                        "Permission refusée pour changer le propriétaire de '{}' (privilèges administrateur / sudo requis)",
+                        p.display()
+                    ))
+                } else {
+                    AppError::from(e)
+                }
+            })?;
+        }
+        if let Some(m) = mode {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m))
+                .map_err(AppError::from)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (mode, owner, group, recursive);
+        Err(AppError::Config(
+            "La modification des permissions et propriétaires POSIX n'est pas supportée sur ce système".into(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+pub fn list_local_identities() -> (Vec<String>, Vec<String>) {
+    let mut users = Vec::new();
+    let mut groups = Vec::new();
+
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        let parsed = crate::sftp::client::parse_passwd(&passwd, "");
+        users.extend(parsed.users.into_values());
+    }
+    if let Ok(group) = std::fs::read_to_string("/etc/group") {
+        let parsed = crate::sftp::client::parse_group(&group);
+        groups.extend(parsed.into_values());
+    }
+
+    users.sort();
+    users.dedup();
+    groups.sort();
+    groups.dedup();
+    (users, groups)
+}
+
+#[cfg(not(unix))]
+pub fn list_local_identities() -> (Vec<String>, Vec<String>) {
+    (Vec::new(), Vec::new())
 }
 
 #[cfg(test)]
@@ -422,5 +645,83 @@ mod tests {
 
         let file_mode = format_unix_mode(0o644, false);
         assert_eq!(file_mode, "-rw-r--r--");
+
+        // Special bits: setuid, setgid, sticky
+        assert_eq!(format_unix_mode(0o4755, false), "-rwsr-xr-x");
+        assert_eq!(format_unix_mode(0o4644, false), "-rwSr--r--");
+        assert_eq!(format_unix_mode(0o2755, false), "-rwxr-sr-x");
+        assert_eq!(format_unix_mode(0o2744, false), "-rwxr-Sr--");
+        assert_eq!(format_unix_mode(0o1755, true), "drwxr-xr-t");
+        assert_eq!(format_unix_mode(0o1744, true), "drwxr--r-T");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_local_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = create_test_dir();
+        let file_path = temp_dir.join("perm_test.txt");
+        std::fs::write(&file_path, "hello permissions").unwrap();
+
+        set_local_permissions(&file_path.to_string_lossy(), Some(0o600), None, None, false)
+            .unwrap();
+        let meta = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+
+        // Recursive test on folder
+        let sub_dir = temp_dir.join("sub");
+        std::fs::create_dir(&sub_dir).unwrap();
+        let sub_file = sub_dir.join("sub_file.txt");
+        std::fs::write(&sub_file, "nested").unwrap();
+
+        set_local_permissions(&sub_dir.to_string_lossy(), Some(0o750), None, None, true).unwrap();
+        let sub_dir_meta = std::fs::metadata(&sub_dir).unwrap();
+        assert_eq!(sub_dir_meta.permissions().mode() & 0o777, 0o750);
+        let sub_file_meta = std::fs::metadata(&sub_file).unwrap();
+        assert_eq!(sub_file_meta.permissions().mode() & 0o777, 0o750);
+
+        // Test user resolution
+        let root_uid = resolve_user_to_uid("0").unwrap();
+        assert_eq!(root_uid, 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_local_permissions_does_not_follow_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = create_test_dir();
+
+        // Target file located outside the folder being chmod'd
+        let external_target = temp_dir.join("external_secret.txt");
+        std::fs::write(&external_target, "secret").unwrap();
+        std::fs::set_permissions(&external_target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Folder containing a normal file and a symlink to external_target
+        let folder = temp_dir.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let symlink_path = folder.join("link_to_secret.txt");
+        std::os::unix::fs::symlink(&external_target, &symlink_path).unwrap();
+
+        let normal_child = folder.join("normal.txt");
+        std::fs::write(&normal_child, "normal").unwrap();
+
+        // Run recursive chmod on folder to 0o777
+        set_local_permissions(&folder.to_string_lossy(), Some(0o777), None, None, true).unwrap();
+
+        // Normal child must be updated
+        let normal_meta = std::fs::metadata(&normal_child).unwrap();
+        assert_eq!(normal_meta.permissions().mode() & 0o777, 0o777);
+
+        // Security assertion: external target permissions must NOT be modified
+        let target_meta = std::fs::metadata(&external_target).unwrap();
+        assert_eq!(
+            target_meta.permissions().mode() & 0o777,
+            0o600,
+            "Security assertion failed: recursive chmod followed symlink outside target directory!"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

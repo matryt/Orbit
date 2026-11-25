@@ -15,7 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::AppError;
 use crate::models::{
-    FileEntry, HostKeyDecision, HostKeyPromptRequest, SftpConnectConfig, SudoCapability,
+    FileEntry, HostKeyDecision, HostKeyPromptRequest, RemoteFingerprint, SftpConnectConfig,
+    SudoCapability,
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
@@ -1359,6 +1360,38 @@ impl SftpProvider {
         maps
     }
 
+    pub async fn resolve_identity_str_to_id(
+        &self,
+        name_or_id: &str,
+        is_group: bool,
+    ) -> Result<u32, AppError> {
+        let trimmed = name_or_id.trim();
+        if let Ok(id) = trimmed.parse::<u32>() {
+            return Ok(id);
+        }
+
+        let identities = self.get_or_load_identities().await;
+        if is_group {
+            identities
+                .groups
+                .iter()
+                .find(|(_, name)| name.as_str() == trimmed)
+                .map(|(gid, _)| *gid)
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Groupe distant '{trimmed}' introuvable"))
+                })
+        } else {
+            identities
+                .users
+                .iter()
+                .find(|(_, name)| name.as_str() == trimmed)
+                .map(|(uid, _)| *uid)
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("Utilisateur distant '{trimmed}' introuvable"))
+                })
+        }
+    }
+
     async fn load_system_identities(
         session: &SftpSession,
         current_username: &str,
@@ -1615,13 +1648,31 @@ fn format_permissions(mode: Option<u32>, is_dir: bool) -> String {
     if let Some(m) = mode {
         let r_usr = if m & 0o400 != 0 { 'r' } else { '-' };
         let w_usr = if m & 0o200 != 0 { 'w' } else { '-' };
-        let x_usr = if m & 0o100 != 0 { 'x' } else { '-' };
+        let x_usr = if m & 0o4000 != 0 {
+            if m & 0o100 != 0 { 's' } else { 'S' }
+        } else if m & 0o100 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         let r_grp = if m & 0o040 != 0 { 'r' } else { '-' };
         let w_grp = if m & 0o020 != 0 { 'w' } else { '-' };
-        let x_grp = if m & 0o010 != 0 { 'x' } else { '-' };
+        let x_grp = if m & 0o2000 != 0 {
+            if m & 0o010 != 0 { 's' } else { 'S' }
+        } else if m & 0o010 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         let r_oth = if m & 0o004 != 0 { 'r' } else { '-' };
         let w_oth = if m & 0o002 != 0 { 'w' } else { '-' };
-        let x_oth = if m & 0o001 != 0 { 'x' } else { '-' };
+        let x_oth = if m & 0o1000 != 0 {
+            if m & 0o001 != 0 { 't' } else { 'T' }
+        } else if m & 0o001 != 0 {
+            'x'
+        } else {
+            '-'
+        };
         format!(
             "{}{}{}{}{}{}{}{}{}",
             r_usr, w_usr, x_usr, r_grp, w_grp, x_grp, r_oth, w_oth, x_oth
@@ -1770,6 +1821,7 @@ impl StorageProvider for SftpProvider {
                 name,
                 path: entry.path(),
                 is_dir,
+                is_symlink: entry.file_type().is_symlink(),
                 size,
                 modified_at,
                 permissions: Some(permissions),
@@ -2055,12 +2107,173 @@ impl StorageProvider for SftpProvider {
         Ok(())
     }
 
+    async fn set_permissions(
+        &self,
+        path: &str,
+        mode: Option<u32>,
+        owner: Option<&str>,
+        group: Option<&str>,
+        recursive: bool,
+    ) -> Result<(), AppError> {
+        validate_path_safety(path)?;
+
+        let resolved_uid = if let Some(u) = owner {
+            if u.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_identity_str_to_id(u, false).await?)
+            }
+        } else {
+            None
+        };
+
+        let resolved_gid = if let Some(g) = group {
+            if g.trim().is_empty() {
+                None
+            } else {
+                Some(self.resolve_identity_str_to_id(g, true).await?)
+            }
+        } else {
+            None
+        };
+
+        let change_ownership = resolved_uid.is_some() || resolved_gid.is_some();
+
+        if recursive {
+            let entries = self.walk(path).await?;
+            let mut sorted_entries = entries;
+            sorted_entries.sort_by_key(|a| std::cmp::Reverse(a.relative_path.len()));
+
+            for entry in sorted_entries {
+                if entry.is_symlink {
+                    continue;
+                }
+                let child_path = crate::walk::join_remote(path, &entry.relative_path);
+                validate_path_safety(&child_path)?;
+
+                let mut child_attrs = russh_sftp::protocol::FileAttributes::empty();
+                if let Some(m) = mode {
+                    child_attrs.permissions = Some(m);
+                }
+                if change_ownership {
+                    let mut c_uid = resolved_uid;
+                    let mut c_gid = resolved_gid;
+                    if c_uid.is_none() || c_gid.is_none() {
+                        let meta = self.session.metadata(&child_path).await.map_err(|e| {
+                            AppError::Sftp(format!(
+                                "Échec de lecture des métadonnées de '{child_path}': {e}"
+                            ))
+                        })?;
+                        if c_uid.is_none() {
+                            c_uid = meta.uid;
+                        }
+                        if c_gid.is_none() {
+                            c_gid = meta.gid;
+                        }
+                    }
+                    if let Some(u) = c_uid {
+                        child_attrs.uid = Some(u);
+                    }
+                    if let Some(g) = c_gid {
+                        child_attrs.gid = Some(g);
+                    }
+                }
+                self.session
+                    .set_metadata(&child_path, child_attrs)
+                    .await
+                    .map_err(|e| {
+                        AppError::Sftp(format!(
+                            "Échec de modification des attributs de '{child_path}': {e}"
+                        ))
+                    })?;
+            }
+        }
+
+        let mut root_attrs = russh_sftp::protocol::FileAttributes::empty();
+        if let Some(m) = mode {
+            root_attrs.permissions = Some(m);
+        }
+        if change_ownership {
+            let mut r_uid = resolved_uid;
+            let mut r_gid = resolved_gid;
+            if r_uid.is_none() || r_gid.is_none() {
+                let meta = self.session.metadata(path).await.map_err(|e| {
+                    AppError::Sftp(format!("Échec de lecture des métadonnées de '{path}': {e}"))
+                })?;
+                if r_uid.is_none() {
+                    r_uid = meta.uid;
+                }
+                if r_gid.is_none() {
+                    r_gid = meta.gid;
+                }
+            }
+            if let Some(u) = r_uid {
+                root_attrs.uid = Some(u);
+            }
+            if let Some(g) = r_gid {
+                root_attrs.gid = Some(g);
+            }
+        }
+
+        self.session
+            .set_metadata(path, root_attrs)
+            .await
+            .map_err(|e| {
+                let err_str = e.to_string();
+                if err_str.to_lowercase().contains("permission denied") {
+                    AppError::PermissionDenied(format!("Permission refusée pour modifier '{path}' (droits administrateur / sudo requis pour changer le propriétaire)"))
+                } else {
+                    AppError::Sftp(format!(
+                        "Échec de modification des attributs de '{path}': {e}"
+                    ))
+                }
+            })?;
+
+        Ok(())
+    }
+
+    async fn fingerprint(&self, path: &str) -> Result<RemoteFingerprint, AppError> {
+        validate_path_safety(path)?;
+        let meta = self.session.metadata(path).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("no such file") {
+                AppError::NotFound(format!("Fichier distant introuvable : {path}"))
+            } else {
+                AppError::Sftp(format!("Cannot stat {path}: {e}"))
+            }
+        })?;
+        if meta.is_dir() {
+            return Err(AppError::InvalidPath(format!("{path} est un dossier")));
+        }
+        if !meta.is_regular() {
+            return Err(AppError::InvalidPath(format!(
+                "{path} n'est pas un fichier ordinaire"
+            )));
+        }
+        Ok(RemoteFingerprint {
+            size: meta.size.unwrap_or(0),
+            modified: meta.mtime.map(|t| t.to_string()),
+            etag: None,
+        })
+    }
+
     fn is_elevated(&self) -> bool {
         self.is_elevated
     }
 
     fn sudo_capability(&self) -> SudoCapability {
         self.sudo_capability
+    }
+
+    async fn list_identities(&self) -> Result<(Vec<String>, Vec<String>), AppError> {
+        let maps = self.get_or_load_identities().await;
+        let mut users: Vec<String> = maps.users.into_values().collect();
+        let mut groups: Vec<String> = maps.groups.into_values().collect();
+        users.sort();
+        users.dedup();
+        groups.sort();
+        groups.dedup();
+        Ok((users, groups))
     }
 }
 

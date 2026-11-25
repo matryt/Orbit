@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isTauri } from '../../services/storageApi';
+import { LocalEditsIndicator } from '../localEdit/LocalEditsIndicator';
 
 export const Header: React.FC = () => {
   const {
@@ -129,7 +130,10 @@ export const Header: React.FC = () => {
       className="h-11 flex-shrink-0 flex items-center justify-between border-b border-border-subtle bg-surface/60 backdrop-blur-xl px-4 select-none"
     >
       {/* Left: Breadcrumbs navigation */}
-      <div className="flex items-center gap-1.5 text-xs text-zinc-400 overflow-x-auto no-scrollbar">
+      <div
+        data-tauri-drag-region
+        className="flex items-center gap-1.5 text-xs text-zinc-400 overflow-x-auto no-scrollbar"
+      >
         {isDualPane && (
           <span
             className={`px-1.5 py-0.5 rounded text-[10px] font-mono border font-medium ${
@@ -189,7 +193,7 @@ export const Header: React.FC = () => {
         {connectionError && (
           <div
             onClick={clearConnectionError}
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] cursor-pointer ml-2 hover:bg-red-500/20 transition-colors"
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] cursor-pointer ml-2 hover:bg-red-500/20 transition-colors"
             title="Cliquez pour masquer l'erreur"
           >
             <AlertCircle className="w-3 h-3 flex-shrink-0" />
@@ -198,8 +202,14 @@ export const Header: React.FC = () => {
         )}
       </div>
 
+      {/* Draggable flexible spacer */}
+      <div data-tauri-drag-region className="flex-1 h-full min-w-4 self-stretch" />
+
       {/* Right: Actions, Filter and Dual Pane toggle */}
       <div className="flex items-center gap-2">
+        {/* Files opened in a local editor */}
+        <LocalEditsIndicator />
+
         {/* Available update pill */}
         {availableUpdate?.has_update && (
           <button

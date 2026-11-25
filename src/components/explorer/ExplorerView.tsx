@@ -25,7 +25,10 @@ import {
   ArrowUpDown,
   ShieldAlert,
   Terminal,
+  KeyRound,
+  FilePen,
 } from 'lucide-react';
+import { PermissionsModal } from '../modals/PermissionsModal';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { isTauri, storageApi } from '../../services/storageApi';
 import {
@@ -93,6 +96,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
     setActiveDrag,
     openExternalTerminal,
     activeProfileId,
+    openLocalEdit,
+    isElevated,
   } = useOrbitStore();
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
@@ -139,6 +144,8 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
 
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   const [deleteItemCount, setDeleteItemCount] = useState<number | null>(null);
+
+  const [permissionsTarget, setPermissionsTarget] = useState<FileEntry | null>(null);
 
   useEffect(() => {
     if (!deleteTarget || !deleteTarget.is_dir) {
@@ -242,7 +249,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
   // Keyboard navigation & shortcuts inside list
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // If a modal is open, let modal handle keys
-    if (isNewFolderModalOpen || renameTarget || deleteTarget) return;
+    if (isNewFolderModalOpen || renameTarget || deleteTarget || permissionsTarget) return;
 
     if (sortedFiles.length === 0) return;
 
@@ -461,6 +468,36 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       setModalError(msg);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Submit Permissions Change
+  const handleSavePermissions = async (
+    mode: number,
+    owner: string | null,
+    group: string | null,
+    recursive: boolean
+  ) => {
+    if (!permissionsTarget) return;
+    if (isLocal) {
+      await storageApi.setLocalPermissions(
+        permissionsTarget.path,
+        mode,
+        owner,
+        group,
+        recursive
+      );
+      await refreshLocal();
+    } else {
+      await storageApi.setPermissions(
+        activeProfileId,
+        permissionsTarget.path,
+        mode,
+        owner,
+        group,
+        recursive
+      );
+      await refreshRemote();
     }
   };
 
@@ -997,6 +1034,28 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </button>
               )}
 
+              {/* Edit in a local text editor (remote files; uploaded back on each save) */}
+              {!isLocal && !contextMenu.file.is_dir && isTauri() && (
+                <button
+                  type="button"
+                  disabled={isElevated}
+                  onClick={() => {
+                    const target = contextMenu.file;
+                    setContextMenu(null);
+                    if (target) openLocalEdit(target.path);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                  title={
+                    isElevated
+                      ? "Désactivé en mode sudo"
+                      : "Ouvrir dans l'éditeur de texte du système ; chaque enregistrement est renvoyé sur le serveur"
+                  }
+                >
+                  <FilePen className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Modifier localement</span>
+                </button>
+              )}
+
               {/* Dual-Pane Quick Send / Download */}
               {isDualPane && isLocal && (
                 <button
@@ -1066,6 +1125,24 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 </div>
                 <kbd className="text-[10px] text-zinc-500 bg-white/5 px-1 py-0.5 rounded font-mono">F2</kbd>
               </button>
+
+              {/* Permissions (Local & SFTP) */}
+              {(isLocal || isSftp) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = contextMenu.file;
+                    setContextMenu(null);
+                    if (target) setPermissionsTarget(target);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-white/10 hover:text-white transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Permissions...</span>
+                  </div>
+                </button>
+              )}
 
               <div className="my-1 border-t border-white/10" />
 
@@ -1390,6 +1467,17 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL 4: Permissions */}
+      <PermissionsModal
+        file={permissionsTarget}
+        isOpen={Boolean(permissionsTarget)}
+        isLocal={isLocal}
+        profileId={activeProfileId}
+        directoryFiles={files}
+        onClose={() => setPermissionsTarget(null)}
+        onSave={handleSavePermissions}
+      />
     </div>
   );
 };

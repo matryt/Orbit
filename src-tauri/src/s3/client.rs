@@ -10,7 +10,7 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::models::{FileEntry, S3ConnectConfig};
+use crate::models::{FileEntry, RemoteFingerprint, S3ConnectConfig};
 use crate::provider::StorageProvider;
 use crate::transfer::{
     TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
@@ -222,6 +222,7 @@ impl StorageProvider for S3Provider {
                             name,
                             path: full_path,
                             is_dir: true,
+                            is_symlink: false,
                             size: 0,
                             modified_at: chrono::Utc::now().to_rfc3339(),
                             permissions: Some("drwxr-xr-x".into()),
@@ -258,6 +259,7 @@ impl StorageProvider for S3Provider {
                                 name,
                                 path: full_path,
                                 is_dir: true,
+                                is_symlink: false,
                                 size: 0,
                                 modified_at,
                                 permissions: Some("drwxr-xr-x".into()),
@@ -286,6 +288,7 @@ impl StorageProvider for S3Provider {
                         name,
                         path: full_path,
                         is_dir: false,
+                        is_symlink: false,
                         size,
                         modified_at,
                         permissions: Some("-rw-r--r--".into()),
@@ -509,6 +512,37 @@ impl StorageProvider for S3Provider {
         Ok(())
     }
 
+    async fn fingerprint(&self, path: &str) -> Result<RemoteFingerprint, AppError> {
+        let key = Self::normalize_key(path);
+        if key.is_empty() || key.ends_with('/') {
+            return Err(AppError::InvalidPath(format!("{path} est un dossier")));
+        }
+        let resp = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.as_service_error().is_some_and(|se| se.is_not_found()) {
+                    AppError::NotFound(format!("Objet introuvable : {path}"))
+                } else {
+                    AppError::S3(format!(
+                        "Impossible de lire les métadonnées de {path} : {e}"
+                    ))
+                }
+            })?;
+        Ok(RemoteFingerprint {
+            size: resp.content_length().unwrap_or(0).max(0) as u64,
+            modified: resp
+                .last_modified()
+                .and_then(|dt| dt.to_millis().ok())
+                .map(|ms| ms.to_string()),
+            etag: resp.e_tag().map(|e| e.trim_matches('"').to_string()),
+        })
+    }
+
     async fn read_preview(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, AppError> {
         let key = Self::normalize_key(path);
         let range = format!("bytes=0-{}", max_bytes.saturating_sub(1));
@@ -576,6 +610,7 @@ impl StorageProvider for S3Provider {
                     files.push(WalkEntry {
                         relative_path: relative.to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         size: obj.size().unwrap_or(0).max(0) as u64,
                     });
                 }
@@ -597,6 +632,7 @@ impl StorageProvider for S3Provider {
             .map(|relative_path| WalkEntry {
                 relative_path,
                 is_dir: true,
+                is_symlink: false,
                 size: 0,
             })
             .collect();
@@ -847,6 +883,19 @@ impl StorageProvider for S3Provider {
         transfer.complete();
         Ok(())
     }
+
+    async fn set_permissions(
+        &self,
+        _path: &str,
+        _mode: Option<u32>,
+        _owner: Option<&str>,
+        _group: Option<&str>,
+        _recursive: bool,
+    ) -> Result<(), AppError> {
+        Err(AppError::Config(
+            "La modification des permissions et propriétaires POSIX n'est pas supportée sur le stockage S3".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -881,5 +930,29 @@ mod tests {
             S3Provider::normalize_prefix("///nested/folder/"),
             "nested/folder/"
         );
+    }
+
+    #[tokio::test]
+    async fn test_s3_fingerprint_rejects_directories_and_empty() {
+        let provider = S3Provider::new(S3ConnectConfig {
+            profile_id: "test-profile".into(),
+            bucket: "my-bucket".into(),
+            endpoint: None,
+            region: Some("us-east-1".into()),
+            access_key: "dummy".into(),
+            secret_key: Some("dummy".into()),
+            force_path_style: None,
+        })
+        .await
+        .unwrap();
+
+        let err_root = provider.fingerprint("/").await.unwrap_err();
+        assert!(matches!(err_root, AppError::InvalidPath(_)));
+
+        let err_dir = provider.fingerprint("folder/").await.unwrap_err();
+        assert!(matches!(err_dir, AppError::InvalidPath(_)));
+
+        let err_empty = provider.fingerprint("").await.unwrap_err();
+        assert!(matches!(err_empty, AppError::InvalidPath(_)));
     }
 }

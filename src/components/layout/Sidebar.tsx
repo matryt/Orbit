@@ -25,6 +25,7 @@ export const Sidebar: React.FC = () => {
     setActiveProfile,
     deleteProfile,
     disconnectProfile,
+    confirmCloseLocalEdits,
     connectProfile,
     setEditingProfile,
     setNewConnectionModalOpen,
@@ -89,7 +90,7 @@ export const Sidebar: React.FC = () => {
         data-tauri-drag-region
         className="h-11 flex-shrink-0 flex items-center px-4"
       >
-        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider pl-16">
+        <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider pl-16 pointer-events-none">
           Orbit
         </span>
       </div>
@@ -223,9 +224,11 @@ export const Sidebar: React.FC = () => {
                     {profile.status === 'connected' ? (
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={async () => {
                           setMenuOpenProfileId(null);
-                          disconnectProfile(profile.id);
+                          if (await confirmCloseLocalEdits(profile.id)) {
+                            disconnectProfile(profile.id);
+                          }
                         }}
                         className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/10 text-amber-300 transition-colors"
                       >

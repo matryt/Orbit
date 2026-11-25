@@ -5,6 +5,49 @@ Toutes les modifications notables apportées au projet Orbit sont documentées d
 Le format est basé sur [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/),
 et ce projet adhère à [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.5.0] - 2026-11-25
+
+### 🚀 Nouveautés majeures
+
+* **Édition locale en direct (Local File Editing) avec synchronisation en temps réel et résolution de conflits** :
+  - Ouverture immédiate de n'importe quel fichier distant (SFTP ou S3) dans votre éditeur / IDE local par défaut (VS Code, Cursor, Zed, Sublime, etc.).
+  - Surveillance continue des modifications via un watcher de système de fichiers local (`notify`).
+  - Synchronisation et téléversement automatiques vers le serveur dès l'enregistrement du fichier.
+  - Détection préventive des modifications concurrentes distantes avec empreinte SHA-256 de référence.
+  - Modale interactive de résolution des conflits :
+    - *Écraser la version du serveur* avec vos modifications locales.
+    - *Recharger la version du serveur* pour repartir de la source distante.
+    - *Conserver la version locale* et reporter la synchronisation.
+  - Indicateur visuel d'éditions actives dans l'en-tête de l'application et badge sur les fichiers en cours d'édition dans l'explorateur.
+  - Nettoyage automatique et sécurisé des répertoires temporaires locaux lors de la déconnexion ou fermeture d'Orbit.
+
+* **Mises à jour in-app intégrées (In-App Updates) avec report contextuel (Snooze)** :
+  - Installation automatique des nouvelles versions directement dans l'application via `tauri-plugin-updater` et redémarrage automatique via `tauri-plugin-process`.
+  - Signature cryptographique Minisign pour garantir l'intégrité de tous les binaires distribués.
+  - Menu « Plus tard » avec mise en veille programmable : reporter de 1 heure, 24 heures, 7 jours, ou ignorer la version en cours.
+  - Détection intelligente et avertissement préventif si des transferts de fichiers sont en cours avant d'appliquer la mise à jour.
+  - Passage exclusif à l'installeur Windows **NSIS** (`Orbit_x.y.z_x64-setup.exe`) pour des installations légères par utilisateur sans élévation de privilèges (UAC) inutile.
+
+* **Gestion complète des permissions et des propriétaires (chmod / chown)** :
+  - Nouvelle modale dédiée aux attributs Unix avec matrice graphique intuitive (Lecture, Écriture, Exécution) pour le Propriétaire, le Groupe et les Autres.
+  - Saisie dynamique de la valeur octale (ex: `0755`, `0644`) synchronisée en temps réel avec les cases à cocher.
+  - Prise en charge des bits spéciaux : **SUID**, **SGID** et **Sticky bit**.
+  - Application récursive sur les dossiers et leur contenu avec durcissement de sécurité empêchant de suivre les liens symboliques (`O_NOFOLLOW`).
+  - Modification des propriétaires (`chown`) et des groupes (`chgrp`) avec auto-complétion intelligente des utilisateurs et groupes disponibles sur le serveur.
+
+### ⚡ Améliorations de l'interface & Stabilité
+
+* **Déplacement fluide de la fenêtre (Window Dragging)** :
+  - Restauration et optimisation du glisser-déplacer de la fenêtre depuis la barre de titre personnalisée sur macOS et Windows (`#44`).
+* **Saisie des ports réseau** :
+  - Correction sur les champs de saisie de port dans les profils de connexion permettant de vider le champ ou de saisir un zéro sans rester bloqué (`#43`).
+* **Stabilité de la CI Linux** :
+  - Correction des blocages occasionnels de `needrestart` sur les runners Ubuntu de la CI.
+* **Qualité de code & Sécurité** :
+  - Intégration et configuration stricte de CodeRabbit pour les revues de code et modèles de menaces automatisés.
+
+---
+
 ## [0.4.0] - 2026-11-22
 
 ### 🚀 Nouveautés majeures
