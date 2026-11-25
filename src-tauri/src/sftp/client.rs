@@ -20,7 +20,7 @@ use crate::models::{
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
-    HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
+    HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic, validate_ssh_host,
 };
 use crate::transfer::{
     TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
@@ -1029,6 +1029,20 @@ impl SftpProvider {
 
         let proxy_opt = config.proxy.clone().filter(|p| p.enabled);
         let bastion_opt = config.bastion.clone().filter(|b| b.enabled);
+
+        // Both hosts are written into ~/.ssh/known_hosts once their key is accepted.
+        let bastion_host = bastion_opt.as_ref().and_then(|b| b.host.as_deref());
+        for (label, host) in [
+            ("Serveur Cible", Some(config.host.as_str())),
+            ("Bastion SSH", bastion_host.filter(|h| !h.trim().is_empty())),
+        ] {
+            if let Some(host) = host {
+                if let Err(err) = validate_ssh_host(host) {
+                    logs.push(format!("[{}] ❌ [{label}] {err}", now()));
+                    return Err((err, logs));
+                }
+            }
+        }
 
         // Premier point d'atterrissage réseau (Bastion si activé, sinon Cible finale)
         let (initial_host, initial_port, initial_label) = if let Some(ref bastion) = bastion_opt {
