@@ -39,7 +39,9 @@ async fn resolve_sftp_credentials(
     app: &tauri::AppHandle,
     config: &mut SftpConnectConfig,
 ) -> Result<(), AppError> {
-    if config.password.is_none() && config.passphrase.is_none() {
+    // Agent authentication needs no stored secret: skip the keyring lookup entirely.
+    let target_uses_agent = config.auth_type.as_deref() == Some("agent");
+    if !target_uses_agent && config.password.is_none() && config.passphrase.is_none() {
         let pid = config.profile_id.clone();
         if let Ok(Ok(Some(secret))) =
             tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
@@ -78,8 +80,14 @@ async fn resolve_sftp_credentials(
                 if bastion.key_path.is_none() {
                     bastion.key_path = b_prof.key_path;
                 }
+                if bastion.agent_socket.is_none() {
+                    bastion.agent_socket = b_prof.agent_socket;
+                }
 
-                if bastion.password.is_none() && bastion.passphrase.is_none() {
+                if bastion.auth_type.as_deref() != Some("agent")
+                    && bastion.password.is_none()
+                    && bastion.passphrase.is_none()
+                {
                     let pid = b_pid.clone();
                     if let Ok(Ok(Some(sec))) =
                         tokio::task::spawn_blocking(move || KeyringService::get_secret(&pid)).await
@@ -93,7 +101,10 @@ async fn resolve_sftp_credentials(
                         }
                     }
                 }
-            } else if bastion.password.is_none() && bastion.passphrase.is_none() {
+            } else if bastion.auth_type.as_deref() != Some("agent")
+                && bastion.password.is_none()
+                && bastion.passphrase.is_none()
+            {
                 let key = format!("{}:bastion", config.profile_id);
                 if let Ok(Ok(Some(sec))) =
                     tokio::task::spawn_blocking(move || KeyringService::get_secret(&key)).await

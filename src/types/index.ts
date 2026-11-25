@@ -2,6 +2,9 @@ export type StorageType = 's3' | 'sftp';
 
 export type ProxyType = 'socks5' | 'http';
 
+/** SSH authentication method; 'agent' delegates signing to ssh-agent / 1Password / Secretive. */
+export type SshAuthType = 'password' | 'key' | 'agent';
+
 export interface ProxyConfig {
   enabled: boolean;
   proxyType?: ProxyType;
@@ -17,8 +20,10 @@ export interface BastionConfig {
   host?: string;
   port?: number;
   username?: string;
-  authType?: 'password' | 'key';
+  authType?: SshAuthType;
+  /** Private key, or with 'agent' an optional public key selecting the agent identity. */
   keyPath?: string;
+  agentSocket?: string;
   password?: string;
   passphrase?: string;
 }
@@ -34,8 +39,11 @@ export interface ConnectionProfile {
   host?: string;
   port?: number;
   username?: string;
-  authType?: 'password' | 'key';
+  authType?: SshAuthType;
+  /** Private key, or with 'agent' an optional public key selecting the agent identity. */
   keyPath?: string;
+  /** Agent socket / named pipe override; auto-detected when absent. */
+  agentSocket?: string;
   status: 'connected' | 'idle' | 'error';
   isFavorite: boolean;
   useSudo?: boolean;

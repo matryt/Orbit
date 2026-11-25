@@ -18,6 +18,13 @@ pub struct ConnectionProfile {
     pub auth_type: Option<String>,
     #[serde(rename = "keyPath")]
     pub key_path: Option<String>,
+    /// Optional SSH agent socket (or Windows named pipe) used when `auth_type` is "agent".
+    #[serde(
+        rename = "agentSocket",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_socket: Option<String>,
     #[serde(rename = "isFavorite", default)]
     pub is_favorite: bool,
     #[serde(rename = "useSudo", default)]
@@ -80,6 +87,12 @@ pub struct BastionConfig {
     pub auth_type: Option<String>,
     #[serde(rename = "keyPath", default, skip_serializing_if = "Option::is_none")]
     pub key_path: Option<String>,
+    #[serde(
+        rename = "agentSocket",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,9 +121,14 @@ pub struct SftpConnectConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
+    /// "password" | "key" | "agent"; `None` keeps the legacy inference from the other fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
     pub password: Option<String>,
     pub key_path: Option<String>,
     pub passphrase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_socket: Option<String>,
     #[serde(default)]
     pub use_sudo: bool,
     pub sudo_password: Option<String>,

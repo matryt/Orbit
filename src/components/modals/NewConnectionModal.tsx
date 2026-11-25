@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
-import { StorageType, ConnectionProfile } from '../../types';
+import { StorageType, ConnectionProfile, SshAuthType } from '../../types';
 import { storageApi } from '../../services/storageApi';
 import { parsePortInput, resolvePort } from '../../lib/portUtils';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
@@ -11,6 +11,7 @@ import {
   Lock,
   Check,
   Key,
+  Fingerprint,
   FolderOpen,
   Eye,
   EyeOff,
@@ -52,8 +53,11 @@ export const NewConnectionModal: React.FC = () => {
   const [host, setHost] = useState('');
   const [port, setPort] = useState<number | ''>(22);
   const [username, setUsername] = useState('');
-  const [authType, setAuthType] = useState<'key' | 'password'>('key');
+  const [authType, setAuthType] = useState<SshAuthType>('key');
   const [keyPath, setKeyPath] = useState('~/.ssh/id_ed25519');
+  // Agent mode: optional public key restricting the agent identity, and optional socket override.
+  const [agentKeyPath, setAgentKeyPath] = useState('');
+  const [agentSocket, setAgentSocket] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -66,8 +70,9 @@ export const NewConnectionModal: React.FC = () => {
   const [bastionHost, setBastionHost] = useState('');
   const [bastionPort, setBastionPort] = useState<number | ''>(22);
   const [bastionUsername, setBastionUsername] = useState('');
-  const [bastionAuthType, setBastionAuthType] = useState<'key' | 'password'>('key');
+  const [bastionAuthType, setBastionAuthType] = useState<SshAuthType>('key');
   const [bastionKeyPath, setBastionKeyPath] = useState('~/.ssh/id_ed25519');
+  const [bastionAgentKeyPath, setBastionAgentKeyPath] = useState('');
   const [bastionPassphrase, setBastionPassphrase] = useState('');
   const [bastionPassword, setBastionPassword] = useState('');
   const [showBastionPassword, setShowBastionPassword] = useState(false);
@@ -111,14 +116,17 @@ export const NewConnectionModal: React.FC = () => {
       setHost(editingProfile.host || '');
       setPort(editingProfile.port || 22);
       setUsername(editingProfile.username || '');
-      setAuthType(editingProfile.authType || 'key');
-      setKeyPath(editingProfile.keyPath || '~/.ssh/id_ed25519');
+      const profileAuth = editingProfile.authType || 'key';
+      setAuthType(profileAuth);
+      setKeyPath(profileAuth === 'key' && editingProfile.keyPath ? editingProfile.keyPath : '~/.ssh/id_ed25519');
+      setAgentKeyPath(profileAuth === 'agent' ? editingProfile.keyPath || '' : '');
+      setAgentSocket(editingProfile.agentSocket || '');
       setUseSudo(Boolean(editingProfile.useSudo));
       storageApi.getSecret(editingProfile.id).then((sec) => {
         if (!cancelled && sec) {
           if (editingProfile.type === 's3') setSecretKey(sec);
           else if (editingProfile.authType === 'password') setPassword(sec);
-          else setPassphrase(sec);
+          else if (editingProfile.authType !== 'agent') setPassphrase(sec);
         }
       });
 
@@ -132,14 +140,18 @@ export const NewConnectionModal: React.FC = () => {
           setBastionHost(editingProfile.bastion.host || '');
           setBastionPort(editingProfile.bastion.port || 22);
           setBastionUsername(editingProfile.bastion.username || '');
-          setBastionAuthType(editingProfile.bastion.authType || 'key');
-          setBastionKeyPath(editingProfile.bastion.keyPath || '~/.ssh/id_ed25519');
+          const bastionAuth = editingProfile.bastion.authType || 'key';
+          setBastionAuthType(bastionAuth);
+          setBastionKeyPath(
+            bastionAuth === 'key' && editingProfile.bastion.keyPath ? editingProfile.bastion.keyPath : '~/.ssh/id_ed25519'
+          );
+          setBastionAgentKeyPath(bastionAuth === 'agent' ? editingProfile.bastion.keyPath || '' : '');
         }
         setShowNetworkSettings(true);
         storageApi.getSecret(`${editingProfile.id}:bastion`).then((sec) => {
           if (!cancelled && sec) {
             if (editingProfile.bastion?.authType === 'password') setBastionPassword(sec);
-            else setBastionPassphrase(sec);
+            else if (editingProfile.bastion?.authType !== 'agent') setBastionPassphrase(sec);
           }
         });
       } else {
@@ -151,6 +163,7 @@ export const NewConnectionModal: React.FC = () => {
         setBastionUsername('');
         setBastionAuthType('key');
         setBastionKeyPath('~/.ssh/id_ed25519');
+        setBastionAgentKeyPath('');
         setBastionPassphrase('');
         setBastionPassword('');
       }
@@ -186,6 +199,8 @@ export const NewConnectionModal: React.FC = () => {
       setUsername('');
       setAuthType('key');
       setKeyPath('~/.ssh/id_ed25519');
+      setAgentKeyPath('');
+      setAgentSocket('');
       setPassphrase('');
       setPassword('');
       setUseSudo(false);
@@ -197,6 +212,7 @@ export const NewConnectionModal: React.FC = () => {
       setBastionUsername('');
       setBastionAuthType('key');
       setBastionKeyPath('~/.ssh/id_ed25519');
+      setBastionAgentKeyPath('');
       setBastionPassphrase('');
       setBastionPassword('');
       setProxyEnabled(false);
@@ -226,6 +242,18 @@ export const NewConnectionModal: React.FC = () => {
     setNewConnectionModalOpen(false);
   };
 
+  /** Key path sent for the selected method: private key, optional agent public key, or none. */
+  const effectiveKeyPath = (): string | undefined =>
+    authType === 'key' ? keyPath.trim() || undefined : authType === 'agent' ? agentKeyPath.trim() || undefined : undefined;
+  const effectiveBastionKeyPath = (): string | undefined =>
+    bastionAuthType === 'key'
+      ? bastionKeyPath.trim() || undefined
+      : bastionAuthType === 'agent'
+      ? bastionAgentKeyPath.trim() || undefined
+      : undefined;
+  const effectiveAgentSocket = (): string | undefined =>
+    authType === 'agent' ? agentSocket.trim() || undefined : undefined;
+
   const handleBrowseKey = async () => {
     try {
       const selected = await openFileDialog({
@@ -235,6 +263,22 @@ export const NewConnectionModal: React.FC = () => {
       });
       if (selected && typeof selected === 'string') {
         setKeyPath(selected);
+        setTestResult(null);
+      }
+    } catch (err) {
+      console.warn('Dialog not available in browser mode:', err);
+    }
+  };
+
+  const handleBrowseAgentKey = async () => {
+    try {
+      const selected = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: "Sélectionner la clé à utiliser dans l'agent (.pub ou clé privée)",
+      });
+      if (selected && typeof selected === 'string') {
+        setAgentKeyPath(selected);
         setTestResult(null);
       }
     } catch (err) {
@@ -373,7 +417,7 @@ export const NewConnectionModal: React.FC = () => {
             port: resolvePort(bastionPort, 22),
             username: bastionUsername.trim(),
             authType: bastionAuthType,
-            keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
+            keyPath: effectiveBastionKeyPath(),
             password: bastionAuthType === 'password' ? bastionPassword.trim() || undefined : undefined,
             passphrase: bastionAuthType === 'key' ? bastionPassphrase.trim() || undefined : undefined,
           };
@@ -398,9 +442,11 @@ export const NewConnectionModal: React.FC = () => {
           host: host.trim(),
           port: resolvePort(port, 22),
           username: username.trim(),
+          auth_type: authType,
           password: authType === 'password' ? password.trim() : undefined,
-          key_path: authType === 'key' ? keyPath.trim() || undefined : undefined,
+          key_path: effectiveKeyPath(),
           passphrase: authType === 'key' ? passphrase.trim() || undefined : undefined,
+          agent_socket: effectiveAgentSocket(),
           use_sudo: useSudo,
           bastion: bastionParam,
           proxy: proxyParam,
@@ -467,7 +513,9 @@ export const NewConnectionModal: React.FC = () => {
         ? secretKey.trim()
         : authType === 'key'
         ? passphrase.trim()
-        : password.trim();
+        : authType === 'password'
+        ? password.trim()
+        : '';
 
     let bastionConfig = undefined;
     let bastionSecretToSave: string | undefined = undefined;
@@ -487,9 +535,14 @@ export const NewConnectionModal: React.FC = () => {
             port: resolvePort(bastionPort, 22),
             username: bastionUsername.trim(),
             authType: bastionAuthType,
-            keyPath: bastionAuthType === 'key' ? bastionKeyPath.trim() || undefined : undefined,
+            keyPath: effectiveBastionKeyPath(),
           };
-          bastionSecretToSave = bastionAuthType === 'password' ? bastionPassword.trim() : bastionPassphrase.trim();
+          bastionSecretToSave =
+            bastionAuthType === 'password'
+              ? bastionPassword.trim()
+              : bastionAuthType === 'key'
+              ? bastionPassphrase.trim()
+              : '';
         }
       } else {
         bastionSecretToSave = '';
@@ -529,6 +582,7 @@ export const NewConnectionModal: React.FC = () => {
               username: undefined,
               authType: undefined,
               keyPath: undefined,
+              agentSocket: undefined,
               bastion: undefined,
               proxy: undefined,
             }
@@ -537,7 +591,8 @@ export const NewConnectionModal: React.FC = () => {
               port: resolvePort(port, 22),
               username: username.trim(),
               authType,
-              keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+              keyPath: effectiveKeyPath(),
+              agentSocket: effectiveAgentSocket(),
               useSudo,
               bastion: bastionConfig,
               proxy: proxyConfig,
@@ -547,7 +602,9 @@ export const NewConnectionModal: React.FC = () => {
               accessKey: undefined,
             }),
       };
-      await updateProfile(updatedProfile, secret || undefined, bastionSecretToSave, proxySecretToSave);
+      // Switching to agent auth drops any password/passphrase left in the OS keyring.
+      const secretUpdate = type === 'sftp' && authType === 'agent' ? '' : secret || undefined;
+      await updateProfile(updatedProfile, secretUpdate, bastionSecretToSave, proxySecretToSave);
     } else {
       const newProfile: ConnectionProfile = {
         id: `prof-${Date.now()}`,
@@ -567,7 +624,8 @@ export const NewConnectionModal: React.FC = () => {
               port: resolvePort(port, 22),
               username: username.trim(),
               authType,
-              keyPath: authType === 'key' ? keyPath.trim() || undefined : undefined,
+              keyPath: effectiveKeyPath(),
+              agentSocket: effectiveAgentSocket(),
               useSudo,
               bastion: bastionConfig,
               proxy: proxyConfig,
@@ -818,7 +876,7 @@ export const NewConnectionModal: React.FC = () => {
                 <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                   Méthode d'authentification
                 </label>
-                <div className="grid grid-cols-2 gap-2 p-1 bg-surface-muted/80 rounded-lg border border-border-subtle">
+                <div className="grid grid-cols-3 gap-2 p-1 bg-surface-muted/80 rounded-lg border border-border-subtle">
                   <button
                     type="button"
                     onClick={() => {
@@ -849,10 +907,90 @@ export const NewConnectionModal: React.FC = () => {
                     <Lock className="w-3.5 h-3.5" />
                     <span>Mot de passe</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthType('agent');
+                      setTestResult(null);
+                    }}
+                    className={`flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                      authType === 'agent'
+                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                    title="ssh-agent, 1Password, Secretive…"
+                  >
+                    <Fingerprint className="w-3.5 h-3.5" />
+                    <span>Agent SSH</span>
+                  </button>
                 </div>
               </div>
 
-              {authType === 'key' ? (
+              {authType === 'agent' ? (
+                <>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    Les clés restent dans l'agent (ssh-agent, 1Password, Secretive…) : Orbit ne stocke aucun secret.
+                    Détection automatique via <span className="font-mono">SSH_AUTH_SOCK</span>, puis les emplacements
+                    connus de 1Password et Secretive.
+                  </p>
+
+                  {/* Optional public key restricting the agent identity */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                      Clé à utiliser dans l'agent (optionnel)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        value={agentKeyPath}
+                        onChange={(e) => {
+                          setAgentKeyPath(e.target.value);
+                          setTestResult(null);
+                        }}
+                        placeholder="~/.ssh/id_ed25519.pub — toutes les clés de l'agent si vide"
+                        className="flex-1 bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleBrowseAgentKey}
+                        className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-xs font-medium text-zinc-200 border border-border-subtle transition-colors flex items-center gap-1.5 flex-shrink-0"
+                        title="Ouvrir le sélecteur de fichier natif"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Parcourir...</span>
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[10px] text-zinc-500">
+                      Fichier .pub ou chemin de la clé privée : sert seulement à choisir l'identité, la clé privée
+                      n'est jamais lue. Recommandé si l'agent contient beaucoup de clés (« Too many authentication
+                      failures »).
+                    </p>
+                  </div>
+
+                  {/* Optional agent socket override */}
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                      Socket de l'agent (optionnel)
+                    </label>
+                    <input
+                      type="text"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      value={agentSocket}
+                      onChange={(e) => {
+                        setAgentSocket(e.target.value);
+                        setTestResult(null);
+                      }}
+                      placeholder="Automatique"
+                      className="w-full bg-surface-muted border border-border-subtle rounded-md px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-sky-500/50 font-mono"
+                    />
+                  </div>
+                </>
+              ) : authType === 'key' ? (
                 <>
                   {/* SSH Key File Picker */}
                   <div>
@@ -1158,7 +1296,7 @@ export const NewConnectionModal: React.FC = () => {
                               </div>
 
                               <div>
-                                <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-black/20 rounded-md border border-border-subtle mb-2">
+                                <div className="grid grid-cols-3 gap-1.5 p-0.5 bg-black/20 rounded-md border border-border-subtle mb-2">
                                   <button
                                     type="button"
                                     onClick={() => setBastionAuthType('key')}
@@ -1173,9 +1311,24 @@ export const NewConnectionModal: React.FC = () => {
                                   >
                                     Mot de passe
                                   </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setBastionAuthType('agent')}
+                                    className={`py-1 rounded text-[11px] font-medium ${bastionAuthType === 'agent' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30' : 'text-zinc-400 hover:text-white'}`}
+                                  >
+                                    Agent SSH
+                                  </button>
                                 </div>
 
-                                {bastionAuthType === 'key' ? (
+                                {bastionAuthType === 'agent' ? (
+                                  <input
+                                    type="text"
+                                    value={bastionAgentKeyPath}
+                                    onChange={(e) => setBastionAgentKeyPath(e.target.value)}
+                                    placeholder="Clé à utiliser dans l'agent (.pub, optionnel)"
+                                    className="w-full bg-surface-muted border border-border-subtle rounded-md px-2.5 py-1 text-xs text-white font-mono placeholder-zinc-500 focus:outline-none focus:border-sky-500/50"
+                                  />
+                                ) : bastionAuthType === 'key' ? (
                                   <div className="space-y-2">
                                     <div className="flex gap-1.5">
                                       <input

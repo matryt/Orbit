@@ -18,6 +18,7 @@ export function sanitizeProfileForExport(profile: ConnectionProfile): Partial<Co
             username: profile.bastion.username,
             authType: profile.bastion.authType,
             keyPath: profile.bastion.keyPath,
+            agentSocket: profile.bastion.agentSocket,
           },
         }
       : { bastion: undefined }),

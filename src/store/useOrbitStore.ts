@@ -670,25 +670,31 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           secretKey: secretVal,
         });
       } else {
-        const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+        const isAgentAuth = profile.authType === 'agent';
+        const isKeyAuth = !isAgentAuth && (profile.authType === 'key' || Boolean(profile.keyPath));
 
         const connectParams: SftpConnectParams = {
           profile_id: profile.id,
           host: profile.host || '',
           port: profile.port || 22,
           username: profile.username || '',
+          auth_type: profile.authType,
+          agent_socket: profile.agentSocket,
           use_sudo: profile.useSudo,
           bastion: profile.bastion,
           proxy: profile.proxy,
         };
-        if (isKeyAuth) {
+        if (isAgentAuth) {
+          // Optional public key selecting the agent identity; no secret is involved.
+          if (profile.keyPath) connectParams.key_path = profile.keyPath;
+        } else if (isKeyAuth) {
           if (profile.keyPath) connectParams.key_path = profile.keyPath;
           if (secretVal) connectParams.passphrase = secretVal;
         } else if (secretVal) {
           connectParams.password = secretVal;
         }
 
-        if (profile.bastion?.enabled && !profile.bastion.profileId) {
+        if (profile.bastion?.enabled && !profile.bastion.profileId && profile.bastion.authType !== 'agent') {
           const bSecret = await storageApi.getSecret(`${profile.id}:bastion`);
           if (bSecret) {
             if (profile.bastion.authType === 'password') {
@@ -848,16 +854,21 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
     try {
       const secret = (await storageApi.getSecret(initiatingProfileId)) || undefined;
-      const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+      const isAgentAuth = profile.authType === 'agent';
+      const isKeyAuth = !isAgentAuth && (profile.authType === 'key' || Boolean(profile.keyPath));
 
       const elevateParams: SftpConnectParams = {
         profile_id: profile.id,
         host: profile.host || '',
         port: profile.port || 22,
         username: profile.username || '',
+        auth_type: profile.authType,
+        agent_socket: profile.agentSocket,
         use_sudo: true,
       };
-      if (isKeyAuth) {
+      if (isAgentAuth) {
+        if (profile.keyPath) elevateParams.key_path = profile.keyPath;
+      } else if (isKeyAuth) {
         if (profile.keyPath) elevateParams.key_path = profile.keyPath;
         if (secret) elevateParams.passphrase = secret;
       } else if (secret) {

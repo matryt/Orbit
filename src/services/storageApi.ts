@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, SshAuthType, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -8,9 +8,11 @@ export interface SftpConnectParams {
   host: string;
   port: number;
   username: string;
+  auth_type?: SshAuthType;
   password?: string;
   key_path?: string;
   passphrase?: string;
+  agent_socket?: string;
   use_sudo?: boolean;
   sudo_password?: string;
   bastion?: BastionConfig;
