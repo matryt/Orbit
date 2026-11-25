@@ -127,7 +127,7 @@ export const Header: React.FC = () => {
   return (
     <header
       data-tauri-drag-region
-      className="h-11 flex-shrink-0 flex items-center justify-between border-b border-border-subtle bg-surface/60 backdrop-blur-xl px-4 select-none"
+      className="relative z-30 h-11 flex-shrink-0 flex items-center justify-between border-b border-border-subtle bg-surface/60 backdrop-blur-xl px-4 select-none"
     >
       {/* Left: Breadcrumbs navigation */}
       <div
