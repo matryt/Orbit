@@ -173,4 +173,38 @@ describe('profileImport security & validation', () => {
     assert.ok(!jump.id.includes(':'));
     assert.equal(target.bastion?.profileId, jump.id);
   });
+
+  it('detects ambiguous duplicate bastion IDs and disables bastion when host is missing', () => {
+    const jsonStr = JSON.stringify([
+      {
+        id: 'dup-jump',
+        name: 'Jump 1',
+        type: 'sftp',
+        host: 'jump1.corp.com',
+      },
+      {
+        id: 'dup-jump',
+        name: 'Jump 2',
+        type: 'sftp',
+        host: 'jump2.corp.com',
+      },
+      {
+        id: 'target',
+        name: 'Target Ambiguous',
+        type: 'sftp',
+        host: 'internal.corp.com',
+        bastion: {
+          enabled: true,
+          profileId: 'dup-jump',
+        },
+      },
+    ]);
+
+    const { profiles, warnings } = parseAndValidateProfilesJson(jsonStr, []);
+    assert.equal(profiles.length, 3);
+    const target = profiles.find((p) => p.name === 'Target Ambiguous')!;
+    assert.equal(target.bastion?.profileId, undefined);
+    assert.equal(target.bastion?.enabled, false);
+    assert.ok(warnings.some((w) => w.includes('ambiguë')));
+  });
 });

@@ -232,15 +232,29 @@ export function parseAndValidateProfilesJson(
 
   const items = Array.isArray(parsed) ? parsed : [parsed];
   const validProfiles: ConnectionProfile[] = [];
-  const idMapping = new Map<string, string>();
+
+  const originalIdCounts = new Map<string, number>();
+  for (const item of items) {
+    if (item && typeof item === 'object' && typeof item.id === 'string' && item.id.trim()) {
+      const orig = item.id.trim();
+      originalIdCounts.set(orig, (originalIdCounts.get(orig) || 0) + 1);
+    }
+  }
+
+  const idMapping = new Map<string, string | null>();
 
   for (const item of items) {
     const res = sanitizeImportedProfile(item, existingIds);
     if (res) {
       warnings.push(...res.warnings);
       if (res.profile) {
-        if (res.originalId && res.originalId !== res.profile.id) {
-          idMapping.set(res.originalId, res.profile.id);
+        if (res.originalId) {
+          const count = originalIdCounts.get(res.originalId) || 1;
+          if (count > 1) {
+            idMapping.set(res.originalId, null); // Ambiguous
+          } else if (res.originalId !== res.profile.id) {
+            idMapping.set(res.originalId, res.profile.id);
+          }
         }
         validProfiles.push(res.profile);
         existingIds.add(res.profile.id);
@@ -252,7 +266,18 @@ export function parseAndValidateProfilesJson(
   for (const profile of validProfiles) {
     if (profile.bastion?.profileId) {
       if (idMapping.has(profile.bastion.profileId)) {
-        profile.bastion.profileId = idMapping.get(profile.bastion.profileId);
+        const remapped = idMapping.get(profile.bastion.profileId);
+        if (remapped) {
+          profile.bastion.profileId = remapped;
+        } else {
+          warnings.push(
+            `Référence bastion ambiguë pour '${profile.name}' : plusieurs profils importés partageaient l'identifiant '${profile.bastion.profileId}'.`
+          );
+          profile.bastion.profileId = undefined;
+          if (!profile.bastion.host || !profile.bastion.host.trim()) {
+            profile.bastion.enabled = false;
+          }
+        }
       }
       // If the referenced profileId is still not safe, strip it
       if (!isSafeProfileId(profile.bastion.profileId)) {

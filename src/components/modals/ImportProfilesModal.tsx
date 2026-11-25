@@ -182,12 +182,29 @@ export const ImportProfilesModal: React.FC = () => {
       if (rawProfilesToImport.length === 0) return;
 
       const existingIds = new Set(existingProfiles.map((p) => p.id));
-      const importedIds = new Set(rawProfilesToImport.map((p) => p.id));
+      const commitIdMapping = new Map<string, string>();
 
-      const profilesToImport = rawProfilesToImport.map((p) => {
-        if (p.bastion?.profileId && !importedIds.has(p.bastion.profileId) && !existingIds.has(p.bastion.profileId)) {
+      // Ensure that if a collision occurs with profiles persisted since preview, fresh IDs are allocated
+      const sanitizedBatch = rawProfilesToImport.map((p) => {
+        let finalId = p.id;
+        if (existingIds.has(finalId)) {
+          finalId = `prof-${Date.now()}-${Math.floor(Math.random() * 900000) + 100000}`;
+          commitIdMapping.set(p.id, finalId);
+        }
+        return { ...p, id: finalId };
+      });
+
+      const importedIds = new Set(sanitizedBatch.map((p) => p.id));
+
+      const profilesToImport = sanitizedBatch.map((p) => {
+        let bastionPid = p.bastion?.profileId;
+        if (bastionPid && commitIdMapping.has(bastionPid)) {
+          bastionPid = commitIdMapping.get(bastionPid);
+        }
+
+        if (bastionPid && !importedIds.has(bastionPid) && !existingIds.has(bastionPid)) {
           // If inline host exists, preserve inline configuration but drop the broken profileId
-          if (p.bastion.host && p.bastion.host.trim()) {
+          if (p.bastion?.host && p.bastion.host.trim()) {
             return {
               ...p,
               bastion: {
@@ -207,7 +224,9 @@ export const ImportProfilesModal: React.FC = () => {
             };
           }
         }
-        return p;
+        return bastionPid !== p.bastion?.profileId
+          ? { ...p, bastion: p.bastion ? { ...p.bastion, profileId: bastionPid } : undefined }
+          : p;
       });
 
       const count = await importProfiles(profilesToImport);

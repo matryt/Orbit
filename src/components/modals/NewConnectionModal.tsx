@@ -216,6 +216,7 @@ export const NewConnectionModal: React.FC = () => {
       setBastionAuthType('key');
       setBastionKeyPath('~/.ssh/id_ed25519');
       setBastionAgentKeyPath('');
+      setBastionAgentSocket('');
       setBastionPassphrase('');
       setBastionPassword('');
       setProxyEnabled(false);
@@ -611,7 +612,15 @@ export const NewConnectionModal: React.FC = () => {
       };
       // Switching to agent auth drops any password/passphrase left in the OS keyring.
       const secretUpdate = type === 'sftp' && authType === 'agent' ? '' : secret || undefined;
-      await updateProfile(updatedProfile, secretUpdate, bastionSecretToSave, proxySecretToSave);
+      try {
+        await updateProfile(updatedProfile, secretUpdate, bastionSecretToSave, proxySecretToSave);
+        handleClose();
+      } catch (err: any) {
+        setTestResult({
+          type: 'error',
+          message: `Échec de l'enregistrement : ${err?.message || err}`,
+        });
+      }
     } else {
       const newProfile: ConnectionProfile = {
         id: `prof-${Date.now()}`,
@@ -638,10 +647,16 @@ export const NewConnectionModal: React.FC = () => {
               proxy: proxyConfig,
             }),
       };
-      await addProfile(newProfile, secret || undefined, bastionSecretToSave, proxySecretToSave);
+      try {
+        await addProfile(newProfile, secret || undefined, bastionSecretToSave, proxySecretToSave);
+        handleClose();
+      } catch (err: any) {
+        setTestResult({
+          type: 'error',
+          message: `Échec de l'enregistrement : ${err?.message || err}`,
+        });
+      }
     }
-
-    handleClose();
   };
 
   return (
