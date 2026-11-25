@@ -726,6 +726,7 @@ impl SftpProvider {
         agent_socket: Option<&str>,
         wanted: Option<&russh::keys::PublicKey>,
         target_label: &str,
+        limit_keys: bool,
         logs: &mut Vec<String>,
     ) -> AgentAuthOutcome {
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
@@ -767,7 +768,8 @@ impl SftpProvider {
         let total_keys = connected.keys.len();
         // When discovering identities automatically without an explicit key filter, bound
         // attempts to 4 so the server's MaxAuthTries budget (default 6) leaves room for default key files.
-        let (keys_to_try, key_count) = if wanted.is_none() && total_keys > 4 {
+        // Explicit agent auth does not truncate keys.
+        let (keys_to_try, key_count) = if limit_keys && wanted.is_none() && total_keys > 4 {
             logs.push(format!(
                 "[{}] [{target_label}] {total_keys} clés dans l'agent : limitation à 4 tentatives pour préserver le budget MaxAuthTries",
                 now()
@@ -905,6 +907,7 @@ impl SftpProvider {
                 req.agent_socket,
                 wanted.as_ref(),
                 target_label,
+                false,
                 logs,
             )
             .await;
@@ -979,6 +982,7 @@ impl SftpProvider {
                             req.agent_socket,
                             Some(&wanted),
                             target_label,
+                            false,
                             logs,
                         )
                         .await
@@ -1075,8 +1079,16 @@ impl SftpProvider {
             }
         } else {
             // Same order as OpenSSH: agent identities first, then the default key files.
-            if Self::try_agent_auth(handle, username, req.agent_socket, None, target_label, logs)
-                .await
+            if Self::try_agent_auth(
+                handle,
+                username,
+                req.agent_socket,
+                None,
+                target_label,
+                true,
+                logs,
+            )
+            .await
                 == AgentAuthOutcome::Accepted
             {
                 return Ok(());

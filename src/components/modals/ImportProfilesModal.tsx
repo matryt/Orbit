@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useOrbitStore } from '../../store/useOrbitStore';
 import { storageApi } from '../../services/storageApi';
 import {
@@ -37,6 +37,9 @@ export const ImportProfilesModal: React.FC = () => {
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(null);
 
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sshLoadSeqRef = useRef<number>(0);
+
   // Automatically load ~/.ssh/config when the modal opens on the SSH tab
   useEffect(() => {
     if (isImportModalOpen && activeTab === 'ssh' && detectedSshProfiles.length === 0 && !sshError) {
@@ -44,14 +47,33 @@ export const ImportProfilesModal: React.FC = () => {
     }
   }, [isImportModalOpen, activeTab]);
 
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current) {
+        clearTimeout(closeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleClose = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setImportSuccessMessage(null);
+    setImportModalOpen(false);
+  };
+
   if (!isImportModalOpen) return null;
 
   const loadSshConfig = async (path: string) => {
+    const currentSeq = ++sshLoadSeqRef.current;
     setIsLoadingSsh(true);
     setSshError(null);
     setSshWarnings([]);
     try {
       const res = await storageApi.readSshConfig(path === '~/.ssh/config' ? undefined : path);
+      if (sshLoadSeqRef.current !== currentSeq) return;
       setDetectedSshProfiles(res.profiles);
       setSshWarnings(res.warnings);
       // Select all detected profiles by default
@@ -60,11 +82,14 @@ export const ImportProfilesModal: React.FC = () => {
         setSshError('Aucun profil hôte valide trouvé dans ce fichier de configuration.');
       }
     } catch (err: any) {
+      if (sshLoadSeqRef.current !== currentSeq) return;
       setDetectedSshProfiles([]);
       setSelectedProfileIds(new Set());
       setSshError(err.message || 'Erreur lors de la lecture du fichier .ssh/config');
     } finally {
-      setIsLoadingSsh(false);
+      if (sshLoadSeqRef.current === currentSeq) {
+        setIsLoadingSsh(false);
+      }
     }
   };
 
@@ -93,10 +118,18 @@ export const ImportProfilesModal: React.FC = () => {
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
       if (selected && typeof selected === 'string') {
-        const content = await (window as any).__TAURI__?.fs?.readTextFile(selected);
-        if (content) {
-          setJsonInput(content);
-          handleJsonChange(content);
+        try {
+          const content = await (window as any).__TAURI__?.fs?.readTextFile(selected);
+          if (content !== undefined && content !== null) {
+            handleJsonChange(content);
+          } else {
+            handleJsonChange('');
+            setJsonError('Le fichier sélectionné est vide.');
+          }
+        } catch (readErr: any) {
+          setJsonInput('');
+          setParsedJsonProfiles([]);
+          setJsonError(`Erreur lors de la lecture du fichier : ${readErr?.message || 'Fichier illisible'}`);
         }
       }
     } catch (err) {
@@ -153,22 +186,35 @@ export const ImportProfilesModal: React.FC = () => {
 
       const profilesToImport = rawProfilesToImport.map((p) => {
         if (p.bastion?.profileId && !importedIds.has(p.bastion.profileId) && !existingIds.has(p.bastion.profileId)) {
-          return {
-            ...p,
-            bastion: {
-              ...p.bastion,
-              profileId: undefined,
-            },
-          };
+          // If inline host exists, preserve inline configuration but drop the broken profileId
+          if (p.bastion.host && p.bastion.host.trim()) {
+            return {
+              ...p,
+              bastion: {
+                ...p.bastion,
+                profileId: undefined,
+              },
+            };
+          } else {
+            // No inline host available: disable the bastion to prevent invalid state
+            return {
+              ...p,
+              bastion: {
+                ...p.bastion,
+                enabled: false,
+                profileId: undefined,
+              },
+            };
+          }
         }
         return p;
       });
 
       const count = await importProfiles(profilesToImport);
       setImportSuccessMessage(`${count} profil(s) importé(s) avec succès !`);
-      setTimeout(() => {
-        setImportModalOpen(false);
-        setImportSuccessMessage(null);
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = setTimeout(() => {
+        handleClose();
       }, 1200);
     } catch (err: any) {
       alert(`Erreur d'importation : ${err.message || 'Erreur inconnue'}`);
@@ -187,7 +233,7 @@ export const ImportProfilesModal: React.FC = () => {
             <h2 className="text-sm font-semibold text-white">Importer des Profils</h2>
           </div>
           <button
-            onClick={() => setImportModalOpen(false)}
+            onClick={handleClose}
             className="p-1.5 rounded-md hover:bg-white/10 text-zinc-400 hover:text-white transition-colors"
           >
             <X className="w-4 h-4" />
@@ -430,7 +476,7 @@ export const ImportProfilesModal: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setImportModalOpen(false)}
+              onClick={handleClose}
               className="px-3 py-1.5 rounded-md text-xs font-medium text-zinc-300 hover:text-white hover:bg-white/5 transition-colors"
             >
               Fermer

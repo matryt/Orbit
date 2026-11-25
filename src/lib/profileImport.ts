@@ -257,6 +257,9 @@ export function parseAndValidateProfilesJson(
       // If the referenced profileId is still not safe, strip it
       if (!isSafeProfileId(profile.bastion.profileId)) {
         profile.bastion.profileId = undefined;
+        if (!profile.bastion.host || !profile.bastion.host.trim()) {
+          profile.bastion.enabled = false;
+        }
       }
     }
   }

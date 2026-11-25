@@ -22,7 +22,7 @@ struct DirectiveSet {
     hostname: Option<String>,
     user: Option<String>,
     port: Option<u16>,
-    identity_file: Option<String>,
+    identity_files: Vec<String>,
     proxy_jump: Option<String>,
     identity_agent: Option<String>,
 }
@@ -47,7 +47,7 @@ impl DirectiveSet {
                 }
             }
             "identityfile" => {
-                self.identity_file.get_or_insert(val);
+                self.identity_files.push(val);
             }
             "proxyjump" => {
                 self.proxy_jump.get_or_insert(val);
@@ -290,6 +290,7 @@ pub fn parse_ssh_config(
 
     for alias in concrete_aliases {
         let mut merged = DirectiveSet::default();
+        let mut all_identity_files: Vec<String> = Vec::new();
 
         for sec in &sections {
             let applies = match &sec.context {
@@ -308,9 +309,7 @@ pub fn parse_ssh_config(
                 if merged.port.is_none() {
                     merged.port = sec.directives.port;
                 }
-                if merged.identity_file.is_none() {
-                    merged.identity_file = sec.directives.identity_file.clone();
-                }
+                all_identity_files.extend(sec.directives.identity_files.clone());
                 if merged.proxy_jump.is_none() {
                     merged.proxy_jump = sec.directives.proxy_jump.clone();
                 }
@@ -333,8 +332,24 @@ pub fn parse_ssh_config(
         let user_val = merged.user.or_else(|| local_user.clone());
         let port_val = merged.port.unwrap_or(22);
 
-        let key_path = merged.identity_file.map(|p| {
-            agent::expand_home(&p, home_dir)
+        let (primary_key, dropped_keys) = if !all_identity_files.is_empty() {
+            let first = all_identity_files[0].clone();
+            let rest = all_identity_files[1..].to_vec();
+            (Some(first), rest)
+        } else {
+            (None, Vec::new())
+        };
+
+        if !dropped_keys.is_empty() {
+            warnings.push(format!(
+                "Hôte '{}' : plusieurs directives IdentityFile trouvées. Orbit conserve '{}' et ignore les clés supplémentaires.",
+                alias,
+                primary_key.as_deref().unwrap_or("")
+            ));
+        }
+
+        let key_path = primary_key.as_deref().map(|p| {
+            agent::expand_home(p, home_dir)
                 .to_string_lossy()
                 .into_owned()
         });
@@ -347,12 +362,21 @@ pub fn parse_ssh_config(
 
         let agent_socket = if is_none_agent {
             Some("none".to_string())
+        } else if let Some(raw_agent) = merged.identity_agent {
+            let trimmed = raw_agent.trim();
+            if trimmed.eq_ignore_ascii_case("SSH_AUTH_SOCK") {
+                std::env::var("SSH_AUTH_SOCK").ok()
+            } else if let Some(env_var) = trimmed.strip_prefix('$') {
+                std::env::var(env_var).ok()
+            } else {
+                Some(
+                    agent::expand_home(trimmed, home_dir)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
         } else {
-            merged.identity_agent.map(|a| {
-                agent::expand_home(&a, home_dir)
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            None
         };
 
         let is_pub = key_path
@@ -478,7 +502,7 @@ pub fn parse_ssh_config(
                             profile_id: None,
                             host: Some(jump_host),
                             port: Some(jump_port.unwrap_or(22)),
-                            username: jump_user,
+                            username: jump_user.or_else(|| local_user.clone()),
                             auth_type: Some("key".to_string()),
                             key_path: None,
                             agent_socket: None,
@@ -635,7 +659,7 @@ Host app
     fn test_parse_ssh_config_wildcard_scoping() {
         let config = r#"
 Host prod-*
-    User deploy
+    User deploy_unique_isolated_user
 
 Host dev
     HostName 10.0.0.1
@@ -643,8 +667,49 @@ Host dev
         let res = parse_ssh_config(config, &[], None);
         assert_eq!(res.profiles.len(), 1);
         assert_eq!(res.profiles[0].name, "dev");
-        // dev should not inherit deploy from prod-*
-        assert_ne!(res.profiles[0].username.as_deref(), Some("deploy"));
+        // dev should not inherit deploy_unique_isolated_user from prod-*
+        assert_ne!(
+            res.profiles[0].username.as_deref(),
+            Some("deploy_unique_isolated_user")
+        );
+    }
+
+    #[test]
+    fn test_parse_ssh_config_identity_file_warning_multiple() {
+        let config = r#"
+Host server-multi-key
+    HostName 10.0.0.1
+    IdentityFile ~/.ssh/id_ed25519
+    IdentityFile ~/.ssh/id_rsa
+"#;
+        let res = parse_ssh_config(config, &[], None);
+        assert_eq!(res.profiles.len(), 1);
+        assert!(
+            res.profiles[0]
+                .key_path
+                .as_deref()
+                .unwrap()
+                .ends_with("id_ed25519")
+        );
+        assert!(res.warnings.iter().any(|w| w.contains("IdentityFile")));
+    }
+
+    #[test]
+    fn test_parse_ssh_config_identity_agent_env() {
+        unsafe {
+            std::env::set_var("SSH_AUTH_SOCK", "/tmp/mock-agent.sock");
+        }
+        let config = r#"
+Host server-env-agent
+    HostName 10.0.0.1
+    IdentityAgent SSH_AUTH_SOCK
+"#;
+        let res = parse_ssh_config(config, &[], None);
+        assert_eq!(res.profiles.len(), 1);
+        assert_eq!(
+            res.profiles[0].agent_socket.as_deref(),
+            Some("/tmp/mock-agent.sock")
+        );
     }
 
     #[test]
