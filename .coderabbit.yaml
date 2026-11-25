@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+reviews:
+  profile: "chill"
+  auto_review:
+    enabled: true
+    base_branches:
+      - "main"
+      - "develop"
+  instructions: |
+    Orbit is a local single-user desktop SFTP/S3 file manager built with Tauri.
+
+    Threat model and review guidelines:
+    - Do NOT flag remote path traversal, user-supplied host/port/command inputs,
+      or standard SSH/SFTP/S3 client operations as security vulnerabilities:
+      the authenticated user already holds full credentials for the remote target.
+    - Do NOT require distributed locking, conditional writes (e.g. S3 If-Match),
+      or atomic multi-step transactions on remote files: Orbit operates with standard
+      desktop client semantics (similar to FileZilla, Cyberduck, or Transmit).
+    - Enforce the internal sudo privilege boundary: if a session is not elevated
+      (non-sudo), background operations or local edits must NEVER execute with root
+      privileges or bypass Orbit's sudo prompt guards.
+    - Focus security feedback strictly on client-side safety:
+      1. Preventing local filesystem traversal (e.g. malicious remote filenames escaping into local paths).
+      2. Preventing local arbitrary command execution (ensuring downloaded files are opened with safe text editors, never executed).
+      3. Preserving private local cache permissions (0700/0600) and preventing symlink attacks on the host OS.

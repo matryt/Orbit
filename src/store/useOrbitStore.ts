@@ -1,7 +1,9 @@
 import { create } from 'zustand';
-import { ConnectionProfile, FileEntry, NavigationError, SudoCapability, TransferGroup, TransferItem, UpdateCheckResult } from '../types';
+import { ask } from '@tauri-apps/plugin-dialog';
+import { ConnectionProfile, FileEntry, LocalEditAction, LocalEditInfo, NavigationError, SudoCapability, TransferGroup, TransferItem, UpdateCheckResult } from '../types';
 import { MOCK_REMOTE_FILES } from '../data/mockData';
-import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, SftpConnectParams } from '../services/storageApi';
+import { storageApi, BackendTransferProgress, isCancelledError, isPermissionDeniedError, isTauri, SftpConnectParams } from '../services/storageApi';
+import { closeSessionsWarning, removeLocalEdit, shouldRefreshAfterSync, upsertLocalEdit } from '../lib/localEdits';
 import {
   SnoozeDuration,
   UpdateSnooze,
@@ -167,6 +169,20 @@ interface OrbitState {
   transferConflict: TransferConflictPrompt | null;
   /** Answers the current conflict prompt; `null` cancels the whole batch. */
   resolveTransferConflict: (decision: ConflictDecision | null) => void;
+
+  // Local edits: remote files opened in a local editor, uploaded back on each save
+  localEdits: LocalEditInfo[];
+  /** Conflicts postponed with "Plus tard"; a new conflict event for the file shows it again. */
+  dismissedLocalEditConflicts: string[];
+  loadLocalEdits: () => Promise<void>;
+  openLocalEdit: (remotePath: string) => Promise<void>;
+  resolveLocalEdit: (id: string, action: LocalEditAction) => Promise<void>;
+  closeLocalEdit: (id: string) => Promise<void>;
+  dismissLocalEditConflict: (id: string) => void;
+  applyLocalEditStatus: (info: LocalEditInfo) => void;
+  applyLocalEditClosed: (id: string) => void;
+  /** Asks before ending the local edits of a profile (all profiles when omitted). */
+  confirmCloseLocalEdits: (profileId?: string) => Promise<boolean>;
 
   // Dual-Pane Pointer Drag and Drop State
   activeDrag: ActiveDragState | null;
@@ -1364,6 +1380,94 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   dismissedUpdateVersion: null,
   isInstallingUpdate: false,
   setInstallingUpdate: (installing) => set({ isInstallingUpdate: installing }),
+
+  localEdits: [],
+  dismissedLocalEditConflicts: [],
+
+  loadLocalEdits: async () => {
+    try {
+      set({ localEdits: await storageApi.localEditList() });
+    } catch (err) {
+      console.error('Failed to load local edits:', err);
+    }
+  },
+
+  openLocalEdit: async (remotePath: string) => {
+    const { activeProfileId } = get();
+    if (!activeProfileId) return;
+    try {
+      const info = await storageApi.localEditOpen(activeProfileId, remotePath);
+      get().applyLocalEditStatus(info);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+      set({ connectionError: `Édition locale : ${msg}` });
+    }
+  },
+
+  resolveLocalEdit: async (id: string, action: LocalEditAction) => {
+    set((state) => ({
+      dismissedLocalEditConflicts: state.dismissedLocalEditConflicts.filter((d) => d !== id),
+    }));
+    try {
+      await storageApi.localEditResolve(id, action);
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+      set({ connectionError: `Édition locale : ${msg}` });
+    }
+  },
+
+  closeLocalEdit: async (id: string) => {
+    try {
+      await storageApi.localEditClose(id);
+    } catch (err) {
+      console.error('Failed to close local edit:', err);
+    }
+    get().applyLocalEditClosed(id);
+  },
+
+  dismissLocalEditConflict: (id: string) => {
+    set((state) => ({
+      dismissedLocalEditConflicts: state.dismissedLocalEditConflicts.includes(id)
+        ? state.dismissedLocalEditConflicts
+        : [...state.dismissedLocalEditConflicts, id],
+    }));
+  },
+
+  applyLocalEditStatus: (info: LocalEditInfo) => {
+    const { localEdits, activeProfileId, currentPath } = get();
+    const previous = localEdits.find((e) => e.id === info.id);
+    set((state) => ({
+      localEdits: upsertLocalEdit(state.localEdits, info),
+      // A new conflict (e.g. another save while in conflict) prompts again.
+      dismissedLocalEditConflicts:
+        info.status === 'conflict' && previous?.status !== 'conflict'
+          ? state.dismissedLocalEditConflicts.filter((d) => d !== info.id)
+          : state.dismissedLocalEditConflicts,
+    }));
+    if (shouldRefreshAfterSync(previous, info, activeProfileId, currentPath)) {
+      void get().refreshRemote();
+    }
+  },
+
+  applyLocalEditClosed: (id: string) => {
+    set((state) => ({
+      localEdits: removeLocalEdit(state.localEdits, id),
+      dismissedLocalEditConflicts: state.dismissedLocalEditConflicts.filter((d) => d !== id),
+    }));
+  },
+
+  confirmCloseLocalEdits: async (profileId?: string) => {
+    const edits = get().localEdits.filter((e) => profileId === undefined || e.profile_id === profileId);
+    const warning = closeSessionsWarning(edits);
+    if (!warning) return true;
+    if (!isTauri()) return window.confirm(warning);
+    return await ask(warning, {
+      title: 'Édition locale en cours',
+      kind: 'warning',
+      okLabel: 'Continuer',
+      cancelLabel: 'Annuler',
+    });
+  },
 
   checkForUpdates: async (notifyIfUpToDate = false) => {
     // 1. Prevent duplicate in-flight checks, and keep the install progress on screen

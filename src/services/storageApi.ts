@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -481,6 +481,30 @@ export const storageApi = {
       };
     }
     return await invoke<SystemIdentities>('local_list_identities');
+  },
+
+  /** Downloads a remote file, opens it in a local text editor and uploads it back on each save. */
+  async localEditOpen(profileId: string, remotePath: string): Promise<LocalEditInfo> {
+    if (!isTauri()) {
+      throw new Error("L'édition locale n'est disponible que dans l'application.");
+    }
+    return await invoke<LocalEditInfo>('local_edit_open', { profileId, remotePath });
+  },
+
+  async localEditList(): Promise<LocalEditInfo[]> {
+    if (!isTauri()) return [];
+    return await invoke<LocalEditInfo[]>('local_edit_list');
+  },
+
+  async localEditResolve(id: string, action: LocalEditAction): Promise<void> {
+    if (!isTauri()) return;
+    await invoke('local_edit_resolve', { id, action });
+  },
+
+  /** Stops syncing the file and deletes its local copy. */
+  async localEditClose(id: string): Promise<void> {
+    if (!isTauri()) return;
+    await invoke('local_edit_close', { id });
   },
 
   async saveSecret(profileId: string, secret: string): Promise<void> {

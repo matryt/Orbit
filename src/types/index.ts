@@ -56,6 +56,23 @@ export interface FileEntry {
   etag?: string;
 }
 
+/** State of a remote file being edited with a local editor (see `local_edit.rs`). */
+export type LocalEditStatus = 'synced' | 'uploading' | 'conflict' | 'error';
+
+/** User decision for a local edit in conflict or in error. */
+export type LocalEditAction = 'overwrite' | 'reload' | 'retry';
+
+export interface LocalEditInfo {
+  id: string;
+  profile_id: string;
+  remote_path: string;
+  file_name: string;
+  status: LocalEditStatus;
+  message: string | null;
+  /** RFC 3339 timestamp of the last successful upload. */
+  last_synced_at: string | null;
+}
+
 export interface TransferItem {
   id: string;
   /** Profile the transfer was started on (frozen when enqueued). */
