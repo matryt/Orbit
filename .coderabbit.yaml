@@ -2,6 +2,11 @@
 language: "en-US"
 reviews:
   profile: "chill"
+  auto_review:
+    enabled: true
+    base_branches:
+      - "main"
+      - "develop"
   instructions: |
     Orbit is a local single-user desktop SFTP/S3 file manager built with Tauri.
 
