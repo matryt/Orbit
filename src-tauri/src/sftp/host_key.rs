@@ -7,6 +7,42 @@ use crate::models::{HostKeyDecision, HostKeyPromptRequest};
 
 static PROMPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Longest host name accepted (RFC 1035 limit for a fully qualified domain name).
+const MAX_HOST_LEN: usize = 253;
+
+/// Checks that `host` is a plain host name or IP address before it is used to connect and,
+/// above all, written into `~/.ssh/known_hosts`.
+///
+/// The host ends up verbatim in a known_hosts line: a line break would forge an extra entry
+/// (e.g. `* ssh-ed25519 <attacker key>`, trusted for every host), and whitespace, `,`, `#`,
+/// `*`, `?`, `!`, `[`, `]`, `@` or `|` would change how the pattern field is parsed.
+/// IPv6 addresses are written without brackets (`2001:db8::1`), as elsewhere in Orbit.
+pub fn validate_ssh_host(host: &str) -> Result<(), crate::error::AppError> {
+    if host.is_empty() {
+        return Err(crate::error::AppError::Config(
+            "L'adresse de l'hôte est vide.".into(),
+        ));
+    }
+    if host.len() > MAX_HOST_LEN {
+        return Err(crate::error::AppError::Config(format!(
+            "L'adresse de l'hôte dépasse {MAX_HOST_LEN} caractères."
+        )));
+    }
+    if let Some(c) = host.chars().find(|&c| {
+        c.is_control()
+            || c.is_whitespace()
+            || matches!(
+                c,
+                ',' | '#' | '*' | '?' | '!' | '[' | ']' | '@' | '|' | '/' | '\\'
+            )
+    }) {
+        return Err(crate::error::AppError::Config(format!(
+            "Adresse d'hôte invalide : caractère interdit {c:?}."
+        )));
+    }
+    Ok(())
+}
+
 /// Met à jour une chaîne représentant le contenu de known_hosts en retirant l'ancienne entrée
 /// pour `host:port` (y compris les lignes hachées ou ciblées par `changed_line`), tout en préservant :
 /// 1. Les autres algorithmes pour cet hôte (ex: ssh-rsa préservé si on remplace ssh-ed25519)
@@ -19,6 +55,9 @@ pub fn update_known_hosts_content(
     new_pubkey: &russh::keys::ssh_key::PublicKey,
     changed_line: Option<usize>,
 ) -> std::io::Result<String> {
+    validate_ssh_host(host)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+
     let target_plain = host;
     let target_port = format!("[{host}]:{port}");
     let expected_key_type = new_pubkey.algorithm().to_string();
@@ -527,5 +566,128 @@ server.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD_ED old_ed_key
             "server.example.com {}",
             new_pk.to_openssh().unwrap()
         )));
+    }
+
+    fn sample_key() -> russh::keys::ssh_key::PublicKey {
+        russh::keys::ssh_key::PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGt12r2S6bBv3VpXq5L6yUe0Vv4D3KjWv3m6v2y5Qz12",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_validate_ssh_host_accepts_regular_hosts() {
+        for host in [
+            "example.com",
+            "srv-01.internal",
+            "my_host",
+            "192.168.1.10",
+            "2001:db8::1",
+            "fe80::1%en0",
+            "xn--caf-dma.fr",
+            "café.fr",
+        ] {
+            assert!(
+                validate_ssh_host(host).is_ok(),
+                "{host:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_ssh_host_rejects_known_hosts_injection() {
+        let too_long = "a".repeat(MAX_HOST_LEN + 1);
+        for host in [
+            "",
+            "evil.com\n* ssh-ed25519 AAAA",
+            "evil.com\r\nx",
+            "host\0",
+            "two words",
+            "tab\there",
+            "a,b",
+            "#comment",
+            "*",
+            "host?",
+            "!negated",
+            "[::1]",
+            "@cert-authority",
+            "|1|hashed",
+            "user@host",
+            "a/b",
+            "a\\b",
+            "nbsp\u{a0}host",
+            too_long.as_str(),
+        ] {
+            assert!(
+                validate_ssh_host(host).is_err(),
+                "{host:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_known_hosts_rejects_injected_host() {
+        let res = update_known_hosts_content(
+            "",
+            "evil.com\n* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFORGED",
+            22,
+            &sample_key(),
+            None,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_update_known_hosts_survives_corrupted_content() {
+        let long_line = format!("host.example {}\n", "A".repeat(100_000));
+        let corrupted = format!(
+            "truncated\n\
+             host.example ssh-ed25519\n\
+             host.example ssh-ed25519 !!!not-base64!!!\n\
+             host.example unknown-algo AAAA\n\
+             \t   \n\
+             # comment\r\n\
+             @revoked\n\
+             |1|bm90LWEtc2FsdA==|bm90LWEtaGFzaA== ssh-ed25519 AAAA\n\
+             {long_line}\
+             \u{feff}bom.example ssh-rsa AAAA\n"
+        );
+        let updated =
+            update_known_hosts_content(&corrupted, "new.example", 22, &sample_key(), None).unwrap();
+        // Unrelated lines are kept as they were.
+        for kept in [
+            "truncated",
+            "host.example ssh-ed25519 !!!not-base64!!!",
+            "host.example unknown-algo AAAA",
+            "@revoked",
+            "|1|bm90LWEtc2FsdA==|bm90LWEtaGFzaA== ssh-ed25519 AAAA",
+        ] {
+            assert!(updated.contains(kept), "{kept:?} should be preserved");
+        }
+        assert!(updated.contains(&"A".repeat(100_000)));
+        // Exactly one new entry, on its own line.
+        let new_entry = format!("new.example {}", sample_key().to_openssh().unwrap());
+        assert_eq!(updated.lines().filter(|l| *l == new_entry).count(), 1);
+        assert!(updated.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_update_known_hosts_out_of_range_changed_line() {
+        let content = "a.example ssh-ed25519 AAAA\n";
+        let updated =
+            update_known_hosts_content(content, "b.example", 22, &sample_key(), Some(9999))
+                .unwrap();
+        assert!(updated.contains("a.example ssh-ed25519 AAAA"));
+    }
+
+    #[test]
+    fn test_update_known_hosts_non_default_port_uses_brackets() {
+        let content = "[srv.example]:2222 ssh-ed25519 OLD\nsrv.example ssh-ed25519 PORT22\n";
+        let key = sample_key();
+        let updated = update_known_hosts_content(content, "srv.example", 2222, &key, None).unwrap();
+        // The port 22 entry is a different target and must stay.
+        assert!(updated.contains("srv.example ssh-ed25519 PORT22"));
+        assert!(!updated.contains("OLD"));
+        assert!(updated.contains(&format!("[srv.example]:2222 {}", key.to_openssh().unwrap())));
     }
 }

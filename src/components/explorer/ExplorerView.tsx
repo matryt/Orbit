@@ -37,6 +37,7 @@ import {
   sortFiles,
   getDefaultDirection,
 } from '../../lib/fileSort';
+import { localDownloadTarget } from '../../lib/transferGroups';
 
 interface ExplorerViewProps {
   files: FileEntry[];
@@ -395,7 +396,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
       await enqueueFolder({ direction: 'download', sourcePath: file.path, destDir: storeLocalPath, name: file.name });
       return;
     }
-    const target = `${storeLocalPath.replace(/[/\\]+$/, '')}/${file.name}`;
+    const target = localDownloadTarget(storeLocalPath, file.name);
     await downloadFile(file.path, target, file.name);
   };
 
@@ -617,7 +618,7 @@ export const ExplorerView: React.FC<ExplorerViewProps> = ({
                 : `${targetBaseDir.replace(/\/+$/, '')}/${item.name}`;
             requests.push({ direction: 'upload', localPath: item.path, remotePath: remoteTarget, fileName: item.name });
           } else if (!isLocal && targetPane === 'local') {
-            const localTarget = `${targetBaseDir.replace(/[/\\]+$/, '')}/${item.name}`;
+            const localTarget = localDownloadTarget(targetBaseDir, item.name);
             requests.push({ direction: 'download', localPath: localTarget, remotePath: item.path, fileName: item.name });
           }
         }

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { collapsedIndicatorLabel, findFileDirCollisions, folderDestination, isGroupSettled, needsConflictPlanning, listingToRefresh, shouldRefreshAfterSettle, planFolderTransfer, summarizeGroup } from './transferGroups.ts';
+import { collapsedIndicatorLabel, findFileDirCollisions, folderDestination, isGroupSettled, localDownloadTarget, needsConflictPlanning, listingToRefresh, shouldRefreshAfterSettle, planFolderTransfer, summarizeGroup, withSafeLocalDestination } from './transferGroups.ts';
 import type { TransferItem, WalkEntry } from '../types/index.ts';
 
 const child = (status: TransferItem['status'], bytes = 0, total = 100, speed = 0) => ({
@@ -266,5 +266,74 @@ describe('findFileDirCollisions', () => {
     ];
     assert.deepEqual(findFileDirCollisions('upload', exact), ['a/b']);
     assert.deepEqual(findFileDirCollisions('download', exact), ['a/b']);
+  });
+});
+
+describe('Windows-invalid names on download', () => {
+  const entries: WalkEntry[] = [
+    { relative_path: 'logs:old', is_dir: true, size: 0 },
+    { relative_path: 'logs:old/12:00.log', is_dir: false, size: 5 },
+    { relative_path: 'CON', is_dir: false, size: 1 },
+  ];
+
+  it('rewrites every segment below a Windows destination', () => {
+    const plan = planFolderTransfer('download', '/srv/app', 'C:\\dl\\app', entries, 'g');
+    assert.deepEqual(plan.dirsToCreate, ['C:\\dl\\app', 'C:\\dl\\app\\logs_old']);
+    assert.deepEqual(
+      plan.requests.map((r) => [r.localPath, r.remotePath]),
+      [
+        ['C:\\dl\\app\\logs_old\\12_00.log', '/srv/app/logs:old/12:00.log'],
+        ['C:\\dl\\app\\_CON', '/srv/app/CON'],
+      ]
+    );
+  });
+
+  it('keeps names unchanged below a POSIX destination', () => {
+    const plan = planFolderTransfer('download', '/srv/app', '/Users/me/app', entries, 'g');
+    assert.equal(plan.requests[0].localPath, '/Users/me/app/logs:old/12:00.log');
+  });
+
+  it('never rewrites local upload sources', () => {
+    const plan = planFolderTransfer('upload', 'C:\\src', '/srv/dst', [{ relative_path: 'a.b', is_dir: false, size: 1 }], 'g');
+    assert.equal(plan.requests[0].localPath, 'C:\\src\\a.b');
+  });
+
+  it('sanitizes the folder name itself', () => {
+    assert.equal(folderDestination('download', 'C:\\dl', 'backup:2026'), 'C:\\dl\\backup_2026');
+    assert.equal(folderDestination('download', '/Users/me', 'backup:2026'), '/Users/me/backup:2026');
+    assert.equal(folderDestination('upload', '/srv', 'backup:2026'), '/srv/backup:2026');
+  });
+
+  it('sanitizes single-file download destinations', () => {
+    const req = { direction: 'download' as const, localPath: 'C:\\dl\\12:00.log', remotePath: '/var/log/12:00.log', fileName: '12:00.log' };
+    assert.equal(withSafeLocalDestination(req).localPath, 'C:\\dl\\12_00.log');
+    assert.equal(withSafeLocalDestination({ ...req, localPath: 'C:\\12:00.log' }).localPath, 'C:\\12_00.log');
+    const posix = { ...req, localPath: '/Users/me/12:00.log' };
+    assert.equal(withSafeLocalDestination(posix), posix);
+    const upload = { ...req, direction: 'upload' as const };
+    assert.equal(withSafeLocalDestination(upload), upload);
+  });
+
+  it('keeps a backslash of a remote name inside the single-file download name', () => {
+    assert.equal(localDownloadTarget('C:\\dl', 'a\\b.txt'), 'C:\\dl\\a_b.txt');
+    assert.equal(localDownloadTarget('C:\\dl\\', '..\\evil.txt'), 'C:\\dl\\.._evil.txt');
+    assert.equal(localDownloadTarget('C:\\', '12:00.log'), 'C:\\12_00.log');
+    // POSIX destinations keep `\\` as a literal character.
+    assert.equal(localDownloadTarget('/Users/me', 'a\\b.txt'), '/Users/me/a\\b.txt');
+    assert.equal(localDownloadTarget('/Users/me/', '12:00.log'), '/Users/me/12:00.log');
+    // The rewritten request goes through `withSafeLocalDestination` unchanged.
+    const req = { direction: 'download' as const, localPath: localDownloadTarget('C:\\dl', 'a\\b.txt'), remotePath: '/srv/a\\b.txt', fileName: 'a\\b.txt' };
+    assert.equal(withSafeLocalDestination(req).localPath, 'C:\\dl\\a_b.txt');
+  });
+
+  it('detects a file and a folder that collide once converted for Windows', () => {
+    const entries: WalkEntry[] = [
+      { relative_path: 'a:b', is_dir: true, size: 0 },
+      { relative_path: 'a:b/x', is_dir: false, size: 1 },
+      { relative_path: 'a_b', is_dir: false, size: 1 },
+    ];
+    assert.deepEqual(findFileDirCollisions('download', entries, 'C:\\dl\\app'), ['a_b']);
+    assert.deepEqual(findFileDirCollisions('download', entries, '/Users/me/app'), []);
+    assert.deepEqual(findFileDirCollisions('upload', entries, '/srv/app'), []);
   });
 });

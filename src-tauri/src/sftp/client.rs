@@ -20,7 +20,7 @@ use crate::models::{
 };
 use crate::provider::StorageProvider;
 use crate::sftp::host_key::{
-    HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic,
+    HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic, validate_ssh_host,
 };
 use crate::transfer::{
     TransferHandle, create_partial_download_file, finalize_partial_download, partial_download_path,
@@ -395,13 +395,39 @@ pub struct SftpProvider {
     pub sudo_capability: SudoCapability,
 }
 
+/// Maximum number of bytes read from the sudo probe channel. The answer is a single short
+/// line; anything beyond this comes from shell start-up noise or a hostile server and is dropped.
+const SUDO_PROBE_MAX_OUTPUT: usize = 4096;
+
+/// Returns the capability announced by the first line that is exactly a probe token.
+///
+/// Only whole lines count: a token embedded in other text (a banner, an `echo` in a shell
+/// start-up file, ANSI escape sequences) is ignored.
+fn find_sudo_probe_token(text: &str) -> Option<SudoCapability> {
+    text.lines().find_map(|line| match line {
+        "ORBIT_SUDO:NOPASSWD" => Some(SudoCapability::Passwordless),
+        "ORBIT_SUDO:PASSWD" => Some(SudoCapability::PasswordRequired),
+        "ORBIT_SUDO:NONE" => Some(SudoCapability::None),
+        _ => None,
+    })
+}
+
 pub fn parse_sudo_probe_output(text: &str) -> SudoCapability {
-    if text.contains("ORBIT_SUDO:NOPASSWD") {
-        SudoCapability::Passwordless
-    } else if text.contains("ORBIT_SUDO:PASSWD") {
-        SudoCapability::PasswordRequired
-    } else {
-        SudoCapability::None
+    find_sudo_probe_token(text).unwrap_or(SudoCapability::None)
+}
+
+/// Appends a chunk of probe output, keeping at most `SUDO_PROBE_MAX_OUTPUT` bytes.
+/// Returns `true` once reading can stop: a complete token line was received or the cap is hit.
+fn push_sudo_probe_output(output: &mut Vec<u8>, data: &[u8]) -> bool {
+    let room = SUDO_PROBE_MAX_OUTPUT.saturating_sub(output.len());
+    output.extend_from_slice(&data[..data.len().min(room)]);
+    if output.len() >= SUDO_PROBE_MAX_OUTPUT {
+        return true;
+    }
+    // Only complete lines are considered, so a token split across two chunks is not misread.
+    match output.iter().rposition(|&b| b == b'\n') {
+        Some(end) => find_sudo_probe_token(&String::from_utf8_lossy(&output[..=end])).is_some(),
+        None => false,
     }
 }
 
@@ -494,11 +520,8 @@ impl SftpProvider {
         let read_fut = async {
             while let Some(msg) = channel.wait().await {
                 if let russh::ChannelMsg::Data { ref data } = msg {
-                    output.extend_from_slice(data);
-                    if let Some(pos) = output.windows(11).position(|w| w == b"ORBIT_SUDO:") {
-                        if output[pos..].contains(&b'\n') {
-                            break;
-                        }
+                    if push_sudo_probe_output(&mut output, data) {
+                        break;
                     }
                 }
             }
@@ -1006,6 +1029,20 @@ impl SftpProvider {
 
         let proxy_opt = config.proxy.clone().filter(|p| p.enabled);
         let bastion_opt = config.bastion.clone().filter(|b| b.enabled);
+
+        // Both hosts are written into ~/.ssh/known_hosts once their key is accepted.
+        let bastion_host = bastion_opt.as_ref().and_then(|b| b.host.as_deref());
+        for (label, host) in [
+            ("Serveur Cible", Some(config.host.as_str())),
+            ("Bastion SSH", bastion_host.filter(|h| !h.trim().is_empty())),
+        ] {
+            if let Some(host) = host {
+                if let Err(err) = validate_ssh_host(host) {
+                    logs.push(format!("[{}] ❌ [{label}] {err}", now()));
+                    return Err((err, logs));
+                }
+            }
+        }
 
         // Premier point d'atterrissage réseau (Bastion si activé, sinon Cible finale)
         let (initial_host, initial_port, initial_label) = if let Some(ref bastion) = bastion_opt {
@@ -2604,6 +2641,91 @@ docker:x:999:ubuntu,mathieu
         );
         assert_eq!(
             parse_sudo_probe_output("sudo: a password is required"),
+            SudoCapability::None
+        );
+        assert_eq!(
+            parse_sudo_probe_output("ORBIT_SUDO:PASSWD\r\n"),
+            SudoCapability::PasswordRequired
+        );
+    }
+
+    #[test]
+    fn test_parse_sudo_probe_ignores_embedded_tokens() {
+        // Banners or shell start-up output mentioning a token must not be mistaken for it.
+        for text in [
+            "MOTD: ORBIT_SUDO:NOPASSWD is disabled\n",
+            "echo \"ORBIT_SUDO:NOPASSWD\"\n",
+            " ORBIT_SUDO:NOPASSWD\n",
+            "ORBIT_SUDO:NOPASSWD trailing\n",
+            "\x1b[2J\x1b[31mORBIT_SUDO:NOPASSWD\x1b[0m\n",
+            "ORBIT_SUDO:NOPASSWD\0\n",
+            "orbit_sudo:nopasswd\n",
+        ] {
+            assert_eq!(
+                parse_sudo_probe_output(text),
+                SudoCapability::None,
+                "{text:?} should not be detected"
+            );
+        }
+        // The real answer still wins when it comes after noise.
+        assert_eq!(
+            parse_sudo_probe_output("\x1b[2Jwelcome ORBIT_SUDO:NOPASSWD\nORBIT_SUDO:PASSWD\n"),
+            SudoCapability::PasswordRequired
+        );
+    }
+
+    #[test]
+    fn test_sudo_probe_output_is_bounded() {
+        let mut output = Vec::new();
+        let chunk = vec![b'A'; 64 * 1024];
+        let mut chunks = 0;
+        while !push_sudo_probe_output(&mut output, &chunk) {
+            chunks += 1;
+            assert!(chunks < 10, "a flood must stop the read loop");
+        }
+        assert_eq!(output.len(), SUDO_PROBE_MAX_OUTPUT);
+        assert_eq!(
+            parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
+            SudoCapability::None
+        );
+    }
+
+    #[test]
+    fn test_sudo_probe_output_stops_on_complete_token_line() {
+        let mut output = Vec::new();
+        assert!(!push_sudo_probe_output(&mut output, b"noise\n"));
+        // Split across chunks: not complete until the newline arrives.
+        assert!(!push_sudo_probe_output(&mut output, b"ORBIT_SUDO:PASS"));
+        assert!(!push_sudo_probe_output(&mut output, b"WD"));
+        assert!(push_sudo_probe_output(&mut output, b"\n"));
+        assert_eq!(
+            parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
+            SudoCapability::PasswordRequired
+        );
+    }
+
+    #[test]
+    fn test_sudo_probe_output_stops_on_crlf_token_line() {
+        let mut output = Vec::new();
+        assert!(push_sudo_probe_output(
+            &mut output,
+            b"ORBIT_SUDO:NOPASSWD\r\n"
+        ));
+        assert_eq!(
+            parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
+            SudoCapability::Passwordless
+        );
+    }
+
+    #[test]
+    fn test_sudo_probe_token_after_cap_is_ignored() {
+        let mut output = Vec::new();
+        let noise = vec![b'x'; SUDO_PROBE_MAX_OUTPUT];
+        assert!(push_sudo_probe_output(&mut output, &noise));
+        push_sudo_probe_output(&mut output, b"\nORBIT_SUDO:NOPASSWD\n");
+        assert_eq!(output.len(), SUDO_PROBE_MAX_OUTPUT);
+        assert_eq!(
+            parse_sudo_probe_output(&String::from_utf8_lossy(&output)),
             SudoCapability::None
         );
     }

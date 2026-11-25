@@ -18,6 +18,8 @@ import { buildNewFolderPath, buildRenamePath, canOpenTerminal, resolveTerminalTa
 import {
   findFileDirCollisions,
   folderDestination,
+  localDestinationName,
+  withSafeLocalDestination,
   isGroupSettled,
   listingToRefresh,
   needsConflictPlanning,
@@ -1174,7 +1176,10 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       const profile = get().profiles.find((p) => p.id === profileId);
       if (!profile || profile.status !== 'connected') return;
 
-      const planned = checkConflicts ? await planBatch(set, get, requests, profileId) : requests;
+      // Names valid on the server can be invalid locally (`12:00.log` on Windows): rewrite them
+      // before planning so the conflict check sees the real destination.
+      const safeRequests = requests.map(withSafeLocalDestination);
+      const planned = checkConflicts ? await planBatch(set, get, safeRequests, profileId) : safeRequests;
       if (!planned) return;
 
       if (get().profiles.find((p) => p.id === profileId)?.status !== 'connected') return;
@@ -1228,7 +1233,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
             : await storageApi.walkRemote(profileId, sourcePath);
         if (isCancelled()) return;
 
-        const collisions = findFileDirCollisions(direction, entries);
+        const collisions = findFileDirCollisions(direction, entries, destRoot);
         if (collisions.length > 0) {
           const others = collisions.length - 1;
           setPhase(
@@ -1241,7 +1246,8 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
         const plan = planFolderTransfer(direction, sourcePath, destRoot, entries, groupId);
 
-        const destExists = (await loadTakenNames(get, direction, destDir, profileId)).has(name);
+        const destName = remoteDest ? name : localDestinationName(direction, destDir, name);
+        const destExists = (await loadTakenNames(get, direction, destDir, profileId)).has(destName);
         const planned = needsConflictPlanning(direction, destExists)
           ? await planBatch(set, get, plan.requests, profileId, { id: groupId, isCancelled })
           : plan.requests;
