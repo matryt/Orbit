@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { BastionConfig, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, UpdateCheckResult, WalkEntry } from '../types';
+import { BastionConfig, SshAuthType, ConnectionProfile, ConnectionTestResult, FileEntry, HostKeyDecision, HostKeyPromptRequest, LocalEditAction, LocalEditInfo, ProxyConfig, S3ConnectParams, SftpSessionInfo, SshConfigImportResult, UpdateCheckResult, WalkEntry } from '../types';
 import { APP_VERSION } from '../version';
 import { MOCK_REMOTE_FILES, MOCK_PREVIEWS } from '../data/mockData';
 
@@ -8,9 +8,11 @@ export interface SftpConnectParams {
   host: string;
   port: number;
   username: string;
+  auth_type?: SshAuthType;
   password?: string;
   key_path?: string;
   passphrase?: string;
+  agent_socket?: string;
   use_sudo?: boolean;
   sudo_password?: string;
   bastion?: BastionConfig;
@@ -544,6 +546,28 @@ export const storageApi = {
       return;
     }
     await invoke('save_profile', { profile });
+  },
+
+  async importProfiles(profiles: ConnectionProfile[]): Promise<number> {
+    if (!isTauri()) {
+      const stored = localStorage.getItem('orbit_connections');
+      const list: ConnectionProfile[] = stored ? JSON.parse(stored) : [];
+      for (const p of profiles) {
+        const idx = list.findIndex((item) => item.id === p.id);
+        if (idx >= 0) list[idx] = p;
+        else list.push(p);
+      }
+      localStorage.setItem('orbit_connections', JSON.stringify(list));
+      return profiles.length;
+    }
+    return await invoke<number>('import_profiles', { profiles });
+  },
+
+  async readSshConfig(path?: string): Promise<SshConfigImportResult> {
+    if (!isTauri()) {
+      return { profiles: [], warnings: [] };
+    }
+    return await invoke<SshConfigImportResult>('read_ssh_config', { path: path || null });
   },
 
   async deleteProfile(profileId: string): Promise<void> {

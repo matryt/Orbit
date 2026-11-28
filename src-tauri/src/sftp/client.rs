@@ -19,6 +19,7 @@ use crate::models::{
     SudoCapability,
 };
 use crate::provider::StorageProvider;
+use crate::sftp::agent;
 use crate::sftp::host_key::{
     HostKeyPromptHandler, HostKeyPromptManager, replace_known_hosts_entry_atomic, validate_ssh_host,
 };
@@ -30,6 +31,29 @@ use crate::transfer::{
 /// afin d'éviter les conditions de concurrence (race conditions) entre connexions concurrentes.
 /// Chunk size used for SFTP reads/writes during transfers.
 const TRANSFER_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Credentials and method selection for one SSH authentication (target or bastion).
+pub(crate) struct AuthRequest<'a> {
+    pub username: &'a str,
+    /// "password" | "key" | "agent"; `None` infers the method from the other fields.
+    pub auth_type: Option<&'a str>,
+    pub key_path: Option<&'a str>,
+    pub passphrase: Option<&'a str>,
+    pub password: Option<&'a str>,
+    pub agent_socket: Option<&'a str>,
+}
+
+/// Result of an authentication attempt through an SSH agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentAuthOutcome {
+    Accepted,
+    /// No identity could be offered: nothing was sent to the server.
+    Unavailable(agent::AgentLookupFailure),
+    /// The agent declined every signature (e.g. Touch ID / 1Password prompt dismissed).
+    SigningFailed,
+    /// The server refused every offered key.
+    Rejected,
+}
 
 static KNOWN_HOSTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -691,32 +715,219 @@ impl SftpProvider {
         Ok((handle, key_status))
     }
 
-    async fn authenticate_session(
+    /// Tries every usable identity of the first suitable SSH agent.
+    ///
+    /// Every step is logged; failures are not fatal so the caller can fall back to another
+    /// method. The outcome tells apart client-side failures (nothing sent to the server) from a
+    /// genuine rejection by the server.
+    async fn try_agent_auth(
         handle: &mut Handle<SshHandler>,
         username: &str,
-        key_path: Option<&str>,
-        passphrase: Option<&str>,
-        password: Option<&str>,
+        agent_socket: Option<&str>,
+        wanted: Option<&russh::keys::PublicKey>,
+        target_label: &str,
+        limit_keys: bool,
+        logs: &mut Vec<String>,
+    ) -> AgentAuthOutcome {
+        let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
+        logs.push(format!(
+            "[{}] [{target_label}] Méthode : Agent SSH{}",
+            now(),
+            if wanted.is_some() {
+                " (identité ciblée par la clé publique)"
+            } else {
+                ""
+            }
+        ));
+
+        let candidates = agent::default_candidates(agent_socket);
+        let mut probe_logs = Vec::new();
+        let connected = agent::connect_agent(&candidates, wanted, &mut probe_logs).await;
+        for line in probe_logs {
+            logs.push(format!("[{}] [{target_label}] {line}", now()));
+        }
+        let mut connected = match connected {
+            Ok(c) => c,
+            Err(failure) => {
+                logs.push(format!(
+                    "[{}] [{target_label}] {} (aucune clé envoyée au serveur).",
+                    now(),
+                    failure.message()
+                ));
+                logs.push(format!(
+                    "[{}] [{target_label}] ℹ️ Conseil : {}",
+                    now(),
+                    failure.hint()
+                ));
+                return AgentAuthOutcome::Unavailable(failure);
+            }
+        };
+
+        // Resolved lazily: waiting for the server's EXT_INFO costs up to a second.
+        let mut rsa_hashes: Option<Vec<Option<russh::keys::HashAlg>>> = None;
+        let total_keys = connected.keys.len();
+        // When discovering identities automatically without an explicit key filter, bound
+        // attempts to 4 so the server's MaxAuthTries budget (default 6) leaves room for default key files.
+        // Explicit agent auth does not truncate keys.
+        let (keys_to_try, key_count) = if limit_keys && wanted.is_none() && total_keys > 4 {
+            logs.push(format!(
+                "[{}] [{target_label}] {total_keys} clés dans l'agent : limitation à 4 tentatives pour préserver le budget MaxAuthTries",
+                now()
+            ));
+            (connected.keys.into_iter().take(4).collect::<Vec<_>>(), 4)
+        } else {
+            (connected.keys.clone(), total_keys)
+        };
+        let mut server_rejected = false;
+
+        for key in keys_to_try {
+            let fingerprint = key.fingerprint(russh::keys::HashAlg::Sha256);
+            let label = if key.comment().is_empty() {
+                fingerprint.to_string()
+            } else {
+                format!("{} ({fingerprint})", key.comment())
+            };
+
+            let hashes = if key.algorithm().is_rsa() {
+                if rsa_hashes.is_none() {
+                    rsa_hashes = Some(match handle.best_supported_rsa_hash().await {
+                        Ok(Some(h)) => vec![h],
+                        _ => vec![
+                            Some(russh::keys::HashAlg::Sha512),
+                            Some(russh::keys::HashAlg::Sha256),
+                            None,
+                        ],
+                    });
+                }
+                rsa_hashes.clone().unwrap_or_default()
+            } else {
+                vec![None]
+            };
+
+            logs.push(format!(
+                "[{}] [{target_label}] Essai de la clé de l'agent {label}...",
+                now()
+            ));
+            for hash_alg in hashes {
+                match handle
+                    .authenticate_publickey_with(
+                        username,
+                        key.clone(),
+                        hash_alg,
+                        &mut connected.client,
+                    )
+                    .await
+                {
+                    Ok(res) if res.success() => {
+                        logs.push(format!(
+                            "[{}] [{target_label}] Authentification par agent acceptée ({label}) !",
+                            now()
+                        ));
+                        return AgentAuthOutcome::Accepted;
+                    }
+                    Ok(_) => server_rejected = true,
+                    Err(e) => {
+                        // Typically the user dismissed the 1Password / Touch ID prompt.
+                        logs.push(format!(
+                            "[{}] [{target_label}] L'agent n'a pas signé avec {label} : {e}",
+                            now()
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !server_rejected {
+            logs.push(format!(
+                "[{}] [{target_label}] L'agent {} n'a signé avec aucune clé (autorisation refusée ou annulée ?).",
+                now(),
+                connected.candidate.describe()
+            ));
+            return AgentAuthOutcome::SigningFailed;
+        }
+
+        logs.push(format!(
+            "[{}] [{target_label}] Le serveur a refusé les {key_count} clé(s) de l'agent {}.",
+            now(),
+            connected.candidate.describe()
+        ));
+        logs.push(format!(
+            "[{}] [{target_label}] ℹ️ Conseil : {}",
+            now(),
+            if wanted.is_none() && key_count > 3 {
+                "indiquez la clé à utiliser dans le profil pour éviter « Too many authentication failures »."
+            } else {
+                "vérifiez que la clé publique figure dans ~/.ssh/authorized_keys de cet utilisateur sur le serveur."
+            }
+        ));
+        AgentAuthOutcome::Rejected
+    }
+
+    async fn authenticate_session(
+        handle: &mut Handle<SshHandler>,
+        req: &AuthRequest<'_>,
         target_label: &str,
         logs: &mut Vec<String>,
     ) -> Result<(), (AppError, Vec<String>)> {
         let now = || Utc::now().format("%H:%M:%S%.3f").to_string();
+        let username = req.username;
+        let passphrase = req.passphrase;
         logs.push(format!(
             "[{}] [{target_label}] Début de l'authentification pour l'utilisateur '{username}'...",
             now()
         ));
 
-        if let Some(kp) = key_path.filter(|p| !p.trim().is_empty()) {
-            let expanded_path = if kp.starts_with('~') {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(kp.trim_start_matches("~/"))
-                } else {
-                    PathBuf::from(kp)
-                }
-            } else {
-                PathBuf::from(kp)
-            };
+        let key_path = req
+            .key_path
+            .filter(|p| !p.trim().is_empty())
+            .map(|kp| agent::expand_home(kp.trim(), dirs::home_dir().as_deref()));
+        let wants_agent = req.auth_type == Some("agent")
+            || key_path.as_deref().is_some_and(agent::is_public_key_path);
 
+        if wants_agent {
+            let wanted = match key_path.clone() {
+                Some(p) => tokio::task::spawn_blocking(move || agent::load_wanted_public_key(&p))
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            if let (Some(p), None) = (key_path.as_ref(), wanted.as_ref()) {
+                let err_msg = format!(
+                    "Impossible de lire la clé publique {} pour cibler l'identité de l'agent",
+                    p.display()
+                );
+                logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+                return Err((AppError::Auth(err_msg), logs.clone()));
+            }
+            let outcome = Self::try_agent_auth(
+                handle,
+                username,
+                req.agent_socket,
+                wanted.as_ref(),
+                target_label,
+                false,
+                logs,
+            )
+            .await;
+            let err_msg = match outcome {
+                AgentAuthOutcome::Accepted => return Ok(()),
+                AgentAuthOutcome::Unavailable(failure) => {
+                    format!("{} ({target_label})", failure.message())
+                }
+                AgentAuthOutcome::SigningFailed => {
+                    format!("L'agent SSH n'a pas signé la demande ({target_label})")
+                }
+                AgentAuthOutcome::Rejected => {
+                    format!("Le serveur ({target_label}) a refusé les clés de l'agent SSH")
+                }
+            };
+            logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+            return Err((AppError::Auth(err_msg), logs.clone()));
+        }
+
+        if let Some(expanded_path) = key_path {
             logs.push(format!(
                 "[{}] [{target_label}] Méthode : Clé privée SSH ({})",
                 now(),
@@ -751,6 +962,36 @@ impl SftpProvider {
                         expanded_path.display()
                     );
                     logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
+
+                    // An encrypted key without passphrase is often loaded in an agent already:
+                    // retry through the agent, restricted to this exact key.
+                    let p = expanded_path.clone();
+                    let wanted =
+                        tokio::task::spawn_blocking(move || agent::load_wanted_public_key(&p))
+                            .await
+                            .ok()
+                            .flatten();
+                    if let Some(wanted) = wanted {
+                        logs.push(format!(
+                            "[{}] [{target_label}] Nouvel essai via l'agent SSH avec la même clé...",
+                            now()
+                        ));
+                        if Self::try_agent_auth(
+                            handle,
+                            username,
+                            req.agent_socket,
+                            Some(&wanted),
+                            target_label,
+                            false,
+                            logs,
+                        )
+                        .await
+                            == AgentAuthOutcome::Accepted
+                        {
+                            return Ok(());
+                        }
+                    }
+
                     logs.push(format!(
                         "[{}] [{target_label}] ℹ️ Conseil: Vérifiez le chemin ou saisissez la passphrase si la clé est chiffrée.",
                         now()
@@ -811,7 +1052,7 @@ impl SftpProvider {
                 logs.push(format!("[{}] [{target_label}] ❌ {err_msg}", now()));
                 return Err((AppError::Auth(err_msg), logs.clone()));
             }
-        } else if let Some(pwd) = password.filter(|p| !p.is_empty()) {
+        } else if let Some(pwd) = req.password.filter(|p| !p.is_empty()) {
             logs.push(format!(
                 "[{}] [{target_label}] Méthode : Mot de passe",
                 now()
@@ -837,6 +1078,22 @@ impl SftpProvider {
                 }
             }
         } else {
+            // Same order as OpenSSH: agent identities first, then the default key files.
+            if Self::try_agent_auth(
+                handle,
+                username,
+                req.agent_socket,
+                None,
+                target_label,
+                true,
+                logs,
+            )
+            .await
+                == AgentAuthOutcome::Accepted
+            {
+                return Ok(());
+            }
+
             logs.push(format!(
                 "[{}] [{target_label}] Recherche des clés SSH standard (~/.ssh/id_ed25519, ~/.ssh/id_rsa)...",
                 now()
@@ -1164,10 +1421,14 @@ impl SftpProvider {
 
             Self::authenticate_session(
                 &mut b_handle,
-                b_username,
-                bastion.key_path.as_deref(),
-                bastion.passphrase.as_deref(),
-                bastion.password.as_deref(),
+                &AuthRequest {
+                    username: b_username,
+                    auth_type: bastion.auth_type.as_deref(),
+                    key_path: bastion.key_path.as_deref(),
+                    passphrase: bastion.passphrase.as_deref(),
+                    password: bastion.password.as_deref(),
+                    agent_socket: bastion.agent_socket.as_deref(),
+                },
                 "Bastion",
                 &mut logs,
             )
@@ -1250,10 +1511,14 @@ impl SftpProvider {
 
         Self::authenticate_session(
             &mut handle,
-            &config.username,
-            config.key_path.as_deref(),
-            config.passphrase.as_deref(),
-            config.password.as_deref(),
+            &AuthRequest {
+                username: &config.username,
+                auth_type: config.auth_type.as_deref(),
+                key_path: config.key_path.as_deref(),
+                passphrase: config.passphrase.as_deref(),
+                password: config.password.as_deref(),
+                agent_socket: config.agent_socket.as_deref(),
+            },
             "Serveur Cible",
             &mut logs,
         )

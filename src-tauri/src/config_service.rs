@@ -84,6 +84,26 @@ impl ConfigService {
         Self::save_profiles(app, &profiles)
     }
 
+    pub fn import_profiles(
+        app: &AppHandle,
+        new_profiles: Vec<ConnectionProfile>,
+    ) -> Result<usize, AppError> {
+        let _guard = CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut profiles = Self::load_profiles(app)?;
+        let count = new_profiles.len();
+        for p in new_profiles {
+            if let Some(pos) = profiles.iter().position(|existing| existing.id == p.id) {
+                profiles[pos] = p;
+            } else {
+                profiles.push(p);
+            }
+        }
+        Self::save_profiles(app, &profiles)?;
+        Ok(count)
+    }
+
     pub fn delete_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError> {
         let _guard = CONFIG_LOCK
             .lock()

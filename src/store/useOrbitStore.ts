@@ -62,6 +62,7 @@ interface OrbitState {
   loadPersistedProfiles: () => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
   addProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
+  importProfiles: (profiles: ConnectionProfile[]) => Promise<number>;
   updateProfile: (profile: ConnectionProfile, secret?: string, bastionSecret?: string, proxySecret?: string) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   connectProfile: (profileId: string, secret?: string) => Promise<void>;
@@ -195,6 +196,8 @@ interface OrbitState {
   setNewConnectionModalOpen: (open: boolean) => void;
   isExportModalOpen: boolean;
   setExportModalOpen: (open: boolean) => void;
+  isImportModalOpen: boolean;
+  setImportModalOpen: (open: boolean) => void;
   isNewFolderModalOpen: boolean;
   setNewFolderModalOpen: (open: boolean) => void;
 
@@ -495,6 +498,13 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
   },
 
   addProfile: async (profile, secret, bastionSecret, proxySecret) => {
+    try {
+      await storageApi.saveProfile(profile);
+    } catch (err) {
+      console.error('Failed to persist profile to connections.json:', err);
+      throw err;
+    }
+
     if (secret) {
       await storageApi.saveSecret(profile.id, secret);
     }
@@ -503,12 +513,6 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }
     if (proxySecret) {
       await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
-    }
-
-    try {
-      await storageApi.saveProfile(profile);
-    } catch (err) {
-      console.error('Failed to persist profile to connections.json:', err);
     }
 
     set((state) => {
@@ -528,10 +532,37 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     }
   },
 
+  importProfiles: async (newProfiles) => {
+    try {
+      await storageApi.importProfiles(newProfiles);
+    } catch (err) {
+      console.error('Failed to persist imported profiles to connections.json:', err);
+      throw err;
+    }
+    set((state) => {
+      const existingMap = new Map(state.profiles.map((p) => [p.id, p]));
+      for (const p of newProfiles) {
+        existingMap.set(p.id, p);
+      }
+      const updated = Array.from(existingMap.values());
+      return {
+        profiles: updated,
+      };
+    });
+    return newProfiles.length;
+  },
+
   editingProfile: null,
   setEditingProfile: (profile) => set({ editingProfile: profile, isNewConnectionModalOpen: profile !== null }),
 
   updateProfile: async (profile, secret, bastionSecret, proxySecret) => {
+    try {
+      await storageApi.saveProfile(profile);
+    } catch (err) {
+      console.error('Failed to update profile in connections.json:', err);
+      throw err;
+    }
+
     if (secret !== undefined) {
       if (secret === '') {
         await storageApi.deleteSecret(profile.id);
@@ -552,12 +583,6 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
       } else {
         await storageApi.saveSecret(`${profile.id}:proxy`, proxySecret);
       }
-    }
-
-    try {
-      await storageApi.saveProfile(profile);
-    } catch (err) {
-      console.error('Failed to update profile in connections.json:', err);
     }
 
     set((state) => ({
@@ -655,7 +680,7 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
     try {
       let secretVal = secret;
-      if (!secretVal) {
+      if (!secretVal && profile.authType !== 'agent') {
         secretVal = (await storageApi.getSecret(profileId)) || undefined;
       }
 
@@ -670,25 +695,31 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
           secretKey: secretVal,
         });
       } else {
-        const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+        const isAgentAuth = profile.authType === 'agent';
+        const isKeyAuth = !isAgentAuth && (profile.authType === 'key' || Boolean(profile.keyPath));
 
         const connectParams: SftpConnectParams = {
           profile_id: profile.id,
           host: profile.host || '',
           port: profile.port || 22,
           username: profile.username || '',
+          auth_type: profile.authType,
+          agent_socket: profile.agentSocket,
           use_sudo: profile.useSudo,
           bastion: profile.bastion,
           proxy: profile.proxy,
         };
-        if (isKeyAuth) {
+        if (isAgentAuth) {
+          // Optional public key selecting the agent identity; no secret is involved.
+          if (profile.keyPath) connectParams.key_path = profile.keyPath;
+        } else if (isKeyAuth) {
           if (profile.keyPath) connectParams.key_path = profile.keyPath;
           if (secretVal) connectParams.passphrase = secretVal;
         } else if (secretVal) {
           connectParams.password = secretVal;
         }
 
-        if (profile.bastion?.enabled && !profile.bastion.profileId) {
+        if (profile.bastion?.enabled && !profile.bastion.profileId && profile.bastion.authType !== 'agent') {
           const bSecret = await storageApi.getSecret(`${profile.id}:bastion`);
           if (bSecret) {
             if (profile.bastion.authType === 'password') {
@@ -847,21 +878,46 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
     set({ isConnecting: true, remoteNavigationError: null });
 
     try {
-      const secret = (await storageApi.getSecret(initiatingProfileId)) || undefined;
-      const isKeyAuth = profile.authType === 'key' || Boolean(profile.keyPath);
+      const secret = profile.authType === 'agent' ? undefined : ((await storageApi.getSecret(initiatingProfileId)) || undefined);
+      const isAgentAuth = profile.authType === 'agent';
+      const isKeyAuth = !isAgentAuth && (profile.authType === 'key' || Boolean(profile.keyPath));
 
       const elevateParams: SftpConnectParams = {
         profile_id: profile.id,
         host: profile.host || '',
         port: profile.port || 22,
         username: profile.username || '',
+        auth_type: profile.authType,
+        agent_socket: profile.agentSocket,
         use_sudo: true,
+        bastion: profile.bastion,
+        proxy: profile.proxy,
       };
-      if (isKeyAuth) {
+      if (isAgentAuth) {
+        if (profile.keyPath) elevateParams.key_path = profile.keyPath;
+      } else if (isKeyAuth) {
         if (profile.keyPath) elevateParams.key_path = profile.keyPath;
         if (secret) elevateParams.passphrase = secret;
       } else if (secret) {
         elevateParams.password = secret;
+      }
+
+      if (profile.bastion?.enabled && !profile.bastion.profileId && profile.bastion.authType !== 'agent') {
+        const bSecret = await storageApi.getSecret(`${profile.id}:bastion`);
+        if (bSecret) {
+          if (profile.bastion.authType === 'password') {
+            elevateParams.bastion = { ...profile.bastion, password: bSecret };
+          } else {
+            elevateParams.bastion = { ...profile.bastion, passphrase: bSecret };
+          }
+        }
+      }
+
+      if (profile.proxy?.enabled && profile.proxy.username) {
+        const pSecret = await storageApi.getSecret(`${profile.id}:proxy`);
+        if (pSecret) {
+          elevateParams.proxy = { ...profile.proxy, password: pSecret };
+        }
       }
 
       const sessionInfo = await storageApi.connectSftp(elevateParams);
@@ -1372,6 +1428,9 @@ export const useOrbitStore = create<OrbitState>((set, get) => ({
 
   isExportModalOpen: false,
   setExportModalOpen: (open) => set({ isExportModalOpen: open }),
+
+  isImportModalOpen: false,
+  setImportModalOpen: (open) => set({ isImportModalOpen: open }),
 
   isNewFolderModalOpen: false,
   setNewFolderModalOpen: (open) => set({ isNewFolderModalOpen: open }),

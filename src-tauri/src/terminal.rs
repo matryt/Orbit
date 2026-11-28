@@ -13,6 +13,20 @@ pub fn resolve_home_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Builds the `-o IdentityAgent=...` value for an agent socket or Windows named pipe.
+///
+/// OpenSSH splits `-o` values like a config line: the path is double-quoted (1Password's socket
+/// lives under "Group Containers"), backslashes and quotes are escaped, and `%` is doubled
+/// because OpenSSH expands `%` tokens in `IdentityAgent`.
+pub fn identity_agent_option(socket: &str) -> String {
+    let resolved = resolve_home_path(socket);
+    let escaped = resolved
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("IdentityAgent=\"{escaped}\"")
+}
+
 /// Échappe les apostrophes simples pour l'injection sécurisée dans une commande shell POSIX `cd '...'`.
 pub fn escape_single_quotes(path: &str) -> String {
     path.replace('\'', "'\\''")
@@ -149,6 +163,16 @@ pub fn build_ssh_args(
                 }
             }
         }
+    }
+
+    if let Some(sock) = profile
+        .agent_socket
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("-o".to_string());
+        args.push(identity_agent_option(sock));
     }
 
     if let Some(ref kp) = profile.key_path {
@@ -538,6 +562,7 @@ mod tests {
             username: user.map(String::from),
             auth_type: None,
             key_path: key_path.map(String::from),
+            agent_socket: None,
             is_favorite: false,
             use_sudo: false,
             bastion: None,
@@ -639,6 +664,7 @@ mod tests {
             username: Some("bastionuser".to_string()),
             auth_type: None,
             key_path: None,
+            agent_socket: None,
             password: None,
             passphrase: None,
         });
@@ -652,6 +678,48 @@ mod tests {
                 "-J",
                 "bastionuser@[2001:db8::1]:2200",
                 "root@target.internal"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_identity_agent_option_quoting() {
+        assert_eq!(
+            identity_agent_option("/Users/me/Library/Group Containers/x/agent.sock"),
+            "IdentityAgent=\"/Users/me/Library/Group Containers/x/agent.sock\""
+        );
+        assert_eq!(
+            identity_agent_option(r"\\.\pipe\openssh-ssh-agent"),
+            r#"IdentityAgent="\\\\.\\pipe\\openssh-ssh-agent""#
+        );
+        assert_eq!(
+            identity_agent_option("/tmp/100%/a\"b"),
+            r#"IdentityAgent="/tmp/100%%/a\"b""#
+        );
+    }
+
+    #[test]
+    fn test_build_ssh_args_with_agent_socket() {
+        let mut prof = create_dummy_profile(
+            "prof-agent",
+            "sftp",
+            Some("example.com"),
+            Some(22),
+            Some("dev"),
+            Some("/keys/id_ed25519.pub"),
+        );
+        prof.agent_socket = Some("/tmp/agent.sock".to_string());
+        let args = build_ssh_args(&prof, &[], None).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "22",
+                "-o",
+                "IdentityAgent=\"/tmp/agent.sock\"",
+                "-i",
+                "/keys/id_ed25519.pub",
+                "dev@example.com",
             ]
         );
     }
@@ -674,6 +742,7 @@ mod tests {
             username: Some("jumpuser".to_string()),
             auth_type: Some("key".to_string()),
             key_path: Some("/tmp/jump_key".to_string()),
+            agent_socket: None,
             password: None,
             passphrase: None,
         });
@@ -709,6 +778,7 @@ mod tests {
             username: Some("jumpuser".to_string()),
             auth_type: Some("key".to_string()),
             key_path: Some("/tmp/100%jump/key".to_string()),
+            agent_socket: None,
             password: None,
             passphrase: None,
         });
@@ -744,6 +814,7 @@ mod tests {
             username: None,
             auth_type: None,
             key_path: None,
+            agent_socket: None,
             password: None,
             passphrase: None,
         });
